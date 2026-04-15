@@ -1,27 +1,24 @@
 const CATEGORIES_KEY = 'budget_categories';
-const KNOWN_TS_KEY = 'budget_known_timestamps';
 
 export const store = {
   transactions: [],
   categories: [],
-  knownTimestamps: new Set(),
+  knownTimestamps: new Set(), // In-memory only — not persisted
   lastCategorized: null,
 
   loadCache() {
     try {
       const cats = localStorage.getItem(CATEGORIES_KEY);
       if (cats) this.categories = JSON.parse(cats);
-
-      const known = localStorage.getItem(KNOWN_TS_KEY);
-      if (known) this.knownTimestamps = new Set(JSON.parse(known));
     } catch (e) {
       // Corrupted cache — start fresh
     }
+    // Clear any stale knownTimestamps from older versions
+    localStorage.removeItem('budget_known_timestamps');
   },
 
   saveCache() {
     localStorage.setItem(CATEGORIES_KEY, JSON.stringify(this.categories));
-    localStorage.setItem(KNOWN_TS_KEY, JSON.stringify(Array.from(this.knownTimestamps)));
   },
 
   setCategories(list) {
@@ -31,15 +28,11 @@ export const store = {
 
   addTransactions(newTxns) {
     for (const txn of newTxns) {
-      // Avoid duplicates in current list
       if (!this.transactions.some(t => t.timestamp === txn.timestamp)) {
         this.transactions.push(txn);
       }
-      this.knownTimestamps.add(txn.timestamp);
     }
-    // Sort oldest first (yyyy-mm-dd hh:mm:ss string sort works)
     this.transactions.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    this.saveCache();
   },
 
   removeTransaction(timestamp) {

@@ -30,6 +30,12 @@ header h1 {
   font-weight: 600;
 }
 
+.version {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.6;
+}
+
 .header-actions {
   display: flex;
   gap: 8px;
