@@ -43,6 +43,16 @@ export async function categorize(timestamp, category) {
   });
 }
 
+export async function addCategory(mainCategory, subCategory) {
+  const url = getApiUrl();
+  const key = getApiKey();
+  return request(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ action: 'addCategory', apiKey: key, mainCategory, subCategory })
+  });
+}
+
 export async function uncategorize(timestamp, merchant, amount, category) {
   const url = getApiUrl();
   const key = getApiKey();

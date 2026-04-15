@@ -53,6 +53,16 @@ export const store = {
     this.transactions.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   },
 
+  addCategory(cat) {
+    this.categories.push(cat);
+    this.saveCache();
+  },
+
+  removeCategory(sub) {
+    this.categories = this.categories.filter(c => c.sub !== sub);
+    this.saveCache();
+  },
+
   setLastCategorized(data) {
     this.lastCategorized = data;
   },

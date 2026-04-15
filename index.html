@@ -44,6 +44,29 @@
           <button id="cancel-pick">Cancel</button>
         </div>
         <div id="category-buttons"></div>
+        <button id="add-cat-btn" class="add-cat-trigger">+ Add Category</button>
+      </div>
+
+      <!-- Add Category modal -->
+      <div id="add-cat-modal" hidden>
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+          <h3>Add Category</h3>
+          <label for="main-cat-select">Main Category</label>
+          <select id="main-cat-select">
+            <option value="" disabled selected>Select...</option>
+          </select>
+          <div id="new-main-group" hidden>
+            <label for="new-main-input">New Main Category</label>
+            <input type="text" id="new-main-input" placeholder="e.g. Savings">
+          </div>
+          <label for="sub-cat-input">Sub Category</label>
+          <input type="text" id="sub-cat-input" placeholder="e.g. Dining Out">
+          <div class="modal-actions">
+            <button id="cancel-add-cat" type="button">Cancel</button>
+            <button id="save-add-cat" type="button">Save</button>
+          </div>
+        </div>
       </div>
     </section>
 

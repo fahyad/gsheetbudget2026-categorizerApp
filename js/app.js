@@ -22,6 +22,14 @@ const undoBar = document.getElementById('undo-bar');
 const undoText = document.getElementById('undo-text');
 const undoBtn = document.getElementById('undo-btn');
 const errorToast = document.getElementById('error-toast');
+const addCatBtn = document.getElementById('add-cat-btn');
+const addCatModal = document.getElementById('add-cat-modal');
+const mainCatSelect = document.getElementById('main-cat-select');
+const newMainGroup = document.getElementById('new-main-group');
+const newMainInput = document.getElementById('new-main-input');
+const subCatInput = document.getElementById('sub-cat-input');
+const cancelAddCat = document.getElementById('cancel-add-cat');
+const saveAddCat = document.getElementById('save-add-cat');
 
 let selectedTimestamp = null;
 let categorizeInFlight = false;
@@ -80,6 +88,17 @@ function bindEvents() {
   });
 
   undoBtn.addEventListener('click', () => undo());
+
+  addCatBtn.addEventListener('click', () => openAddCategoryModal());
+  cancelAddCat.addEventListener('click', () => closeAddCategoryModal());
+  addCatModal.querySelector('.modal-overlay').addEventListener('click', () => closeAddCategoryModal());
+
+  mainCatSelect.addEventListener('change', () => {
+    newMainGroup.hidden = mainCatSelect.value !== '__new__';
+    if (mainCatSelect.value === '__new__') newMainInput.focus();
+  });
+
+  saveAddCat.addEventListener('click', () => saveNewCategory());
 }
 
 // ================================================================
@@ -268,6 +287,68 @@ function deselectTransaction() {
   selectedTimestamp = null;
   categoryPicker.hidden = true;
   document.querySelectorAll('.txn-item.selected').forEach(el => el.classList.remove('selected'));
+}
+
+// ================================================================
+// ADD CATEGORY
+// ================================================================
+
+function openAddCategoryModal() {
+  // Populate main category dropdown from existing categories
+  mainCatSelect.innerHTML = '<option value="" disabled selected>Select...</option>';
+  const mains = [...new Set(store.categories.map(c => c.main))];
+  for (const main of mains) {
+    const opt = document.createElement('option');
+    opt.value = main;
+    opt.textContent = main;
+    mainCatSelect.appendChild(opt);
+  }
+  const newOpt = document.createElement('option');
+  newOpt.value = '__new__';
+  newOpt.textContent = 'New...';
+  mainCatSelect.appendChild(newOpt);
+
+  newMainGroup.hidden = true;
+  newMainInput.value = '';
+  subCatInput.value = '';
+  addCatModal.hidden = false;
+}
+
+function closeAddCategoryModal() {
+  addCatModal.hidden = true;
+}
+
+async function saveNewCategory() {
+  const mainVal = mainCatSelect.value;
+  const mainCategory = mainVal === '__new__' ? newMainInput.value.trim() : mainVal;
+  const subCategory = subCatInput.value.trim();
+
+  if (!mainCategory || !subCategory) {
+    showError('Both main and sub category are required');
+    return;
+  }
+
+  // Check local duplicate
+  if (store.categories.some(c => c.sub.toLowerCase() === subCategory.toLowerCase())) {
+    showError('Category "' + subCategory + '" already exists');
+    return;
+  }
+
+  closeAddCategoryModal();
+
+  // Optimistic: add to store + re-render
+  const newCat = { main: mainCategory, sub: subCategory };
+  store.addCategory(newCat);
+  renderCategories();
+
+  try {
+    await api.addCategory(mainCategory, subCategory);
+  } catch (err) {
+    // Rollback
+    store.removeCategory(subCategory);
+    renderCategories();
+    showError('Failed to add category: ' + err.message);
+  }
 }
 
 // ================================================================
