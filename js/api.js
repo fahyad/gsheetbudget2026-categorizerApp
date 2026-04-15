@@ -1,11 +1,18 @@
 import { getApiUrl, getApiKey } from './config.js';
 
-async function request(url, options = {}) {
+function buildUrl(action, params = {}) {
+  const url = getApiUrl();
+  const key = getApiKey();
+  const query = new URLSearchParams({ action, apiKey: key, ...params });
+  return `${url}?${query.toString()}`;
+}
+
+async function request(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
   try {
-    const res = await fetch(url, { ...options, signal: controller.signal, redirect: 'follow' });
+    const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
     const data = await res.json();
     if (!data.success) {
       throw new Error(data.error || 'API request failed');
@@ -17,48 +24,25 @@ async function request(url, options = {}) {
 }
 
 export async function fetchCategories() {
-  const url = getApiUrl();
-  const key = getApiKey();
-  return request(`${url}?action=categories&apiKey=${encodeURIComponent(key)}`);
+  return request(buildUrl('categories'));
 }
 
 export async function parseAndFetch(knownTimestamps) {
-  const url = getApiUrl();
-  const key = getApiKey();
-  let endpoint = `${url}?action=parseAndFetch&apiKey=${encodeURIComponent(key)}`;
-  if (knownTimestamps && knownTimestamps.length > 0) {
-    const joined = Array.from(knownTimestamps).join(',');
-    endpoint += `&knownTimestamps=${encodeURIComponent(joined)}`;
+  const params = {};
+  if (knownTimestamps && knownTimestamps.size > 0) {
+    params.knownTimestamps = Array.from(knownTimestamps).join(',');
   }
-  return request(endpoint);
+  return request(buildUrl('parseAndFetch', params));
 }
 
 export async function categorize(timestamp, category) {
-  const url = getApiUrl();
-  const key = getApiKey();
-  return request(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ action: 'categorize', apiKey: key, timestamp, category })
-  });
+  return request(buildUrl('categorize', { timestamp, category }));
 }
 
 export async function addCategory(mainCategory, subCategory) {
-  const url = getApiUrl();
-  const key = getApiKey();
-  return request(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ action: 'addCategory', apiKey: key, mainCategory, subCategory })
-  });
+  return request(buildUrl('addCategory', { mainCategory, subCategory }));
 }
 
 export async function uncategorize(timestamp, merchant, amount, category) {
-  const url = getApiUrl();
-  const key = getApiKey();
-  return request(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ action: 'uncategorize', apiKey: key, timestamp, merchant, amount, category })
-  });
+  return request(buildUrl('uncategorize', { timestamp, merchant, amount, category }));
 }
