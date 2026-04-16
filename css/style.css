@@ -55,6 +55,15 @@ header h1 {
   background: rgba(255, 255, 255, 0.35);
 }
 
+#sync-btn.has-pending {
+  background: #e65100;
+  font-weight: 600;
+}
+
+#sync-btn:disabled {
+  opacity: 0.4;
+}
+
 /* Config form */
 #config-section {
   padding: 24px 16px;
@@ -202,6 +211,14 @@ header h1 {
 
 .cat-btn:active {
   background: #c5cae9;
+}
+
+.empty-cats-msg {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: #888;
+  padding: 16px;
+  font-size: 14px;
 }
 
 /* Add Category trigger */

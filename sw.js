@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v6';
 const CACHE_NAME = 'budget-categorizer-' + CACHE_VERSION;
 
 const APP_SHELL = [

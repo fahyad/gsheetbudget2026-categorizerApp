@@ -27,22 +27,17 @@ export async function fetchCategories() {
   return request(buildUrl('categories'));
 }
 
-export async function parseAndFetch(knownTimestamps) {
-  const params = {};
-  if (knownTimestamps && knownTimestamps.size > 0) {
-    params.knownTimestamps = Array.from(knownTimestamps).join(',');
-  }
-  return request(buildUrl('parseAndFetch', params));
+export async function parseAndFetch() {
+  return request(buildUrl('parseAndFetch'));
 }
 
-export async function categorize(timestamp, category) {
-  return request(buildUrl('categorize', { timestamp, category }));
+export async function batchCategorize(items) {
+  // items = [{timestamp, category, ...}, ...]
+  // Serialize as compact JSON in URL param
+  const compact = items.map(i => ({ ts: i.timestamp, cat: i.category }));
+  return request(buildUrl('batchCategorize', { items: JSON.stringify(compact) }));
 }
 
 export async function addCategory(mainCategory, subCategory) {
   return request(buildUrl('addCategory', { mainCategory, subCategory }));
-}
-
-export async function uncategorize(timestamp, merchant, amount, category) {
-  return request(buildUrl('uncategorize', { timestamp, merchant, amount, category }));
 }

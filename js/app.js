@@ -9,6 +9,7 @@ const configForm = document.getElementById('config-form');
 const configUrl = document.getElementById('config-url');
 const configKey = document.getElementById('config-key');
 const refreshBtn = document.getElementById('refresh-btn');
+const syncBtn = document.getElementById('sync-btn');
 const settingsBtn = document.getElementById('settings-btn');
 const transactionList = document.getElementById('transaction-list');
 const categoryPicker = document.getElementById('category-picker');
@@ -32,14 +33,13 @@ const cancelAddCat = document.getElementById('cancel-add-cat');
 const saveAddCat = document.getElementById('save-add-cat');
 
 let selectedTimestamp = null;
-let categorizeInFlight = false;
 
 // ================================================================
 // INIT
 // ================================================================
 
 async function init() {
-  store.loadCache();
+  store.loadCache(); // Also loads syncQueue from localStorage
   bindEvents();
 
   if (!config.isConfigured()) {
@@ -49,6 +49,7 @@ async function init() {
 
   showApp();
   renderCategories();
+  renderSyncButton(); // Show pending count if any from previous session
 
   // Fetch fresh categories in background
   api.fetchCategories()
@@ -56,7 +57,12 @@ async function init() {
       store.setCategories(data.categories);
       renderCategories();
     })
-    .catch(() => {}); // Silently use cached categories
+    .catch(err => {
+      console.error('Category fetch failed:', err);
+      if (store.categories.length === 0) {
+        showError('Could not load categories. Check connection and refresh.');
+      }
+    });
 
   await refresh();
 }
@@ -76,6 +82,7 @@ function bindEvents() {
 
   refreshBtn.addEventListener('click', () => refresh());
   emptyRefreshBtn.addEventListener('click', () => refresh());
+  syncBtn.addEventListener('click', () => sync());
 
   settingsBtn.addEventListener('click', () => {
     configUrl.value = config.getApiUrl() || '';
@@ -99,6 +106,13 @@ function bindEvents() {
   });
 
   saveAddCat.addEventListener('click', () => saveNewCategory());
+
+  // Warn if closing with unsent categorizations
+  window.addEventListener('beforeunload', (e) => {
+    if (store.syncQueue.length > 0) {
+      e.preventDefault();
+    }
+  });
 }
 
 // ================================================================
@@ -110,8 +124,25 @@ async function refresh() {
   deselectTransaction();
 
   try {
-    const data = await api.parseAndFetch(store.knownTimestamps);
+    // Re-fetch categories too
+    try {
+      const catData = await api.fetchCategories();
+      store.setCategories(catData.categories);
+      renderCategories();
+    } catch (e) {
+      console.error('Category refresh failed:', e);
+      if (store.categories.length === 0) {
+        showError('Could not load categories. Check connection and refresh.');
+      }
+    }
+
+    const data = await api.parseAndFetch();
     store.addTransactions(data.transactions);
+
+    // Filter out transactions already in the sync queue
+    const queuedTimestamps = store.getSyncQueueTimestamps();
+    store.transactions = store.transactions.filter(t => !queuedTimestamps.has(t.timestamp));
+
     renderTransactions();
   } catch (err) {
     showError('Failed to load transactions: ' + err.message);
@@ -121,69 +152,77 @@ async function refresh() {
 }
 
 // ================================================================
-// CATEGORIZE (optimistic)
+// CATEGORIZE (local only — no API call)
 // ================================================================
 
-async function categorize(timestamp, category) {
-  if (categorizeInFlight) return;
-
+function categorize(timestamp, category) {
   const removedTxn = store.removeTransaction(timestamp);
   if (!removedTxn) return;
 
+  store.addToSyncQueue(removedTxn, category);
   store.setLastCategorized({ ...removedTxn, category });
+
   deselectTransaction();
   renderTransactions();
   renderUndo();
-
-  categorizeInFlight = true;
-  undoBtn.disabled = true;
-
-  try {
-    await api.categorize(timestamp, category);
-    store.knownTimestamps.add(timestamp);
-    store.saveCache();
-  } catch (err) {
-    // Rollback
-    store.restoreTransaction(removedTxn);
-    store.clearLastCategorized();
-    renderTransactions();
-    renderUndo();
-    showError('Failed to categorize: ' + err.message);
-  } finally {
-    categorizeInFlight = false;
-    undoBtn.disabled = false;
-  }
+  renderSyncButton();
 }
 
 // ================================================================
-// UNDO (optimistic)
+// UNDO (local only — no API call)
 // ================================================================
 
-async function undo() {
-  if (categorizeInFlight) return;
-
+function undo() {
   const last = store.lastCategorized;
   if (!last) return;
 
-  const { timestamp, date, merchant, amount, category } = last;
-  const txn = { timestamp, date, merchant, amount };
-
-  store.restoreTransaction(txn);
+  const restored = store.removeFromSyncQueue(last.timestamp);
+  if (restored) {
+    const txn = {
+      timestamp: restored.timestamp,
+      date: restored.date,
+      merchant: restored.merchant,
+      amount: restored.amount
+    };
+    store.restoreTransaction(txn);
+  }
   store.clearLastCategorized();
+
   renderTransactions();
   renderUndo();
+  renderSyncButton();
+}
+
+// ================================================================
+// SYNC (one batch API call)
+// ================================================================
+
+async function sync() {
+  if (store.syncQueue.length === 0) return;
+
+  syncBtn.disabled = true;
+  syncBtn.textContent = 'Syncing...';
 
   try {
-    await api.uncategorize(timestamp, merchant, amount, category);
-    store.knownTimestamps.delete(timestamp);
-    store.saveCache();
-  } catch (err) {
-    // Rollback the undo
-    store.removeTransaction(timestamp);
-    store.setLastCategorized(last);
-    renderTransactions();
+    const data = await api.batchCategorize(store.syncQueue);
+    const succeeded = data.results.filter(r => r.success).map(r => r.timestamp);
+    const failed = data.results.filter(r => !r.success);
+
+    // Clear succeeded items from queue
+    store.clearSyncedItems(succeeded);
+
+    if (failed.length === 0) {
+      showError('\u2713 ' + succeeded.length + ' transactions synced');
+    } else {
+      showError(failed.length + ' failed to sync. Tap Sync to retry.');
+    }
+
+    store.clearLastCategorized();
     renderUndo();
-    showError('Failed to undo: ' + err.message);
+  } catch (err) {
+    showError('Sync failed: ' + err.message + '. Data saved locally.');
+  } finally {
+    renderSyncButton();
   }
 }
 
@@ -233,6 +272,14 @@ function renderTransactions() {
 function renderCategories() {
   categoryButtons.innerHTML = '';
 
+  if (store.categories.length === 0) {
+    const msg = document.createElement('p');
+    msg.className = 'empty-cats-msg';
+    msg.textContent = 'No categories loaded. Tap Refresh.';
+    categoryButtons.appendChild(msg);
+    return;
+  }
+
   // Group by main category
   const groups = {};
   for (const cat of store.categories) {
@@ -264,22 +311,30 @@ function renderCategories() {
 
 function renderUndo() {
   if (store.lastCategorized) {
-    undoText.textContent = `${store.lastCategorized.merchant} → ${store.lastCategorized.category}`;
+    undoText.textContent = `${store.lastCategorized.merchant} \u2192 ${store.lastCategorized.category}`;
     undoBar.hidden = false;
   } else {
     undoBar.hidden = true;
   }
 }
 
+function renderSyncButton() {
+  const count = store.syncQueue.length;
+  syncBtn.textContent = count > 0 ? `Sync (${count})` : 'Sync';
+  syncBtn.disabled = count === 0;
+  syncBtn.classList.toggle('has-pending', count > 0);
+}
+
 function selectTransaction(txn) {
   selectedTimestamp = txn.timestamp;
-  selectedMerchantEl.textContent = txn.merchant + ' · $' + Math.abs(txn.amount).toFixed(2);
+  selectedMerchantEl.textContent = txn.merchant + ' \u00b7 $' + Math.abs(txn.amount).toFixed(2);
 
   // Highlight selected
   document.querySelectorAll('.txn-item').forEach(el => {
     el.classList.toggle('selected', el.dataset.timestamp === txn.timestamp);
   });
 
+  renderCategories(); // Always re-render before showing (fixes empty categories bug)
   categoryPicker.hidden = false;
 }
 
