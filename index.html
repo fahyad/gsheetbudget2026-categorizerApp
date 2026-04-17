@@ -13,7 +13,7 @@
 </head>
 <body>
   <header>
-    <h1>Categorizer <span class="version">v0.6</span></h1>
+    <h1>Categorizer <span class="version">v0.7</span></h1>
     <div class="header-actions">
       <button id="sync-btn" disabled>Sync</button>
       <button id="refresh-btn" title="Refresh">Refresh</button>
@@ -25,12 +25,15 @@
     <!-- Config / Setup screen -->
     <section id="config-section" hidden>
       <h2>Setup</h2>
-      <p>Enter your Apps Script deployment URL and API key.</p>
+      <p>Enter your API key to connect to your budget.</p>
       <form id="config-form">
-        <label for="config-url">API URL</label>
-        <input type="url" id="config-url" placeholder="https://script.google.com/.../exec" required>
         <label for="config-key">API Key</label>
-        <input type="text" id="config-key" placeholder="Your API key" required>
+        <input type="text" id="config-key" placeholder="Your API key" required autocomplete="off">
+        <details class="advanced-config">
+          <summary>Advanced: custom API URL</summary>
+          <label for="config-url">API URL (optional override)</label>
+          <input type="url" id="config-url" placeholder="Leave blank to use default">
+        </details>
         <button type="submit">Save</button>
       </form>
     </section>

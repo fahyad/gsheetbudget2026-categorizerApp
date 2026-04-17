@@ -85,7 +85,10 @@ function bindEvents() {
   syncBtn.addEventListener('click', () => sync());
 
   settingsBtn.addEventListener('click', () => {
-    configUrl.value = config.getApiUrl() || '';
+    // Only show the URL if user has explicitly overridden it; otherwise leave
+    // blank so the form uses the hardcoded default.
+    const storedUrl = localStorage.getItem('budget_api_url') || '';
+    configUrl.value = storedUrl;
     configKey.value = config.getApiKey() || '';
     showConfig();
   });

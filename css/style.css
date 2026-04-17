@@ -107,6 +107,26 @@ header h1 {
   cursor: pointer;
 }
 
+.advanced-config {
+  margin-top: 16px;
+  font-size: 13px;
+  color: #666;
+}
+
+.advanced-config summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.advanced-config summary:hover {
+  color: #1a237e;
+}
+
+.advanced-config input {
+  margin-top: 4px;
+}
+
 /* Transaction list */
 #transaction-list {
   padding: 8px 0;
