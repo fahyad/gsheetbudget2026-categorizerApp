@@ -419,10 +419,16 @@ This catches silent write failures (protected ranges, data validation rejects, q
 - PWA stores key in localStorage after first entry
 
 ### Deployment
+
+**Initial setup (already done — for reference only):**
 1. Apps Script editor → Deploy → New deployment → Web app
 2. Execute as: Me | Who has access: Anyone
-3. Copy deployment URL → configure in PWA
-4. After code updates: create new deployment (or update existing) for web app changes to take effect
+3. Copy deployment URL → hardcoded into PWA `js/config.js` as `DEFAULT_API_URL`
+4. Copy deployment ID → hardcoded into `apps-script/deploy.sh` as `PROD_DEPLOYMENT_ID`
+
+**Ongoing updates:**
+Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
+**Never** use plain `clasp deploy` — it creates a new deployment with a new URL and breaks the PWA.
 
 ### POST Redirect Bug (all write actions failed from PWA)
 - **Issue:** Apps Script web apps respond with HTTP 302 redirect. Per HTTP spec, browsers convert POST→GET on 302, dropping the request body. All POST-based write actions (categorize, uncategorize, addCategory) silently failed.
@@ -576,13 +582,56 @@ Total: $1,948/month
 
 As of v9, Apps Script code lives in git at `apps-script/Code.js` in this repo. Local file is `.js` (clasp convention); it lands as `Code.gs` in Apps Script.
 
-### Daily loop
+### ⚠️ CRITICAL: Always update the existing deployment, never create a new one
+
+The PWA is hardcoded to call **one specific deployment URL**. If you create a new deployment via plain `clasp deploy`, you get a NEW URL, the PWA keeps calling the OLD URL, and your changes never reach the user.
+
+**The production deployment ID is:**
+```
+AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ
+```
+
+This is the deployment baked into:
+- `js/config.js` → `DEFAULT_API_URL` (the URL the PWA hits)
+- `apps-script/deploy.sh` → `PROD_DEPLOYMENT_ID` (the deployment the script updates)
+
+If you ever change one, change both — they MUST match.
+
+### Daily loop (CORRECT — updates existing deployment, same URL)
+
+**Easy mode (recommended):**
 ```bash
 cd apps-script
 # edit Code.js in your editor
-clasp push               # upload to Apps Script
-clasp deploy -d "desc"   # create a new deployment version (makes the web app use this code)
+./deploy.sh "v10 — short description"
 ```
+
+`deploy.sh` runs `clasp push` then `clasp deploy -i <PROD_DEPLOYMENT_ID> -d "..."` for you. Same URL, new version number, PWA picks up the new code on next request.
+
+**Manual mode (equivalent):**
+```bash
+cd apps-script
+clasp push
+clasp deploy -i AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ -d "v10 — description"
+```
+
+### ⛔ NEVER do this
+```bash
+clasp deploy -d "v10"          # WRONG — no -i flag means NEW deployment with NEW URL
+clasp deploy --description "v10" # WRONG — same problem, new deployment
+```
+Either of these creates a new deployment with a new URL. The PWA keeps calling the OLD URL and never sees your changes. Your code is "deployed" but doesn't reach the user. Symptom: PWA appears to have stale behavior, no errors, no Logs entries for new requests.
+
+### How to verify you used the right command
+
+After deploying, check that your deployment list still has 7 entries (not 8):
+```bash
+clasp deployments
+```
+If the count grew, you accidentally created a new deployment. To recover:
+1. Find the new deployment's ID in the list
+2. Delete it: `clasp undeploy <newDeploymentId>`
+3. Re-run the deploy with the correct `-i AKfycbw2EbHNk_...`
 
 ### Useful commands
 ```bash
@@ -591,15 +640,16 @@ clasp pull               # pull changes made via the Apps Script editor
 clasp logs               # view Cloud Logging output (console.log/warn/error)
 clasp logs --watch       # live tail
 clasp open               # open the Apps Script editor in browser
-clasp versions           # list deployment history
-clasp deployments        # list all active deployments
+clasp versions           # list version history (each ./deploy.sh adds a version to PROD_DEPLOYMENT_ID)
+clasp deployments        # list all deployments (should stay at 7 — only HEAD + 6 versions of prod)
 ```
 
-### Rollback
+### Rollback to a previous version
 ```bash
-clasp versions                                  # find the version number to revert to
-clasp deploy -i <deploymentId> -V <versionNumber> -d "rollback to vN"
+clasp versions                                  # find the version number you want
+clasp deploy -i AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ -V <versionNumber> -d "rollback to vN"
 ```
+Same `-i` (production deployment ID), but with `-V <number>` to point it at an older version. URL doesn't change.
 
 ### Setup on a new machine
 ```bash

@@ -320,14 +320,24 @@ Full audit ranked findings into critical/high/medium/low. This session addressed
 | `sw.js` | Cache v6 → v7 |
 
 ### Deployment workflow reference
+
+**ALWAYS use `./deploy.sh`** (or `clasp deploy -i AKfycbw2EbHNk_...` directly). Plain `clasp deploy` creates a NEW deployment with a NEW URL — the PWA is hardcoded to one URL, so it breaks immediately.
+
+Production deployment ID (used by both `deploy.sh` and PWA `config.js DEFAULT_API_URL`):
+`AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
+
 ```bash
 cd ~/gsheetbudget2026-categorizerApp/apps-script
-./deploy.sh "vNN — description"      # push + deploy to same URL
+./deploy.sh "vNN — description"      # ✓ correct: push + update existing deployment
 clasp logs --watch                    # live Cloud Logging tail
 clasp status                          # show changed files
 clasp pull                            # pull edits from Apps Script editor
-clasp deployments                     # list deployments
+clasp deployments                     # list deployments (should stay at 7)
 ```
+
+**⛔ NEVER:** `clasp deploy -d "..."` — no `-i` = new URL = breaks PWA.
+
+See findings.md "⚠️ CRITICAL: Always update the existing deployment" section for full details.
 
 ### Status
 - PWA v0.7 live on GitHub Pages
