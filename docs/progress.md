@@ -1,5 +1,19 @@
 # Progress Log
 
+> ## 📍 Current State (read this first)
+>
+> **Apps Script:** v9 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+>
+> **PWA:** v0.7 — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`.
+>
+> **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
+>
+> **For full orientation:** read `CLAUDE.md` (root) and `docs/task_plan.md`.
+>
+> The session entries below are CHRONOLOGICAL — older entries reference workflows that are NO LONGER USED (e.g. "user pastes Code.gs into Apps Script editor"). Treat them as history, not current procedure.
+
+---
+
 ## Session: 2026-04-12
 
 ### Phases 1–6: Complete (v1 → v6)

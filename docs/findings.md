@@ -1,5 +1,10 @@
 # Findings & Decisions
 
+> Reference document. Sections describe the system as it currently exists (v9 Apps Script + v0.7 PWA). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+>
+> For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
+> For deployment: see "⚠️ CRITICAL: Always update the existing deployment" below.
+
 ## Requirements — Budget Workbook
 - 6-tab Google Sheet: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Pending
 - 26 bi-weekly pay periods covering all of 2026
@@ -212,7 +217,7 @@ Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year
 - Search query excludes labeled emails: `-label:Budget-Processed`
 - Timestamp in Pending tab serves as secondary dedup key for PWA
 
-## Transaction Categorizer Architecture (v8 — Batch Sync)
+## Transaction Categorizer Architecture (v9 — Batch Sync + Hardening)
 
 ```
 ┌─────────────────────────┐

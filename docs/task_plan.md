@@ -1,109 +1,139 @@
 # Task Plan: 2026 Personal Budget + Transaction Categorizer
 
 ## Goal
-1. Build a complete Google Sheets personal budget workbook with named ranges, formulas, Apps Script, and a slicer.
-2. Build a transaction categorizer system: email parser (Apps Script) + mobile PWA (GitHub Pages) for categorizing Scotiabank infoalert transactions on phone.
+1. Google Sheets personal budget workbook with named ranges, formulas, Apps Script automation, and a slicer.
+2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
-## Current Phase
-v7.3 + PWA deployed with add category. All 5 API endpoints complete. Awaiting user testing.
+## Current State (April 2026)
+- **Apps Script:** v9 — deployed, hardened with LockService + activity logging + write verification. Lives at `apps-script/Code.js` (managed via clasp, NOT manual paste).
+- **PWA:** v0.7 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — batch sync, hardcoded API URL, key-only setup.
+- **Workflow:** `clasp` CLI (no more manual paste). `./deploy.sh "description"` is the one-command production deploy.
+- **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 
-## Phases — Budget Workbook (Complete)
+## Phases — Completed
 
-### Phase 1: Gather User Inputs
-- [x] All inputs gathered
+### Phase 1–6: Budget Workbook (v1–v6)
+- Built 6-tab workbook (Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Pending)
+- 26 bi-weekly pay periods (Dec 25, 2025 → Jan 5, 2027)
+- 15 named ranges, formula-driven (no expanded date rows for fixed expenses)
+- Email parser for Scotiabank infoalerts (4 batched Gmail API calls)
+- Apps Script menu: Build Workbook, Initialize Budget, Update Script, Add Category, Parse Emails, Set API Key, View Activity Log
 - **Status:** complete
 
-### Phases 2–6: Build Workbook via Apps Script
-- [x] v1: Initial script
-- [x] v2: Period model flipped + removed Setup clutter
-- [x] v3: Setup cleanup (removed Pay Date, hidden Start/End, categories adjacent)
-- [x] v4: Fixed Monthly Expenses redesign (compact master list + SUMPRODUCT)
-- [x] v5: Update Script + Instructions Tab (safe update function, formatted instructions)
-- [x] v6: Email Parser + Pending Tab
-  - `processInfoAlerts()` — batched Gmail parsing (4 API calls total)
-  - Pending tab — queue for uncategorized transactions (7 cols, orange tab)
-  - Regex: `for $(AMOUNT) at MERCHANT on account ... at TIME`
-  - `buildTimestamp_()` helper for date+time dedup key
-  - Menu: added "Parse Emails"
-  - Instructions: added Parse Emails section + Gmail label warning
-  - Build Workbook now creates 6 tabs
+### Phase 7: Web App API (v7)
+- `doGet()` routes 6 actions: parseAndFetch, categories, batchCategorize, categorize, uncategorize, addCategory
+- API key auth via Script Properties
+- All requests via GET (POST body lost on Apps Script 302 redirect)
 - **Status:** complete
 
-### Phase 7: End-to-End Verification
-- [ ] Paste Code.gs v6 into Apps Script editor
-- [ ] Run Build Workbook → verify 6 tabs (Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Pending)
-- [ ] Run Initialize Budget → verify Budget rows and slicer
-- [ ] Confirm Setup shows only 3 visible columns
-- [ ] Confirm Fixed Monthly Expenses is a clean 4-row list
-- [ ] Confirm Instructions tab is formatted with color-coded sections
-- [ ] Confirm Pending tab exists with headers and orange tab color
-- [ ] Run Parse Emails → verify Safeway $15.74 appears in Pending tab
-- [ ] Verify email gets "Budget/Processed" label in Gmail
-- [ ] Add a 5th expense to Fixed Monthly Expenses → verify Budget auto-updates
-- [ ] Enter a Paycheck transaction → confirm _income row updates
-- [ ] Enter a purchase (negative) → confirm Spent/Available update
-- [ ] Test Add Category
-- [ ] Test Update Script (safe — no data loss)
-- **Status:** pending
+### Phase 8: PWA Foundation (v0.1–v0.4)
+- Vanilla HTML/CSS/JS with ES modules (no build step)
+- Mobile-first, installable PWA, service worker for offline app shell
+- localStorage-backed config and category cache
+- Optimistic categorize/undo with API rollback
+- Add Category modal
+- **Status:** complete
 
-## Phases — Transaction Categorizer (Upcoming)
+### Phase 9: Batch Sync (v8 + PWA v0.6)
+- Refactored to local-first categorize/undo (no API call per tap)
+- New `batchCategorize` endpoint — one API call sends all queued items
+- Sync queue persisted to localStorage (survives page close)
+- `beforeunload` warning for unsent items
+- 3 API calls per session instead of 2+N
+- **Status:** complete
 
-### Phase 8: Apps Script Web App API
-- [x] Add `doGet()` / `doPost()` endpoints
-- [x] `doGet({action: "parseAndFetch"})` — parse emails + return new pending transactions
-- [x] `doGet({action: "categories"})` — return category list from Setup
-- [x] `doPost({timestamp, category})` — write to Transactions, mark Pending row as categorized
-- [x] Dedup: accept `knownTimestamps` param, only return new transactions
-- [x] API key auth via Script Properties + `setApiKey()` menu item
-- [x] Refactored `processInfoAlerts()` into UI wrapper + internal `processInfoAlerts_()`
-- [x] Updated Instructions tab with API deployment guidance
-- [ ] Deploy as web app: Execute as me → Anyone
-- [ ] Set API key via menu
-- [ ] Test via browser (categories, parseAndFetch, categorize)
-- [x] v7.1: Fixed timestamp format (Utilities.formatDate instead of .toString())
-- **Status:** complete (categories + parseAndFetch confirmed; categorize untested)
+### Phase 10: Hardening + Observability (v9)
+- Fixed critical `findNextEmptyRow_` bug (was writing to row 1001+ due to `getLastRow` counting formula-filled cells)
+- Added `Logs` tab with auto-rotation at 5000 rows
+- `logActivity_()` helper logs every API call (Timestamp | Action | Duration | Status | Details | Error)
+- `console.log/warn/error` mirrored to Cloud Logging
+- LockService on all 4 mutating handlers (prevents race conditions)
+- Write verification after `setValues()` on Transactions
+- Category validation against Setup E:E
+- Batched Pending updates (single setValues for contiguous rows)
+- `SpreadsheetApp.flush()` after Transactions writes
+- New menu: "View Activity Log"
+- **Status:** complete
 
-### Phase 9: GitHub Pages PWA
-- [x] Create GitHub repo: `fahyad/gsheetbudget2026-categorizerApp` (public)
-  - Local path: `/Users/fahyadkhan/gsheetbudget2026-categorizerApp`
-  - GitHub CLI auth: `fahyad` (keyring, HTTPS) — can push via `gh` or `git push`
-- [x] Code.gs v7.2: added `uncategorize` endpoint to `doPost(e)`
-- [x] `js/config.js` — API URL + key management (localStorage)
-- [x] `js/api.js` — HTTP layer: fetchCategories, parseAndFetch, categorize, uncategorize
-- [x] `js/store.js` — in-memory state + localStorage cache (categories, knownTimestamps, lastCategorized)
-- [x] `js/app.js` — main logic: init, refresh, optimistic categorize/undo, DOM rendering
-- [x] `index.html` + `css/style.css` — mobile-first app shell
-- [x] `manifest.json` + `sw.js` — PWA manifest + service worker (cache-first app shell)
-- [x] Pushed to GitHub, GitHub Pages enabled
-- [x] Live at: https://fahyad.github.io/gsheetbudget2026-categorizerApp/
-- [x] v7.3: added addCategory API endpoint + refactored rebuildBudget_ (wrapper + internal)
-- [x] PWA: add category modal (pick existing main or "New..." + sub category input)
-- [x] Bug fix: [hidden] attribute override by CSS display rules
-- [ ] User: paste Code.gs v7.3 + create new deployment
-- [ ] User: test full flow on phone (config → refresh → categorize → undo → add category)
-- **Status:** deployed — awaiting user testing
+### Phase 11: Setup UX + clasp Migration (v0.7 + clasp)
+- Hardcoded API URL in `js/config.js` as `DEFAULT_API_URL` (URL is public anyway)
+- Setup form simplified to API Key only (URL moved to optional `<details>` "Advanced" section)
+- Migrated from manual paste to clasp CLI workflow
+- `apps-script/deploy.sh` — one-command deploy hardcoded to production deployment ID
+- Moved planning docs from Google Drive into `docs/`
+- API key rotated to fresh value (set via Apps Script menu by user)
+- **Status:** complete
 
-### Phase 10 (future): Auto-Categorization
+## Phases — Future
+
+### Phase 12: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
-- [ ] Known merchants auto-categorize, skip Pending queue
-- [ ] Only unknown merchants need manual review
+- [ ] Known merchants auto-categorize during parseAndFetch (skip Pending queue)
+- [ ] Only unknown merchants need manual review in PWA
 - **Status:** future
 
-## Errors Encountered
+### Phase 13: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+- [ ] Hardcoded 2026 pay dates (problem in 2027)
+- [ ] 999-row pre-filled formulas overhead (cleanup)
+- [ ] Pagination for very large Pending lists
+- [ ] Complex income formula simplification
+- [ ] Retry logic for transient API errors
+- [ ] Pending tab timestamp number format (lowercase h)
+- [ ] `handleAddCategory_` off-by-one at line 371
+- [ ] `setNamedRanges_` deletes all named ranges every time
+- [ ] `rebuildBudgetInternal_` silently clears budget rows in add mode
+- **Status:** future
+
+## Workflow Reference (CRITICAL)
+
+### Deploying Apps Script changes
+```bash
+cd ~/gsheetbudget2026-categorizerApp/apps-script
+# edit Code.js in your editor (or via Claude)
+./deploy.sh "vNN — short description"
+```
+
+`deploy.sh` runs `clasp push` then `clasp deploy -i <PROD_DEPLOYMENT_ID> -d "..."`.
+**NEVER** use plain `clasp deploy` — it creates a new deployment with a new URL and breaks the PWA.
+
+### Deploying PWA changes
+```bash
+cd ~/gsheetbudget2026-categorizerApp
+# edit js/, index.html, css/, sw.js
+# bump version in index.html (header span) AND CACHE_VERSION in sw.js
+git add . && git commit -m "..." && git push
+# GitHub Pages auto-deploys from main branch
+```
+
+### After Apps Script changes, check the Logs tab
+Open the budget sheet → Budget Tools → View Activity Log. Every API call from the PWA appears with duration, status, and details.
+
+### After deploying, verify
+```bash
+clasp deployments     # should still show 7 deployments (HEAD + 6 versions)
+                      # if it shows 8+, you accidentally created a new one — see findings.md recovery procedure
+```
+
+## Errors Encountered (high-impact only)
+
 | Error | Resolution |
 |-------|------------|
-| Drive MCP can't access Sheets | Apps Script paste approach |
-| Apr 1 expenses unassigned | Period End inclusive |
+| Drive MCP can't access Sheets | Use clasp CLI for Apps Script (not Drive) |
 | Period model unintuitive | Pay date = period start |
-| Setup cluttered | Removed/hidden columns |
 | Fixed Expenses tab unusable | Compact master list + SUMPRODUCT |
+| getPlainBody() empty for HTML emails | Use getBody() + HTML stripping (v6.1) |
+| POST body lost on 302 redirect | All actions via GET with URL params (v7.2) |
+| Verbose Date.toString() in API responses | `Utilities.formatDate()` (v7.1) |
+| knownTimestamps stale cache hiding txns | In-memory only, removed entirely in v8 |
+| **Transaction writes going to row 1001+** | Rewrote `findNextEmptyRow_` to scan column A (formula-filled cells confuse `getLastRow`) (v9) |
+| Categories not showing on tap | `selectTransaction()` now calls `renderCategories()` (v0.6) |
 
 ## Notes
-- Script: gsheet finiance/Code.gs (currently v7.3)
-- First time: Build Workbook → Initialize Budget
-- After code updates: Update Script (safe)
-- Add categories: edit Setup D:E → run Add Category
-- Add fixed expenses: edit Fixed Monthly Expenses directly (self-updating)
-- Parse emails: Budget Tools → Parse Emails (or from PWA in future)
-- Credit card alerts only for now (debit alerts TBD)
-- PWA repo: `/Users/fahyadkhan/gsheetbudget2026-categorizerApp` (fahyad/gsheetbudget2026-categorizerApp)
+- **Source of truth:** this git repo. Old Google Drive Code.gs and .md files are stale backups (still synced as a safety copy after each session).
+- **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match)
+- **PWA URL:** https://fahyad.github.io/gsheetbudget2026-categorizerApp/
+- **GitHub repo:** `fahyad/gsheetbudget2026-categorizerApp` (public)
+- **Local repo:** `/Users/fahyadkhan/gsheetbudget2026-categorizerApp`
+- **clasp version:** 3.3.0 (`~/.npm-global/bin/clasp`)
+- **clasp auth:** `~/.clasprc.json` (OAuth, never committed)
+- **Credit card alerts only.** Debit alerts have a different format — TBD.
