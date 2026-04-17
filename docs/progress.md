@@ -267,11 +267,77 @@ Full audit ranked findings into critical/high/medium/low. This session addressed
 - No PWA changes this session
 - **Status:** awaiting user deployment + testing
 
+## Session: 2026-04-17 — clasp Migration + v0.7 Setup Simplification
+
+### Workflow Migration: Manual Paste → clasp (CLI)
+**Before:** edit Code.gs in Drive → Apps Script editor → paste → save → Deploy → New version. No git, no diffs, no rollback.
+**After:** edit `apps-script/Code.js` in any editor → `./deploy.sh "desc"` (runs `clasp push` + `clasp deploy -i <prodId>`). Full git history.
+
+**Steps completed:**
+- Installed clasp 3.3.0 at `~/.npm-global/bin/clasp` (user prefix, no sudo)
+- `~/.zshrc` PATH updated
+- Added clasp MCP to `~/Library/Application Support/Claude/claude_desktop_config.json` (activates after Claude restart)
+- `clasp login` → `~/.clasprc.json`
+- Clone via `clasp clone 1EIXhe6Vv6SEaA7x_nn9a7OHsmRhctyp6GoQDfuui5ZRbvCs2F4u9tMjs --rootDir .` into `apps-script/`
+- Diff against local Code.gs = identical → no push needed initially
+- Moved `findings.md`, `progress.md`, `task_plan.md` from Drive to `docs/`
+- Added `.gitignore` (excludes `.clasprc.json`, `.DS_Store`, editor dirs)
+- Added `apps-script/.claspignore` (allowlist: only `Code.js` + `appsscript.json`)
+- Added `apps-script/deploy.sh` — one-command deploy hardcoded to production deployment ID `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (prevents accidental new-URL creation)
+- Commits `6102517` (migration) + `e4d377d` (deploy.sh) pushed
+
+### PWA v0.7 — Simplified Setup (URL Hardcoded)
+**Problem:** Setup screen asked for URL + Key every new device. URL never changes (single deployment).
+
+**Fix:**
+- `js/config.js`: `DEFAULT_API_URL` constant (production deployment URL)
+- `getApiUrl()` returns localStorage override OR default
+- Setup form asks for API Key only; URL moved to optional `<details>` "Advanced" section
+- `isConfigured()` now checks only for key (URL is always configured)
+
+**API key rotation:**
+- Generated new 40-char key `p0LiMHcdpP0xeYaN0gBCnk4z91Pjhf4czZ0OjVS1` via `openssl rand -base64 36`
+- User sets in Apps Script via "Budget Tools → Set API Key"
+- User updates PWA on each device (one-time, per device)
+
+**Security trade-off (explicitly accepted):**
+- URL in public JS (GitHub Pages). Safe — already visible in network requests
+- Key still private (localStorage only, never committed)
+- Rotate anytime via `Set API Key` menu if leaked
+
+### Version bumps
+- PWA: v0.6 → v0.7
+- SW cache: v6 → v7
+- No Code.gs change
+
+### Files changed (commit `a1adb6b`)
+| File | Change |
+|------|--------|
+| `js/config.js` | DEFAULT_API_URL, getApiUrl fallback, isConfigured simplified |
+| `index.html` | Setup form: key only; URL in `<details>`; version bump |
+| `js/app.js` | Settings prefill only shows URL override, not default |
+| `css/style.css` | `.advanced-config` styles |
+| `sw.js` | Cache v6 → v7 |
+
+### Deployment workflow reference
+```bash
+cd ~/gsheetbudget2026-categorizerApp/apps-script
+./deploy.sh "vNN — description"      # push + deploy to same URL
+clasp logs --watch                    # live Cloud Logging tail
+clasp status                          # show changed files
+clasp pull                            # pull edits from Apps Script editor
+clasp deployments                     # list deployments
+```
+
+### Status
+- PWA v0.7 live on GitHub Pages
+- Awaiting user: (1) set new API key in Apps Script, (2) update PWA on each device
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v9 with Logs tab + LockService + write verification. Fixed findNextEmptyRow_ (was writing to row 1001+). Awaiting user deployment. |
-| Where am I going? | User tests v9 (verify Transactions writes to row 2, 3, 4 etc; verify Logs tab populates; verify LockService prevents races). Then optional PWA polish, then Phase 11 (deferred audit items). |
+| Where am I? | PWA v0.7 (URL hardcoded, key-only setup) + Code.gs v9 + clasp workflow live. Awaiting user to rotate API key and update PWA devices. |
+| Where am I going? | User rotates key + tests v0.7. Then optional: clean up orphan deployments, delete Google Drive Code.gs backup, Phase 11 (deferred audit items). |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 9 iterations; getLastRow counts formula-filled cells as content (THE lesson); batch sync; local-first categorize/undo; LockService for concurrency; write verification as safety net; sheet-based activity log + Cloud Logging mirror |
-| What have I done? | Script v9: fixed findNextEmptyRow_, added Logs tab, logActivity_, summarizeResult_, routeAction_, LockService on 4 handlers, write verification, category validation, batched Pending updates, flush after writes, "View Activity Log" menu |
+| What have I learned? | 9 Code.gs iterations + 7 PWA iterations; getLastRow counts formula-filled cells; batch sync beats per-txn; local-first categorize/undo; LockService for concurrency; write verification as safety net; hardcode public URL, keep key in localStorage; clasp workflow dramatically simpler than manual paste |
+| What have I done? | Script v9 (Logs + LockService + verify) + PWA v0.7 (key-only setup) + clasp migration (git-versioned Code.js, one-command deploy.sh) |

@@ -251,7 +251,7 @@ Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year
 **No external server.** Apps Script = backend, GitHub Pages = free static hosting for PWA.
 **Manual trigger only** — user controls when emails are parsed via the app.
 
-## PWA Architecture (v0.6 — Batch Sync)
+## PWA Architecture (v0.7 — Batch Sync + URL Hardcoded)
 
 ### Tech Stack
 - Vanilla HTML/CSS/JS with ES modules (`type="module"`)
@@ -263,7 +263,7 @@ Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year
 |------|---------|
 | `index.html` | Single page app shell (config/app/undo sections) |
 | `css/style.css` | Minimal mobile-first styles |
-| `js/config.js` | API URL + key management (localStorage) |
+| `js/config.js` | API URL (hardcoded default, optional override) + key management (localStorage) |
 | `js/api.js` | HTTP layer: fetchCategories, parseAndFetch, batchCategorize, addCategory |
 | `js/store.js` | In-memory state + localStorage cache (categories + syncQueue) |
 | `js/app.js` | Main logic: init, refresh, local categorize/undo, batch sync, DOM rendering |
@@ -282,6 +282,9 @@ Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year
 | SW strategy | Cache-first app shell, network-only API | App loads offline, data always fresh |
 | Txn cache | NOT in localStorage | Always fresh from API — avoids stale data |
 | beforeunload | Warn if syncQueue not empty | Prevents accidental data loss |
+| Setup form | API key only (URL hardcoded) | Single deployment means URL never changes; friction reduction on new-device setup |
+| DEFAULT_API_URL in config.js | Hardcoded production URL | Safe — URL is public anyway (visible in every network request). Key stays private in localStorage |
+| URL override via `<details>` | Optional advanced override | Keeps flexibility for staging/test deployments without cluttering the default UX |
 
 ### Categorize Flow (Local — No API Call)
 1. User taps transaction → taps category
@@ -312,6 +315,29 @@ Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year
 - Repo: `fahyad/gsheetbudget2026-categorizerApp`
 - URL: https://fahyad.github.io/gsheetbudget2026-categorizerApp/
 - GitHub Pages source: main branch, root directory
+
+### Configuration (v0.7)
+
+**API URL** — hardcoded in `js/config.js` as `DEFAULT_API_URL`:
+```
+https://script.google.com/macros/s/AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ/exec
+```
+- Same deployment ID the `apps-script/deploy.sh` script targets
+- Safe to hardcode: already public (visible in network traffic)
+- Optional override: user can set a different URL via Settings → Advanced → custom URL (persists in localStorage only)
+
+**API Key** — never hardcoded; stored only in localStorage per device.
+- Set once per device via Settings → API Key
+- Rotation procedure:
+  1. Generate a new key: `openssl rand -base64 36 | tr -d '=+/' | cut -c1-40`
+  2. Set in Apps Script via menu: Budget Tools → Set API Key
+  3. Update each device's PWA via Settings → API Key
+- If leaked: rotate. Old key stops working the instant a new one is saved in Script Properties.
+
+### Setup UX
+- Before v0.7: 2 fields (URL + Key) on every new device
+- v0.7+: 1 field (Key only). URL auto-configured
+- Optional `<details>` "Advanced" section exposes URL input for staging/test deployments
 
 ## Activity Log & Observability (v9)
 
