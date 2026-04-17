@@ -1,0 +1,12 @@
+# OAuth credentials — should never leave $HOME but defensive belt-and-braces
+.clasprc.json
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log

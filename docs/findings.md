@@ -1,0 +1,604 @@
+# Findings & Decisions
+
+## Requirements — Budget Workbook
+- 6-tab Google Sheet: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Pending
+- 26 bi-weekly pay periods covering all of 2026
+- Net Income = Gross Pay - Fixed Expenses due within period (computed inline in Budget)
+- Budget rollover: Available = Prior Available + Budgeted - Spent
+- _income header row per period showing net income & unallocated
+- Slicer on Budget tab for per-period filtering
+- Apps Script functions: buildWorkbook, initializeBudget, updateWorkbook, addCategory, processInfoAlerts
+- 15 named ranges total
+- Data validation dropdown for Category in Transactions
+
+## Requirements — Transaction Categorizer
+- Parse Scotiabank infoalert emails from Gmail
+- Write parsed transactions to Pending tab as queue
+- Mobile PWA (GitHub Pages) for categorizing on phone
+- Apps Script serves as backend API (doGet/doPost)
+- Manual trigger — user controls when emails are parsed
+- Dedup via timestamp (date+time from email)
+- Credit card alerts only (debit TBD)
+
+## Column Layouts (v6)
+
+### Instructions Tab
+- Single wide column (600px) with formatted guidance
+- Blue tab color, protected with warning
+- Color-coded: red (danger), yellow (caution), green (safe)
+
+### Setup Tab (cols A–E; A–B hidden)
+| Col | Header | Visible? | Type |
+|-----|--------|----------|------|
+| A | Period Start | **Hidden** | Date (= pay date; period 1 = Dec 25, 2025) |
+| B | Period End | **Hidden** | Date (day before next pay date; period 26 = Jan 5, 2027) |
+| C | Period Label | Yes | Formula: TEXT from A & B |
+| D | Main Category | Yes | Text |
+| E | Sub Category | Yes | Text |
+
+### Fixed Monthly Expenses Tab (cols A–C)
+| Col | Header | Type |
+|-----|--------|------|
+| A | Name | Text (user-editable) |
+| B | Monthly Amount | Currency (user-editable) |
+| C | Due Day | Number 1–31 (user-editable) |
+
+**One row per expense.** No expanded date rows. Budget formulas auto-calculate which months' due dates fall in each period using SUMPRODUCT. Adding/removing expenses is instant — no script needed.
+
+### Budget Tab (cols A–F)
+| Col | Header | Type |
+|-----|--------|------|
+| A | Period | Text (period label value) |
+| B | Main Category | Formula: INDEX/MATCH from Setup (blank for _income) |
+| C | Category | Text (sub category name or "_income") |
+| D | Budgeted | Manual entry (formula for _income rows: Net Income via SUMPRODUCT) |
+| E | Spent | Formula: -SUMIFS from Transactions |
+| F | Available | Formula: rollover + budgeted - spent |
+
+### Transactions Tab (cols A–G)
+| Col | Header | Type |
+|-----|--------|------|
+| A | Date | Date (manual or from categorizer) |
+| B | Merchant | Text (manual or from categorizer) |
+| C | Amount | Currency (negative=purchase, positive=income/refund) |
+| D | Category | Dropdown from CategoryList (manual or from categorizer) |
+| E | Main Category | Formula: INDEX/MATCH from Setup |
+| F | Transaction # | Text (manual) |
+| G | Period | Formula: FILTER by date range |
+
+### Pending Tab (cols A–G)
+| Col | Header | Type |
+|-----|--------|------|
+| A | Timestamp | Date/time string "yyyy-mm-dd hh:mm:ss" (**dedup key**) |
+| B | Date | Date (transaction date from email) |
+| C | Merchant | Text (parsed from email body) |
+| D | Amount | Currency (negative for purchases) |
+| E | Email Subject | Text (for debugging) |
+| F | Status | Text: "pending" or "categorized" |
+| G | Category | Text (filled by PWA when categorized) |
+
+Orange tab color. Populated by Parse Emails, consumed by PWA.
+
+## Named Ranges (15 total)
+| Name | Tab | Range |
+|------|-----|-------|
+| PayPeriods | Setup | A2:C27 |
+| PayPeriods_Label | Setup | C2:C27 |
+| PayPeriods_Start | Setup | A2:A27 |
+| PayPeriods_End | Setup | B2:B27 |
+| CategoryList | Setup | E2:E100 |
+| CategoryMain | Setup | D2:D100 |
+| FixedExpenses_Amount | Fixed Monthly Expenses | B2:B50 |
+| FixedExpenses_DueDay | Fixed Monthly Expenses | C2:C50 |
+| Budget_Period | Budget | A2:A500 |
+| Budget_Category | Budget | C2:C500 |
+| Budget_Budgeted | Budget | D2:D500 |
+| Budget_Available | Budget | F2:F500 |
+| Transactions_Amount | Transactions | C2:C1000 |
+| Transactions_Category | Transactions | D2:D1000 |
+| Transactions_Period | Transactions | G2:G1000 |
+
+## Formula Inventory (v6)
+| Formula | Location | Purpose |
+|---------|----------|---------|
+| `=TEXT(A2,"MMM D")&" - "&IF(MONTH(A2)=MONTH(B2),TEXT(B2,"D"),TEXT(B2,"MMM D"))` | Setup C | Period Label |
+| `=IFERROR(SUMIFS(...,"Paycheck"),0) - IFERROR(LET(s,start,e,end,amt,...,dd,...,valid,..., SUMPRODUCT(valid*amt*(13-month-check))),0)` | Budget D (_income) | Net Income: Paycheck minus fixed expenses in period |
+| `=SUMIFS(Budget_Budgeted,Budget_Period,A2,Budget_Category,"<>_income")` | Budget E (_income) | Total Allocated |
+| `=D2-E2` | Budget F (_income) | Unallocated |
+| `=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C2,Setup!$E$2:$E$100,0)),"")` | Budget B (cat) | Main Category lookup |
+| `=-SUMIFS(Transactions_Amount,Transactions_Period,A2,Transactions_Category,C2)` | Budget E (cat) | Spent (negated) |
+| `=IFERROR(SUMIFS(Budget_Available,...,MATCH-1,...),0)+D2-E2` | Budget F (cat) | Available w/ rollover |
+| `=IF(D2="","",IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(D2,Setup!$E$2:$E$100,0)),""))` | Txn E | Main Category lookup |
+| `=IF(A2="","",IFERROR(FILTER(Setup!$C$2:$C$27,Setup!$A$2:$A$27<=A2,Setup!$B$2:$B$27>=A2),"Unassigned"))` | Txn G | Period auto-assign |
+
+### SUMPRODUCT Fixed Expense Formula (detailed)
+The Budget _income formula uses `LET` + `SUMPRODUCT` to calculate fixed deductions from the compact master list:
+
+```
+LET(
+  s, INDEX(PayPeriods_Start, MATCH(period_label, PayPeriods_Label, 0)),
+  e, INDEX(PayPeriods_End, MATCH(period_label, PayPeriods_Label, 0)),
+  amt, FixedExpenses_Amount,
+  dd, FixedExpenses_DueDay,
+  valid, (amt<>"") * (dd<>""),
+  SUMPRODUCT(valid * amt * (
+    (DATE(2026,1,dd)>=s)*(DATE(2026,1,dd)<=e) +
+    (DATE(2026,2,dd)>=s)*(DATE(2026,2,dd)<=e) +
+    ... (months 3–12) ...
+    (DATE(2026,13,dd)>=s)*(DATE(2026,13,dd)<=e)   ← DATE(2026,13,x) = DATE(2027,1,x)
+  ))
+)
+```
+
+Checks 13 months (Jan 2026 – Jan 2027). For each expense, generates `DATE(year, month, due_day)` and tests if it falls within [period_start, period_end]. The `valid` guard skips empty rows. Fully self-updating.
+
+## Apps Script Functions (v9)
+| Function | Menu Label | Safe? | Purpose |
+|----------|-----------|-------|---------|
+| `buildWorkbook()` | 1. Build Workbook (first time) | **NO** — clears all data | Creates 6 tabs, populates data, sets named ranges |
+| `initializeBudget()` | 2. Initialize Budget | **CAUTION** — clears Budget | Builds Budget rows, preserves Budgeted amounts |
+| `updateWorkbook()` | 3. Update Script (safe) | **YES** | Refreshes formulas/ranges/validation, no data loss |
+| `addCategory()` | Add Category | **YES** | Adds new category rows to Budget for all periods |
+| `processInfoAlerts()` | Parse Emails | **YES** | Menu wrapper — calls internal parser, shows UI alerts |
+| `setApiKey()` | Set API Key | **YES** | Prompts for API key, saves to Script Properties |
+| `doGet(e)` | *(web app)* | **YES** | Routes ALL requests (GET): `parseAndFetch`, `categories`, `batchCategorize`, `categorize`, `uncategorize`, `addCategory` |
+| `doPost(e)` | *(web app)* | **YES** | Routes POST requests (backward compat): `categorize`, `uncategorize`, `addCategory` |
+
+### Helper Functions
+| Function | Purpose |
+|----------|---------|
+| `buildIncomeFormula_(row)` | Generates SUMPRODUCT+LET formula for _income rows |
+| `buildTimestamp_(emailDate, timeStr)` | Combines email date + parsed time → "yyyy-mm-dd hh:mm:ss" |
+| `buildInstructionsTab_(sheet)` | Writes formatted instructions content |
+| `setTransactionFormulas_(txn)` | Sets formulas for Transactions cols E and G |
+| `setNamedRanges_(ss, setup, fixed, budget, txn)` | Sets all 15 named ranges |
+| `rebuildBudget_(mode)` | Core Budget row builder (used by initialize + addCategory) |
+| `processInfoAlerts_()` | Internal email parser — no UI calls, returns result object |
+| `handleParseAndFetch_(params)` | API handler: parse emails + return new pending transactions |
+| `handleCategories_()` | API handler: return category list from Setup |
+| `handleCategorize_(body)` | API handler: write to Transactions, mark Pending as categorized |
+| `validateApiKey_(key)` | Checks request API key against Script Properties |
+| `jsonResponse_(data)` | Creates JSON ContentService response |
+| `formatDate_(date)` | Formats JS Date as "yyyy-mm-dd" |
+| `findNextEmptyRow_(sheet)` | Finds first empty row in a sheet |
+| `handleUncategorize_(body)` | API handler: reverse categorization — delete Txn row, restore Pending |
+| `handleAddCategory_(body)` | API handler: LockService → handleAddCategoryInner_. Expects { mainCategory, subCategory } |
+| `handleAddCategoryInner_(main, sub)` | Inner (locked): adds to Setup D:E, rebuilds Budget rows |
+| `handleBatchCategorize_(params)` | API handler: LockService → validates categories → finds Pending rows → writes Transactions (single setValues) → verifies write → batched Pending updates. Per-item results |
+| `rebuildBudgetInternal_(mode, ss)` | Internal budget rebuild — no UI calls, returns result object |
+| `routeAction_(action, params)` | Pure dispatch: routes action string to appropriate handler. No try/catch (handled by doGet/doPost wrapper) |
+| `getOrCreateLogsSheet_()` | Returns Logs tab; creates with headers + formatting on first call |
+| `logActivity_(action, duration, status, details, error)` | Inserts log row at top of Logs tab; mirrors to console.log/warn/error |
+| `rotateLogsIfNeeded_(sheet)` | Archives Logs to Logs_Archive_<timestamp> when > 5000 rows |
+| `summarizeResult_(action, parsed)` | Human-readable one-line summary of API response for Details column |
+| `showLogsTab()` | Menu function: opens Logs tab (creates if missing) |
+
+## Email Parser Details
+
+### Scotiabank InfoAlert Format
+- **From:** `Scotia InfoAlerts <infoalerts@scotiabank.com>`
+- **Subject:** `Authorization on your credit account`
+- **Body pattern:** `There was an authorization for $AMOUNT at MERCHANT on account XXXX at TIME pm ET.`
+
+### Parser Implementation
+- **Gmail query:** `from:infoalerts@scotiabank.com subject:"Authorization on your" -label:Budget-Processed`
+- **Regex:** `for \$([\d,]+\.\d{2}) at (.+?) on account .+? at\s+(\d{1,2}:\d{2}\s*[ap]m)`
+- **Captures:** amount (group 1), merchant (group 2), time (group 3)
+- **Date source:** `message.getDate()` from email header
+- **Timestamp:** email date + parsed time → "2026-04-12 14:13:00" (dedup key)
+- **Amount:** negated (purchases are negative in budget)
+
+### Parser Bug: getPlainBody() fails on HTML-only emails (v6 → v6.1)
+- **Error:** 0 transactions parsed from 12 threads (31 messages). All reported as parse failures.
+- **Cause:** Scotiabank infoalert emails are `Content-Type: text/html` with no plain text alternative. `getPlainBody()` returned empty/garbled text, so the regex never matched.
+- **Fix (v6.1):** Switched to `getBody()` (raw HTML) with post-processing:
+  - Strip HTML tags: `.replace(/<[^>]+>/g, ' ')`
+  - Decode HTML entities: `&#39;` → `'`, `&amp;` → `&`, `&nbsp;` → space, etc.
+  - Collapse whitespace: `.replace(/\s+/g, ' ')`
+- **Lesson:** Always use `getBody()` with HTML stripping for emails that may lack a plain text part. `getPlainBody()` is unreliable for HTML-only senders.
+
+### Performance — Batched API Calls
+| Step | API Call | What |
+|------|----------|------|
+| 1 | `GmailApp.search(query)` | Find unprocessed emails |
+| 2 | `GmailApp.getMessagesForThreads(threads)` | Batch fetch all messages |
+| 3 | `sheet.setValues(allRows)` | Batch write to Pending |
+| 4 | `label.addToThreads(threads)` | Batch label as processed |
+
+**Total: 4 API calls** regardless of email count. Expected: 2–4 seconds for 1–10 emails.
+
+### Duplicate Prevention
+- Gmail label `Budget/Processed` prevents re-parsing same email
+- Search query excludes labeled emails: `-label:Budget-Processed`
+- Timestamp in Pending tab serves as secondary dedup key for PWA
+
+## Transaction Categorizer Architecture (v8 — Batch Sync)
+
+```
+┌─────────────────────────┐
+│   GOOGLE SHEET (Data)   │
+│  Setup D:E → categories │
+│  Pending → email queue  │
+│  Transactions → final   │
+│  Budget → formulas      │
+└──────────┬──────────────┘
+           │ SpreadsheetApp
+┌──────────▼──────────────┐
+│  APPS SCRIPT WEB APP    │
+│  doGet() routes ALL     │
+│  5 actions:             │
+│  ├─ categories          │
+│  ├─ parseAndFetch       │
+│  ├─ batchCategorize     │  ← NEW: batch of [{ts,cat}]
+│  ├─ categorize (legacy) │
+│  └─ addCategory         │
+└──────────┬──────────────┘
+           │ HTTPS GET
+┌──────────▼──────────────┐
+│  PWA (GitHub Pages)     │
+│  Local categorize/undo  │
+│  Sync queue → one call  │
+│  3 API calls per session│
+└─────────────────────────┘
+```
+
+**Flow:**
+1. User opens PWA → Refresh → fetches categories + parses emails (2 API calls)
+2. User taps transactions → categories locally (0 API calls, instant)
+3. User taps Sync → one `batchCategorize` API call sends all at once
+4. Total: 3 API calls per session regardless of transaction count
+
+**No external server.** Apps Script = backend, GitHub Pages = free static hosting for PWA.
+**Manual trigger only** — user controls when emails are parsed via the app.
+
+## PWA Architecture (v0.6 — Batch Sync)
+
+### Tech Stack
+- Vanilla HTML/CSS/JS with ES modules (`type="module"`)
+- No framework, no build step — serves directly from GitHub Pages
+- Mobile-first CSS, 48px+ tap targets
+
+### File Structure
+| File | Purpose |
+|------|---------|
+| `index.html` | Single page app shell (config/app/undo sections) |
+| `css/style.css` | Minimal mobile-first styles |
+| `js/config.js` | API URL + key management (localStorage) |
+| `js/api.js` | HTTP layer: fetchCategories, parseAndFetch, batchCategorize, addCategory |
+| `js/store.js` | In-memory state + localStorage cache (categories + syncQueue) |
+| `js/app.js` | Main logic: init, refresh, local categorize/undo, batch sync, DOM rendering |
+| `manifest.json` | PWA manifest (standalone, installable) |
+| `sw.js` | Service worker (cache-first app shell, network-only API) |
+
+### Key Design Decisions
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Sync model | Batch (local-first) | Categorize/undo instant (0 API calls), sync sends all at once (1 call) |
+| Sync queue | localStorage | Persists across page close/refresh; ~30-50 items max, tiny payload |
+| State storage | localStorage | ~30-50 txns at a time, IndexedDB overkill |
+| Undo pattern | Single `lastCategorized` object | User wants 1-level undo only; undo is local before sync |
+| UI updates | Local-first | No rollback needed — categorize/undo are local. Only sync can fail. |
+| HTTP method | GET for everything | POST body is lost on Apps Script 302 redirect; GET with URL params works reliably |
+| SW strategy | Cache-first app shell, network-only API | App loads offline, data always fresh |
+| Txn cache | NOT in localStorage | Always fresh from API — avoids stale data |
+| beforeunload | Warn if syncQueue not empty | Prevents accidental data loss |
+
+### Categorize Flow (Local — No API Call)
+1. User taps transaction → taps category
+2. `store.removeTransaction()` → re-render (instant disappear)
+3. `store.addToSyncQueue()` → saved to localStorage
+4. `store.setLastCategorized()` → show undo bar
+5. `renderSyncButton()` → shows count badge (e.g. "Sync (3)")
+6. **No API call** — zero latency
+
+### Undo Flow (Local — No API Call)
+1. User taps UNDO (only available for last categorized)
+2. `store.removeFromSyncQueue()` → removes from queue
+3. `store.restoreTransaction()` → re-render (instant reappear)
+4. `store.clearLastCategorized()` → hide undo bar
+5. `renderSyncButton()` → updates count
+6. **No API call** — zero latency
+
+### Sync Flow (One Batch API Call)
+1. User taps Sync → button shows "Syncing..."
+2. `api.batchCategorize(store.syncQueue)` → sends all items as JSON in GET param
+3. Server reads Pending once, writes Transactions in single `setValues()`, updates Pending rows
+4. Returns per-item `{timestamp, success, error}` results
+5. On success: `store.clearSyncedItems()` → queue cleared
+6. On partial failure: failed items stay in queue, user sees count + retry message
+7. On network error: "Data saved locally" — queue unchanged, retry later
+
+### Deployment
+- Repo: `fahyad/gsheetbudget2026-categorizerApp`
+- URL: https://fahyad.github.io/gsheetbudget2026-categorizerApp/
+- GitHub Pages source: main branch, root directory
+
+## Activity Log & Observability (v9)
+
+### Logs Tab Structure
+| Col | Header | Type |
+|-----|--------|------|
+| A | Timestamp | Date (yyyy-mm-dd HH:mm:ss) |
+| B | Action | Text (e.g. batchCategorize, parseAndFetch) |
+| C | Duration (ms) | Number |
+| D | Status | Text: success / fail / auth_fail / crash / write_verify_fail |
+| E | Details | Text (human-readable summary) |
+| F | Error | Text (error message + stack trace for crashes) |
+
+Auto-created on first log write. Tab color: gray. Newest entries at row 2 (top).
+
+### Two-Layer Logging
+1. **Sheet-based Logs tab** — user-visible, sortable, filterable. Survives across sessions and deployments
+2. **console.log/warn/error** — mirrored to Cloud Logging (Apps Script → Executions → View log). Useful for stack traces and cross-execution debugging
+3. **Rotation:** Logs tab archives to `Logs_Archive_<timestamp>` when > 5000 rows
+
+### What Gets Logged
+- **Every web API request** — action, duration, status, summary, error
+- **Auth failures** — with method (GET/POST) in details
+- **Crashes** — full stack trace in Error column
+- **Write verification failures** — with expected vs actual values
+- **Per-action summaries** in Details column:
+  - `parseAndFetch` → `"parsed 3, returned 12 pending"`
+  - `categories` → `"returned 8 categories"`
+  - `batchCategorize` → `"5/5 succeeded"` or `"3/5 succeeded | failed: <ts>:<err>;..."`
+  - `addCategory` → `"Living > Dining Out, +26 budget rows"`
+  - `categorize` → `"Merchant → Category"`
+
+### LockService Pattern
+All mutating handlers wrap their body with `LockService.getScriptLock()`:
+```javascript
+var lock = LockService.getScriptLock();
+if (!lock.tryLock(10000)) {
+  return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+}
+try {
+  // ... handler logic ...
+} finally {
+  lock.releaseLock();
+}
+```
+Prevents concurrent requests from racing (e.g., double-tap Sync, or Sync + Refresh).
+Timeout: 10s for categorize/uncategorize/batchCategorize; 30s for addCategory (triggers rebuildBudget).
+
+### Write Verification Pattern
+After any `setValues()` to Transactions, read back and verify:
+```javascript
+txn.getRange(start, 1, n, 4).setValues(rows);
+SpreadsheetApp.flush();
+var verify = txn.getRange(start, 1, 1, 4).getValues()[0];
+if (String(verify[1]) !== String(rows[0][1])) {
+  logActivity_('xxx_verify', 0, 'write_verify_fail', '...', '');
+  return jsonResponse_({ success: false, error: '...' });
+}
+// Only proceed with Pending update if Transactions write verified
+```
+This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
+
+## Web App API (v9)
+
+### Endpoints
+| Method | Action | URL Params | Returns |
+|--------|--------|------------|---------|
+| GET | `parseAndFetch` | `?action=parseAndFetch&apiKey=KEY` | `{ success, parsed, transactions: [{timestamp, date, merchant, amount}] }` |
+| GET | `categories` | `?action=categories&apiKey=KEY` | `{ success, categories: [{main, sub}] }` |
+| GET | `batchCategorize` | `?action=batchCategorize&apiKey=KEY&items=[{"ts":"...","cat":"..."},...]` | `{ success, results: [{timestamp, success, error?}], summary: {total, succeeded, failed} }` |
+| GET | `addCategory` | `?action=addCategory&apiKey=KEY&mainCategory=X&subCategory=Y` | `{ success, category: {main, sub}, budgetRowsAdded }` |
+| GET | `categorize` | `?action=categorize&apiKey=KEY&timestamp=X&category=Y` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
+| GET | `uncategorize` | `?action=uncategorize&apiKey=KEY&timestamp=X&merchant=X&amount=X&category=X` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
+
+### Authentication
+- API key stored in Apps Script **Script Properties** (not hardcoded)
+- Set via menu: Budget Tools → Set API Key
+- Validated on every request via `validateApiKey_()`
+- PWA stores key in localStorage after first entry
+
+### Deployment
+1. Apps Script editor → Deploy → New deployment → Web app
+2. Execute as: Me | Who has access: Anyone
+3. Copy deployment URL → configure in PWA
+4. After code updates: create new deployment (or update existing) for web app changes to take effect
+
+### POST Redirect Bug (all write actions failed from PWA)
+- **Issue:** Apps Script web apps respond with HTTP 302 redirect. Per HTTP spec, browsers convert POST→GET on 302, dropping the request body. All POST-based write actions (categorize, uncategorize, addCategory) silently failed.
+- **Symptom:** Transaction disappeared from PWA list but never appeared in Transactions sheet. No error shown (optimistic UI removed it, but API returned doGet's "Unknown action" which wasn't caught properly).
+- **Fix:** Moved all actions into `doGet()`. PWA now uses GET with URL params for everything. `doPost` kept for backward compatibility (curl testing).
+- **Lesson:** Never use POST from browser to Apps Script web apps. Always use GET with URL params.
+
+### getLastRow Formula-Filled Rows Bug (v8 → v9) — CRITICAL
+- **Issue:** After batch sync, Pending rows marked "categorized" but Transactions tab showed NO new rows
+- **Root cause:** `getLastRow()` counts formula-filled cells as content **even when formulas return empty string**. The Transactions tab has `=IF(A="","",...)` formulas pre-filled in rows 2-1000 (cols E and G, via `setTransactionFormulas_`). `getLastRow()` reports 1000 even on an empty sheet. Therefore `findNextEmptyRow_(txn)` returned 1001. Every `setValues()` went to rows 1001+, far below the visible data range
+- **Bug was in single-txn handler too** — `handleCategorize_` had it too but went undetected because the response was generated from the same row that was just written. PWA showed success; user never scrolled to row 1001
+- **Fix:** Rewrote `findNextEmptyRow_(sheet)` to scan column A (purely data, never formulas) from bottom up for the actual last non-empty cell. Works regardless of formula-filled columns
+- **Safety net added:** Write verification — after `setValues()` on Transactions, read back the first row and confirm merchant + amount match. If mismatch, log to Logs tab, return error, and DO NOT update Pending (prevents the same inconsistency)
+- **Sources:** [labnol.org/sheets-lastrow-arrayformula](https://www.labnol.org/sheets-lastrow-arrayformula-220322), [yagisanatode getLastRow with formulas](https://yagisanatode.com/google-apps-script-get-the-last-row-of-a-data-range-when-other-columns-have-content-like-hidden-formulas-and-check-boxes/)
+- **Lesson:** NEVER use `getLastRow()` alone on a sheet that may have formula-filled empty rows. Either scan a pure-data column, or use `getNextDataCell(Direction.DOWN)` on a data column, or pre-format formulas with `IF(cond, , value)` instead of `IF(cond, "", value)`
+
+### Categories Not Showing Bug (v0.4 → v0.6)
+- **Issue:** Tapping a transaction in PWA showed only "Add Category" — no category buttons rendered
+- **Root cause:** `selectTransaction()` only unhid the picker but did NOT call `renderCategories()`. The async `fetchCategories()` in `init()` silently swallowed errors (`.catch(() => {})`), so if the fetch failed, `store.categories` stayed empty and no buttons were ever rendered.
+- **Fix:**
+  1. `selectTransaction()` now calls `renderCategories()` before showing picker
+  2. `init()` catch logs error + shows toast if categories empty
+  3. `renderCategories()` shows "No categories loaded. Tap Refresh." when empty
+  4. `refresh()` re-fetches categories (not just transactions)
+- **Lesson:** Never silently swallow API errors — at minimum log to console and show user feedback when the result is critical (empty UI).
+
+### knownTimestamps Stale Cache Bug
+- **Issue:** `knownTimestamps` was persisted to localStorage. On new sessions, all previously-fetched timestamps were sent to parseAndFetch, which filtered them all out. Result: "No pending transactions" despite 31 pending in the sheet.
+- **Root cause:** The server already filters by `status === 'pending'`, making client-side timestamp dedup redundant for excluding categorized transactions.
+- **Fix:** Made knownTimestamps in-memory only (not persisted). Each session starts fresh. Server-side status filter handles dedup.
+
+### Timestamp Format Bug (v7 → v7.1)
+- **Issue:** Sheets auto-parses `"2026-04-12 14:13:00"` strings into JS Date objects when read via `getValues()`
+- **Symptom:** `.toString()` on Date produced `"Tue Apr 14 2026 18:21:00 GMT-0600 (Mountain Daylight Time)"`
+- **Fix:** Use `Utilities.formatDate(date, timezone, 'yyyy-MM-dd HH:mm:ss')` in both `handleParseAndFetch_()` and `handleCategorize_()`
+- **Lesson:** Always format Date objects explicitly when returning from Apps Script — never rely on `.toString()`
+
+### processInfoAlerts refactor
+- `processInfoAlerts()` — menu version with `SpreadsheetApp.getUi()` alerts
+- `processInfoAlerts_()` — internal version, returns `{ parsed, threads, errors, errorDetails }`, no UI calls
+- Both paths share the same parsing logic; split needed because `getUi()` throws in web app context
+
+## GitHub Repository
+- **Repo:** `fahyad/gsheetbudget2026-categorizerApp`
+- **URL:** https://github.com/fahyad/gsheetbudget2026-categorizerApp
+- **Local path:** `/Users/fahyadkhan/gsheetbudget2026-categorizerApp`
+- **Visibility:** Public (required for GitHub Pages free hosting)
+- **Purpose:** PWA for categorizing budget transactions on phone
+- **GitHub CLI:** authenticated as `fahyad` via `gh` (keyring) — can push directly
+- **Git protocol:** HTTPS
+
+## Technical Decisions
+| Decision | Rationale |
+|----------|-----------|
+| Period Start = pay date | User preference |
+| Period 1 starts Dec 25, 2025 | Captures Jan 1 fixed expenses |
+| Period 26 ends Jan 5, 2027 | Covers gap until next pay |
+| Pay Date column removed | Redundant with Period Start |
+| Period Start/End hidden | Needed by formulas, not by user |
+| Categories in D:E | No gap, clean layout |
+| Fixed Monthly Expenses: compact master list | User wanted usable, editable sheet |
+| SUMPRODUCT for fixed deductions | Eliminates expanded date rows; fully formula-driven |
+| LET() in SUMPRODUCT | Avoids repeating INDEX/MATCH; cleaner formula |
+| 13-month range (Jan 2026 – Jan 2027) | Period 26 extends into Jan 2027 |
+| FixedExpenses_DueDay (not DueDate) | Stores day-of-month (1–31), not full dates |
+| Purchases negative, income/refunds positive | User preference |
+| Gross Pay from Transactions | Variable per period |
+| Main + Sub category model | User wants grouping |
+| Budget rebuilt on Add Category | Preserves Budgeted values |
+| updateWorkbook() safe update | User needs to update script without losing data |
+| Manual email trigger (not auto) | User controls when parsing happens |
+| Trigger from PWA | One app for everything — parse + categorize from phone |
+| Timestamp as dedup key | Date+time from email is unique per transaction |
+| PWA local cache | Prevents re-fetching already-loaded transactions |
+| Pending tab in same sheet | Simpler, everything in one workbook |
+| Batched Gmail API calls | 4 calls total vs N per email; 2–4 sec expected |
+| getBody() with HTML stripping | getPlainBody() fails on HTML-only emails (Scotiabank) |
+| Batch sync (not per-txn) | 3 API calls vs 2+N; local categorize/undo instant; fewer failure points |
+| Sync queue in localStorage | Survives page close; auto-loads on reopen; beforeunload warns if unsent |
+| No knownTimestamps (removed) | Server filters by status=pending; syncQueue handles local dedup; old approach caused stale cache bug |
+| Credit alerts only (Phase 1) | Debit alerts have different format; add later |
+| `findNextEmptyRow_` scans col A | getLastRow() fails with formula-filled rows; col A is only pure data |
+| LockService on mutating handlers | Prevents concurrent requests from corrupting sheet state |
+| Write verification after setValues | Catches silent write failures before updating Pending |
+| Sheet-based activity log + console mirror | User-visible tab + Cloud Logging for cross-session debug |
+| Category validation in handlers | Fast-fail with clear error instead of silent data validation rejection |
+| Archive logs at 5000 rows | Prevents Logs tab from slowing down the sheet |
+| Apps Script as web app API | Free, handles auth via Google login, has Sheets access |
+| GitHub Pages PWA | Free hosting, installable on phone, no app store |
+
+## Sign Convention
+- **Purchases:** negative (e.g. -50)
+- **Income/Paycheck:** positive (e.g. +2000)
+- **Refunds:** positive (e.g. +15)
+- Budget Spent: `=-SUMIFS(...)` → positive display
+- Available: Prior Available + Budgeted - Spent
+
+## Category Structure
+| Main Category | Sub Category | In Budget? |
+|---------------|--------------|------------|
+| Income | Paycheck | No (_income row handles it) |
+| Living | Groceries | Yes |
+| Living | Gas | Yes |
+| Living | Parking | Yes |
+| Nice Things | House things | Yes |
+| Nice Things | Saajidah spending | Yes |
+| Nice Things | Fahyad spending | Yes |
+| Nice Things | Small trip | Yes |
+
+## Fixed Monthly Expenses
+| Name | Monthly Amount | Due Day |
+|------|---------------|---------|
+| Rent | $1,550.00 | 1 |
+| Epcor | $60.00 | 1 |
+| Phones | $88.00 | 1 |
+| Student Loans | $250.00 | 1 |
+
+Total: $1,948/month
+
+## Pay Periods
+| # | Period Start | Period End |
+|---|-------------|------------|
+| 1 | Dec 25 | Jan 20 |
+| 2 | Jan 21 | Feb 3 |
+| 3 | Feb 4 | Feb 17 |
+| 4 | Feb 18 | Mar 3 |
+| 5 | Mar 4 | Mar 17 |
+| 6 | Mar 18 | Mar 31 |
+| 7 | Apr 1 | Apr 14 |
+| 8 | Apr 15 | Apr 28 |
+| 9 | Apr 29 | May 12 |
+| 10 | May 13 | May 26 |
+| 11 | May 27 | Jun 9 |
+| 12 | Jun 10 | Jun 23 |
+| 13 | Jun 24 | Jul 7 |
+| 14 | Jul 8 | Jul 21 |
+| 15 | Jul 22 | Aug 4 |
+| 16 | Aug 5 | Aug 18 |
+| 17 | Aug 19 | Sep 1 |
+| 18 | Sep 2 | Sep 15 |
+| 19 | Sep 16 | Sep 28 |
+| 20 | Sep 29 | Oct 13 |
+| 21 | Oct 14 | Oct 27 |
+| 22 | Oct 28 | Nov 9 |
+| 23 | Nov 10 | Nov 24 |
+| 24 | Nov 25 | Dec 8 |
+| 25 | Dec 9 | Dec 22 |
+| 26 | Dec 23 | Jan 5 |
+
+## Development Workflow (clasp)
+
+As of v9, Apps Script code lives in git at `apps-script/Code.js` in this repo. Local file is `.js` (clasp convention); it lands as `Code.gs` in Apps Script.
+
+### Daily loop
+```bash
+cd apps-script
+# edit Code.js in your editor
+clasp push               # upload to Apps Script
+clasp deploy -d "desc"   # create a new deployment version (makes the web app use this code)
+```
+
+### Useful commands
+```bash
+clasp status             # show changed files (what will be pushed)
+clasp pull               # pull changes made via the Apps Script editor
+clasp logs               # view Cloud Logging output (console.log/warn/error)
+clasp logs --watch       # live tail
+clasp open               # open the Apps Script editor in browser
+clasp versions           # list deployment history
+clasp deployments        # list all active deployments
+```
+
+### Rollback
+```bash
+clasp versions                                  # find the version number to revert to
+clasp deploy -i <deploymentId> -V <versionNumber> -d "rollback to vN"
+```
+
+### Setup on a new machine
+```bash
+mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global
+npm install -g @google/clasp
+export PATH="$HOME/.npm-global/bin:$PATH"   # add to ~/.zshrc too
+clasp login                                 # OAuth (browser)
+cd apps-script
+clasp pull                                  # verify link works
+```
+
+### Files in `apps-script/`
+| File | Purpose |
+|------|---------|
+| `Code.js` | Main script (1600+ lines). Source of truth. |
+| `appsscript.json` | Manifest (OAuth scopes, runtime version, etc.) |
+| `.clasp.json` | Local→remote project link (scriptId + rootDir). Keep in git; no secrets. |
+| `.claspignore` | Allowlist: only `Code.js` + `appsscript.json` get pushed. |
+
+### Secrets
+- OAuth token lives in `~/.clasprc.json` (never inside repo; explicit in root `.gitignore`).
+- The API key for the web app is in Apps Script Script Properties (set via menu "Set API Key"); never committed.
+
+### Script ID
+Stored in `apps-script/.clasp.json`. Public (embedded in deployment URLs anyway). Safe to commit.
+
+### MCP integration (optional)
+`~/Library/Application Support/Claude/claude_desktop_config.json` has a `mcpServers.clasp` entry that lets Claude call clasp directly as tools after restarting Claude Desktop. The CLI works fine either way.
