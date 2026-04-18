@@ -405,7 +405,7 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v10)
+## Web App API (v10.2)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |
@@ -415,6 +415,7 @@ This catches silent write failures (protected ranges, data validation rejects, q
 | GET | `batchCategorize` | `?action=batchCategorize&apiKey=KEY&items=[{"ts":"...","cat":"..."},...]` | `{ success, results: [{timestamp, success, error?}], summary: {total, succeeded, failed} }` |
 | GET | `addCategory` | `?action=addCategory&apiKey=KEY&mainCategory=X&subCategory=Y` | `{ success, category: {main, sub}, budgetRowsAdded }` |
 | GET | `dumpSheet` | `?action=dumpSheet&apiKey=KEY&metadata=true` *or* `&tab=X&range=A1:F10[&includeFormulas=true]` | `{ success, spreadsheetName?, sheets?, tab?, range?, rows?, cols?, values? }` |
+| GET | `version` | `?action=version&apiKey=KEY` | `{ success, appsScript: { version, lastEdited, latestVersion, latestLastEdited, updateNeeded, lastChecked, error? } }` |
 | GET | `categorize` | `?action=categorize&apiKey=KEY&timestamp=X&category=Y` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
 | GET | `uncategorize` | `?action=uncategorize&apiKey=KEY&timestamp=X&merchant=X&amount=X&category=X` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
 
@@ -440,6 +441,27 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 
 ### Why dumpSheet exists
 Drive MCP server disconnected. gcloud OAuth blocked for personal Gmail accounts ("This app is blocked"). Community MCP servers (mcp-google-sheets, etc.) hit the same OAuth wall. Path of least resistance: an endpoint on the Apps Script we already own + the API key we already have. Permanent, no OAuth verification dance, no new dependencies.
+
+### Version Display Architecture (added v10.2)
+
+**Problem:** User had multiple sheets in Drive (some old). Opened one and didn't realize it was bound to OLD Apps Script code. Wanted in-sheet version display + "is this stale?" check.
+
+**Source of truth:** `apps-script/VERSION.txt` in this repo (2 lines: version + timestamp). Publicly readable via `https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt`. No auth needed (public repo).
+
+**Per-sheet awareness:** Each Apps Script deployment carries its own `APP_SCRIPT_VERSION` and `APP_SCRIPT_LAST_EDITED` constants (set at push time). At runtime it fetches `VERSION.txt` from GitHub via `UrlFetchApp.fetch()` to know what the LATEST version is, and compares to its own. If different → "Update needed: YES".
+
+**Caching:** GitHub fetch result cached in `PropertiesService.getScriptProperties()` for 1 hour to avoid hammering GitHub on every `onOpen()`. `refreshVersionInfo()` clears the cache to force a fresh check.
+
+**Auto-refresh on sheet open:** `onOpen()` calls `refreshVersionInfo()` (wrapped in try/catch so it doesn't break menu rendering if fetch fails).
+
+**deploy.sh auto-bump:** Updates `APP_SCRIPT_LAST_EDITED` constant in Code.js to current time, reads `APP_SCRIPT_VERSION` constant, writes both to `VERSION.txt`. Single command keeps everything in sync.
+
+**OAuth scope:** UrlFetchApp requires `script.external_request` scope. Added explicit `oauthScopes` array to `appsscript.json` (also covers existing scopes: `spreadsheets.currentonly`, `script.container.ui`, `gmail.modify`, `userinfo.email`, `script.scriptapp`). Web app deployed as USER_DEPLOYING runs with owner's auth — owner must re-authorize when scopes change by running `requestPermissions()` from the editor. (Can't trigger auth dialog from a function with try/catch around the new API call — it swallows the error before Google can prompt.)
+
+**Display locations:**
+- Sheet → Instructions tab rows 1-6 (color-coded: blue header, green/red/yellow update status row)
+- PWA → Setup screen `#version-info` block (PWA version, AS version, update status with color)
+- API → `?action=version` returns full JSON
 
 ### Authentication
 - API key stored in Apps Script **Script Properties** (not hardcoded)

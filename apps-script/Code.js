@@ -35,7 +35,7 @@
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
 var APP_SCRIPT_VERSION = 'v10.2';
-var APP_SCRIPT_LAST_EDITED = '2026-04-18 16:24 MDT';
+var APP_SCRIPT_LAST_EDITED = '2026-04-18 16:31 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -854,6 +854,25 @@ function writeVersionBlock_(sheet) {
   // Row 6: clear formatting
   sheet.getRange(6, 1).setBackground(null).setFontColor('#000000')
     .setFontWeight('normal').setFontStyle('normal').setFontSize(11);
+}
+
+/**
+ * One-time setup: run this from the Apps Script editor to grant the
+ * UrlFetchApp permission. We deliberately call UrlFetchApp.fetch with NO
+ * try/catch so that if permission is missing, Google shows the auth dialog.
+ * Once you grant the permission, refreshVersionInfo + the version endpoint
+ * will work properly.
+ *
+ * After running, check Execution log → should show "OK — fetched VERSION.txt".
+ */
+function requestPermissions() {
+  // This call will trigger the auth dialog if scope is not granted.
+  var resp = UrlFetchApp.fetch(LATEST_VERSION_URL);
+  var content = resp.getContentText();
+  Logger.log('OK — fetched VERSION.txt (' + content.length + ' bytes):\n' + content);
+  // Clear the cache so subsequent fetches re-pull the real value
+  PropertiesService.getScriptProperties().deleteProperty('LATEST_VERSION_CACHE');
+  return content;
 }
 
 /**

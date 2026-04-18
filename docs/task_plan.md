@@ -5,11 +5,12 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v10 — v9 + `dumpSheet` read-only endpoint for Claude inspection. Lives at `apps-script/Code.js` (managed via clasp).
-- **PWA:** v0.7 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — batch sync, hardcoded API URL, key-only setup.
-- **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy.
+- **Apps Script:** v10.2 — v10 + version display in Instructions tab + `?action=version` endpoint. Lives at `apps-script/Code.js` (managed via clasp).
+- **PWA:** v0.8 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — version info displayed in Setup screen.
+- **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
+- **Version visible everywhere:** Instructions tab rows 1-6 (with color-coded "Update needed"), PWA Setup screen, `?action=version` endpoint. Source of truth: `apps-script/VERSION.txt` on GitHub.
 
 ## Phases — Completed
 
@@ -72,9 +73,22 @@
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
 - **Status:** complete
 
+### Phase 13: Version Display (v10.2 + PWA v0.8)
+- User confused by old sheets bound to outdated Apps Script — wanted in-sheet version display
+- Added `apps-script/VERSION.txt` as source of truth (publicly readable on GitHub raw URL)
+- Code.js: `APP_SCRIPT_VERSION` + `LAST_EDITED` constants, GitHub fetch via `UrlFetchApp.fetch()` cached in Script Properties
+- `writeVersionBlock_` writes 6-row color-coded display to Instructions tab rows 1–6
+- New menu item "Refresh Version Info" + auto-refresh on `onOpen()`
+- `?action=version` endpoint for PWA to query
+- PWA Setup screen shows PWA + Apps Script versions + update status
+- `appsscript.json` explicit `oauthScopes` array (added `script.external_request`)
+- `requestPermissions()` helper to trigger one-time auth dialog (no try/catch around UrlFetchApp)
+- `deploy.sh` auto-bumps `LAST_EDITED` timestamp + writes `VERSION.txt` on every deploy
+- **Status:** complete
+
 ## Phases — Future
 
-### Phase 13: Auto-Categorization (not started)
+### Phase 14: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
 - [ ] Known merchants auto-categorize during parseAndFetch (skip Pending queue)
 - [ ] Only unknown merchants need manual review in PWA
@@ -96,7 +110,7 @@
 - But fragile — re-editing Due Day will likely break things
 - **Cleanup:** select C2:C5 → Format → Number → Plain → re-enter values
 
-### Phase 14: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+### Phase 15: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
 - [ ] Hardcoded 2026 pay dates (problem in 2027)
 - [ ] 999-row pre-filled formulas overhead (cleanup)
 - [ ] Pagination for very large Pending lists

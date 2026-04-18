@@ -421,11 +421,63 @@ The Logs tab from v9 is collecting data correctly:
 - Sheet state fully visible to Claude going forward
 - Two real data issues identified and documented for future cleanup
 
+## Session: 2026-04-18 (cont.) — v10.2 + PWA v0.8 version display
+
+### Goal
+User opened an OLD sheet by mistake and didn't realize it was bound to outdated Apps Script code. Wanted in-sheet display of: current Apps Script version, last edited date, "is an update needed?". Same for PWA.
+
+### Architecture decision
+- **Source of truth:** `apps-script/VERSION.txt` in repo (publicly readable on GitHub raw URL — no OAuth needed)
+- Each deployed Apps Script carries its own `APP_SCRIPT_VERSION` constant
+- At runtime: `UrlFetchApp.fetch()` GitHub VERSION.txt, compare to local constant
+- "Update needed: Yes/No" with color coding (red/green)
+
+### v10.2 changes — Apps Script
+- `apps-script/VERSION.txt` (NEW) — single source of truth
+- `Code.js`:
+  - `APP_SCRIPT_VERSION` + `APP_SCRIPT_LAST_EDITED` + `LATEST_VERSION_URL` constants
+  - `getLatestVersionInfo_()` — fetches GitHub VERSION.txt, caches in Script Properties for 1 hour, falls back to cached on failure
+  - `writeVersionBlock_(sheet)` — writes 6-row version display to Instructions rows 1–6 with color-coded update status
+  - `refreshVersionInfo()` — menu function, force-refresh
+  - `requestPermissions()` — one-time auth helper (no try/catch around UrlFetchApp so Google shows the auth dialog)
+  - `handleVersion_()` — API endpoint
+  - Modified `buildInstructionsTab_()` — existing content shifts to row 7+, version block fills 1–6
+  - Modified `onOpen()` — auto-refreshes version block + adds "Refresh Version Info" menu item
+  - Modified `routeAction_` + `summarizeResult_` for the new endpoint
+- `appsscript.json` — explicit `oauthScopes` array including `script.external_request` for UrlFetchApp
+- `deploy.sh` — auto-bumps `APP_SCRIPT_LAST_EDITED` to current time + writes `VERSION.txt` before push. Reads `APP_SCRIPT_VERSION` as single source. Single command keeps everything in sync.
+
+### v0.8 changes — PWA
+- `js/config.js`: `APP_VERSION` + `APP_LAST_EDITED` constants
+- `js/api.js`: `fetchVersion()` function
+- `index.html`: `#version-info` block in Setup screen with PWA + Apps Script + update status rows
+- `js/app.js`: `populateVersionInfo()` — populates the block, handles error states gracefully
+- `css/style.css`: `#version-info` styling, color classes for update status (red `update-needed`, green `up-to-date`)
+- Bumped v0.7 → v0.8, SW cache v7 → v8
+
+### Authorization gotcha (lesson learned)
+- Web apps deployed `USER_DEPLOYING` run with the OWNER's OAuth grants. Adding a new scope (UrlFetchApp) doesn't auto-extend the grant.
+- Re-deploying alone won't trigger re-auth — owner has to MANUALLY re-grant from the editor.
+- And if the new scope is wrapped in try/catch, the auth error is swallowed before Google can show the auth dialog. Solution: temporary `requestPermissions()` function with NO try/catch around the UrlFetchApp call. User runs it from the editor → Google shows the dialog → user grants → done.
+- After re-auth, all deployed code immediately picks up the new permission (no re-deploy needed).
+
+### Verification
+- `?action=version` returns `{version: "v10.2", latestVersion: "v10.2", updateNeeded: false, error: null}` ✓
+- Instructions tab rows 1–6 populated with version info ✓ (still shows old error message until next `onOpen`/`Refresh Version Info` — auth was granted AFTER last refresh)
+- VERSION.txt publicly accessible on GitHub raw ✓
+- 4 deploys done this session (@10 v10.2 initial, @11 manifest scopes, @12 force push, @13 + requestPermissions helper)
+- Production deployment ID UNCHANGED — PWA still works against same URL
+
+### Status
+- v10.2 deployed + authorized + tested
+- PWA v0.8 live on GitHub Pages
+- User just needs to reload the sheet (or run "Refresh Version Info" from menu) to see the green "Update needed: No" in the Instructions block
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.1 (added dumpSheet endpoint) + PWA v0.7 + clasp workflow. Sheet now inspectable by Claude via API. Two data issues documented (orphan rows, Due Day format). |
-| Where am I going? | User decides on cleanup of orphan rows ($439 invisible spending) and Due Day formatting. Then optional: delete orphan deployments, Phase 12 auto-categorization. |
+| Where am I? | Code.gs v10.2 (version display + handleVersion_ endpoint) + PWA v0.8 (version info block) + clasp workflow. Sheet shows version in Instructions rows 1-6. Auth granted for UrlFetchApp scope. |
+| Where am I going? | User decides on cleanup of orphan rows ($439 invisible spending) and Due Day formatting. Then optional: delete orphan deployments, Phase 14 auto-categorization. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 10 Code.gs iterations + 7 PWA iterations; getLastRow + formula-filled cells (THE lesson, twice now — bit us, then we shipped a fix, then dumpSheet revealed orphan victims); batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail accounts, OAuth-based Google API access is blocked — add an endpoint to the Apps Script you already own instead** |
-| What have I done? | Script v10 (v9 + dumpSheet read-only endpoint for Claude) + PWA v0.7 (key-only setup) + clasp migration (git-versioned Code.js, one-command deploy.sh). Sheet now inspectable from Claude without OAuth. |
+| What have I learned? | 11+ Code.gs iterations + 8 PWA iterations; getLastRow + formulas; batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail OAuth access blocked → use Apps Script endpoints**; **scope changes need manual re-auth via no-try/catch helper function**; deploy.sh auto-bumps timestamp + VERSION.txt for stale-detection from GitHub raw URL. |
+| What have I done? | Script v10.2 (v10 + version display + version endpoint + GitHub-fetched update check) + PWA v0.8 (version info in Setup) + deploy.sh auto-bumps. User no longer confused about which sheet is bound to which version. |

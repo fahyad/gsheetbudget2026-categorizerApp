@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v10 (v9 + `dumpSheet` read-only endpoint for Claude inspection)
-- **PWA:** v0.7 (batch sync + hardcoded URL + key-only setup)
+- **Apps Script:** v10.2 (v10 + version display in Instructions tab + `version` API endpoint)
+- **PWA:** v0.8 (v0.7 + version info display in Setup screen)
 
 ## Common commands
 
@@ -73,6 +73,19 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 Caps at 10000 cells per request. Read-only (no writes). API-key gated.
 
 Tabs in this sheet: `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Pending`, `Transactions`.
+
+## Version display (added v10.2)
+
+**Source of truth for "latest version":** `apps-script/VERSION.txt` in this repo. Auto-bumped by `deploy.sh` on every deploy. Publicly accessible via `https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt`.
+
+**Where it shows up:**
+- **Sheet → Instructions tab rows 1-6**: Version, last edited, "Update needed: Yes/No" (green if no, red if yes), last checked timestamp. Auto-refreshed on `onOpen()`. Manually via menu "Budget Tools → Refresh Version Info".
+- **PWA → Setup screen**: PWA version + Apps Script version + update status. Refreshes when user opens Settings.
+- **API endpoint**: `?action=version&apiKey=...` returns full JSON.
+
+**Auto-bump on deploy:** `./deploy.sh "..."` updates `APP_SCRIPT_LAST_EDITED` in Code.js to current timestamp + writes `VERSION.txt` automatically. The VERSION number itself (`v10.2`) is manually bumped in Code.js by editing `APP_SCRIPT_VERSION = 'v10.2'` when shipping a meaningful change.
+
+**If you change the OAuth scopes** (e.g. add a new Google API like UrlFetchApp), you must re-authorize: open Apps Script editor → run `requestPermissions()` from the function dropdown → grant the new permission. The web app deployed as USER_DEPLOYING runs with the owner's auth, which doesn't auto-update on scope changes.
 
 ## PWA changes
 PWA is plain static files at the repo root. GitHub Pages auto-deploys from `main`. To deploy:
