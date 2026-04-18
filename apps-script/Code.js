@@ -32,6 +32,13 @@
  */
 
 // ================================================================
+// VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
+// ================================================================
+var APP_SCRIPT_VERSION = 'v10.2';
+var APP_SCRIPT_LAST_EDITED = '2026-04-18 16:24 MDT';
+var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
+
+// ================================================================
 // MENU
 // ================================================================
 
@@ -47,7 +54,11 @@ function onOpen() {
     .addItem('Set API Key', 'setApiKey')
     .addSeparator()
     .addItem('View Activity Log', 'showLogsTab')
+    .addItem('Refresh Version Info', 'refreshVersionInfo')
     .addToUi();
+
+  // Auto-refresh version info on open. Fire-and-forget — don't block menu.
+  try { refreshVersionInfo(); } catch (e) { /* fail silently */ }
 }
 
 // ================================================================
@@ -68,6 +79,7 @@ function routeAction_(action, params) {
   if (action === 'addCategory')      return handleAddCategory_(params);
   if (action === 'batchCategorize')  return handleBatchCategorize_(params);
   if (action === 'dumpSheet')        return handleDumpSheet_(params);
+  if (action === 'version')          return handleVersion_(params);
   return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
 }
 
@@ -726,6 +738,160 @@ function handleDumpSheet_(params) {
 }
 
 // ================================================================
+// VERSION INFO
+// ================================================================
+
+/**
+ * Fetches the latest version info from VERSION.txt on GitHub. Cached for 1 hour
+ * in Script Properties to avoid hammering GitHub on every onOpen.
+ *
+ * Returns: { latestVersion, latestLastEdited, fetchedAt, error? }
+ */
+function getLatestVersionInfo_() {
+  var props = PropertiesService.getScriptProperties();
+  var cachedRaw = props.getProperty('LATEST_VERSION_CACHE');
+  var now = new Date().getTime();
+
+  if (cachedRaw) {
+    try {
+      var cached = JSON.parse(cachedRaw);
+      // Cache TTL: 1 hour
+      if (cached.fetchedAtMs && (now - cached.fetchedAtMs < 3600000)) {
+        return cached;
+      }
+    } catch (e) { /* corrupt cache — fall through to refresh */ }
+  }
+
+  var info;
+  try {
+    var resp = UrlFetchApp.fetch(LATEST_VERSION_URL, { muteHttpExceptions: true });
+    if (resp.getResponseCode() !== 200) {
+      throw new Error('HTTP ' + resp.getResponseCode());
+    }
+    var lines = resp.getContentText().trim().split('\n');
+    info = {
+      latestVersion: (lines[0] || '').trim(),
+      latestLastEdited: (lines[1] || '').trim(),
+      fetchedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm zzz'),
+      fetchedAtMs: now
+    };
+  } catch (err) {
+    // Network failure: fall back to cached value (may be > 1 hr old) or empty
+    if (cachedRaw) {
+      try {
+        info = JSON.parse(cachedRaw);
+        info.error = 'fetch failed: ' + err.toString() + ' (using cached)';
+        return info;
+      } catch (e) { /* fall through */ }
+    }
+    info = {
+      latestVersion: '?',
+      latestLastEdited: '?',
+      fetchedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm zzz'),
+      fetchedAtMs: now,
+      error: 'fetch failed: ' + err.toString()
+    };
+    // Don't cache failures — try again next time
+    return info;
+  }
+
+  props.setProperty('LATEST_VERSION_CACHE', JSON.stringify(info));
+  return info;
+}
+
+/**
+ * Writes the version block to rows 1-6 of the Instructions tab.
+ * Layout:
+ *   Row 1: APPS SCRIPT VERSION (header bar)
+ *   Row 2: Version: vX.Y
+ *   Row 3: Last edited: ...
+ *   Row 4: Update needed: Yes/No (with color)
+ *   Row 5: Last checked: ...
+ *   Row 6: blank spacer
+ */
+function writeVersionBlock_(sheet) {
+  var latest = getLatestVersionInfo_();
+  var updateNeeded = latest.latestVersion && latest.latestVersion !== '?' &&
+                     latest.latestVersion !== APP_SCRIPT_VERSION;
+
+  var updateText;
+  if (latest.error) {
+    updateText = 'Update needed: ? (could not check — ' + latest.error + ')';
+  } else if (updateNeeded) {
+    updateText = 'Update needed: YES — latest is ' + latest.latestVersion +
+                 ' (this sheet has ' + APP_SCRIPT_VERSION + ')';
+  } else {
+    updateText = 'Update needed: No (latest is ' + latest.latestVersion + ')';
+  }
+
+  var rows = [
+    ['APPS SCRIPT VERSION'],
+    ['Version: ' + APP_SCRIPT_VERSION],
+    ['Last edited: ' + APP_SCRIPT_LAST_EDITED],
+    [updateText],
+    ['Last checked: ' + (latest.fetchedAt || '?')],
+    ['']
+  ];
+
+  sheet.getRange(1, 1, 6, 1).setValues(rows);
+
+  // Formatting
+  // Row 1: header bar
+  sheet.getRange(1, 1).setFontSize(14).setFontWeight('bold')
+    .setBackground('#1a237e').setFontColor('#ffffff').setHorizontalAlignment('center');
+  // Rows 2-3: regular
+  sheet.getRange(2, 1, 2, 1).setFontSize(11).setFontWeight('normal')
+    .setBackground(null).setFontColor('#333333');
+  // Row 4: colored by update status
+  var updateBg = updateNeeded ? '#ffcdd2' : '#c8e6c9';
+  var updateFg = updateNeeded ? '#b71c1c' : '#1b5e20';
+  if (latest.error) { updateBg = '#fff9c4'; updateFg = '#827717'; }
+  sheet.getRange(4, 1).setFontSize(11).setFontWeight('bold')
+    .setBackground(updateBg).setFontColor(updateFg);
+  // Row 5: last checked (small italic)
+  sheet.getRange(5, 1).setFontSize(9).setFontStyle('italic')
+    .setBackground(null).setFontColor('#666666');
+  // Row 6: clear formatting
+  sheet.getRange(6, 1).setBackground(null).setFontColor('#000000')
+    .setFontWeight('normal').setFontStyle('normal').setFontSize(11);
+}
+
+/**
+ * Menu function: refreshes the version block on the Instructions tab.
+ * Forces a fresh GitHub fetch (clears the 1-hour cache first).
+ */
+function refreshVersionInfo() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('Instructions');
+  if (!sheet) return; // no instructions tab — fail silently
+  // Force fresh fetch
+  PropertiesService.getScriptProperties().deleteProperty('LATEST_VERSION_CACHE');
+  writeVersionBlock_(sheet);
+}
+
+/**
+ * version: API endpoint that returns version info for the PWA to display.
+ */
+function handleVersion_(params) {
+  var latest = getLatestVersionInfo_();
+  var updateNeeded = latest.latestVersion && latest.latestVersion !== '?' &&
+                     latest.latestVersion !== APP_SCRIPT_VERSION;
+
+  return jsonResponse_({
+    success: true,
+    appsScript: {
+      version: APP_SCRIPT_VERSION,
+      lastEdited: APP_SCRIPT_LAST_EDITED,
+      latestVersion: latest.latestVersion,
+      latestLastEdited: latest.latestLastEdited,
+      updateNeeded: !!updateNeeded,
+      lastChecked: latest.fetchedAt,
+      error: latest.error || null
+    }
+  });
+}
+
+// ================================================================
 // ACTIVITY LOG
 // ================================================================
 
@@ -834,6 +1000,12 @@ function summarizeResult_(action, parsed) {
       }
       return (parsed.tab || '') + ' ' + (parsed.range || '') +
         ' (' + (parsed.rows || 0) + 'x' + (parsed.cols || 0) + ')';
+    }
+    if (action === 'version') {
+      if (!parsed.appsScript) return '';
+      var v = parsed.appsScript;
+      return v.version + ' (latest: ' + v.latestVersion + ', update: ' +
+        (v.updateNeeded ? 'YES' : 'no') + ')';
     }
     if (action === 'batchCategorize') {
       var s = parsed.summary || {};
@@ -1525,20 +1697,27 @@ function buildInstructionsTab_(sheet) {
     ['Do not share your API key or web app URL publicly', 10, false, '#fff3e0', '#e65100'],
   ];
 
+  // Existing instruction content starts at row 7 — rows 1-6 reserved for
+  // the version block (written by writeVersionBlock_ below).
+  var INSTRUCTION_START_ROW = 7;
+
   var values = [];
   for (var i = 0; i < rows.length; i++) {
     values.push([rows[i][0]]);
   }
-  sheet.getRange(1, 1, rows.length, 1).setValues(values);
+  sheet.getRange(INSTRUCTION_START_ROW, 1, rows.length, 1).setValues(values);
 
   for (var j = 0; j < rows.length; j++) {
-    var range = sheet.getRange(j + 1, 1);
+    var range = sheet.getRange(j + INSTRUCTION_START_ROW, 1);
     range.setFontSize(rows[j][1]);
     if (rows[j][2]) range.setFontWeight('bold');
     if (rows[j][3]) range.setBackground(rows[j][3]);
     if (rows[j][4]) range.setFontColor(rows[j][4]);
     range.setWrap(true);
   }
+
+  // Populate version block in rows 1-6
+  try { writeVersionBlock_(sheet); } catch (e) { /* fail silently if GitHub unreachable */ }
 
   var protection = sheet.protect().setDescription('Instructions — do not edit');
   protection.setWarningOnly(true);
