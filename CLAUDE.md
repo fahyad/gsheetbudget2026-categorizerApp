@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v9 (Logs tab + LockService + write verification)
+- **Apps Script:** v10 (v9 + `dumpSheet` read-only endpoint for Claude inspection)
 - **PWA:** v0.7 (batch sync + hardcoded URL + key-only setup)
 
 ## Common commands
@@ -52,6 +52,28 @@ cd apps-script && clasp pull
 cd apps-script && clasp open
 ```
 
+## Reading the Google Sheet (no OAuth needed)
+
+You have a `dumpSheet` endpoint that lets you read any tab via the existing API key. Use this when you need to inspect sheet state — Drive MCP doesn't work for this account, gcloud OAuth is blocked for personal Gmail.
+
+```bash
+URL="https://script.google.com/macros/s/AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ/exec"
+KEY="p0LiMHcdpP0xeYaN0gBCnk4z91Pjhf4czZ0OjVS1"
+
+# List all tabs + dimensions
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&metadata=true" | python3 -m json.tool
+
+# Read a specific tab/range (display values — formatted strings)
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Setup&range=A1:E27" | python3 -m json.tool
+
+# Read with formulas instead of values (debugging formulas)
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeFormulas=true" | python3 -m json.tool
+```
+
+Caps at 10000 cells per request. Read-only (no writes). API-key gated.
+
+Tabs in this sheet: `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Pending`, `Transactions`.
+
 ## PWA changes
 PWA is plain static files at the repo root. GitHub Pages auto-deploys from `main`. To deploy:
 ```bash
@@ -71,6 +93,14 @@ Bump `<span class="version">vX.Y</span>` in `index.html` AND `CACHE_VERSION` in 
 | `docs/task_plan.md` | Current state + phases — **read this first** |
 | `docs/findings.md` | Technical reference (architecture, bugs, decisions) |
 | `docs/progress.md` | Session log (chronological) |
+
+## Known data issues (as of 2026-04-18)
+
+These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
+
+1. **Transactions tab has orphan data in rows 1001–1008.** Eight transactions categorized via the buggy `findNextEmptyRow_` (pre-v9) ended up below the visible/formulaic range. They DON'T contribute to Budget Spent totals (named range `Transactions_Amount` only reaches row 1000). Total: $439.10. Cleanup deferred — see `docs/findings.md` "Orphan Transactions" section.
+
+2. **Fixed Monthly Expenses → Due Day column is formatted as Date, not Number.** Cells display "Dec 31, 1899" instead of "1". Underlying value is a Date object, but it coerces to numeric `1` when used in formulas — so the SUMPRODUCT in Budget _income works correctly. Display is just confusing. Cleanup: change column format to Number and re-enter values 1–31.
 
 ## Things that will trip you up (lessons from past sessions)
 

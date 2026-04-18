@@ -405,7 +405,7 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v9)
+## Web App API (v10)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |
@@ -414,8 +414,32 @@ This catches silent write failures (protected ranges, data validation rejects, q
 | GET | `categories` | `?action=categories&apiKey=KEY` | `{ success, categories: [{main, sub}] }` |
 | GET | `batchCategorize` | `?action=batchCategorize&apiKey=KEY&items=[{"ts":"...","cat":"..."},...]` | `{ success, results: [{timestamp, success, error?}], summary: {total, succeeded, failed} }` |
 | GET | `addCategory` | `?action=addCategory&apiKey=KEY&mainCategory=X&subCategory=Y` | `{ success, category: {main, sub}, budgetRowsAdded }` |
+| GET | `dumpSheet` | `?action=dumpSheet&apiKey=KEY&metadata=true` *or* `&tab=X&range=A1:F10[&includeFormulas=true]` | `{ success, spreadsheetName?, sheets?, tab?, range?, rows?, cols?, values? }` |
 | GET | `categorize` | `?action=categorize&apiKey=KEY&timestamp=X&category=Y` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
 | GET | `uncategorize` | `?action=uncategorize&apiKey=KEY&timestamp=X&merchant=X&amount=X&category=X` | `{ success, transaction: {...} }` *(legacy — PWA no longer uses)* |
+
+### dumpSheet — read-only inspection (added v10)
+
+Lets Claude (or any API-key holder) inspect the spreadsheet without OAuth. Modes:
+
+- `metadata=true` → returns list of all tabs with name, rows, cols, maxRows/maxCols, hidden, tabColor (no `tab` needed)
+- `tab=X` → returns display values (formatted strings) of the whole tab
+- `tab=X&range=A1:F10` → values of the specified A1 range
+- `tab=X&range=...&includeFormulas=true` → returns formulas where present, values otherwise (mixed)
+
+**Caps response at 10000 cells.** API-key gated. Read-only — no writes possible.
+
+Example calls:
+```bash
+URL="https://script.google.com/macros/s/AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ/exec"
+KEY="<your api key>"
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&metadata=true"
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Setup&range=A1:E27"
+curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeFormulas=true"
+```
+
+### Why dumpSheet exists
+Drive MCP server disconnected. gcloud OAuth blocked for personal Gmail accounts ("This app is blocked"). Community MCP servers (mcp-google-sheets, etc.) hit the same OAuth wall. Path of least resistance: an endpoint on the Apps Script we already own + the API key we already have. Permanent, no OAuth verification dance, no new dependencies.
 
 ### Authentication
 - API key stored in Apps Script **Script Properties** (not hardcoded)
@@ -523,6 +547,42 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
 | Archive logs at 5000 rows | Prevents Logs tab from slowing down the sheet |
 | Apps Script as web app API | Free, handles auth via Google login, has Sheets access |
 | GitHub Pages PWA | Free hosting, installable on phone, no app store |
+
+## Known Data Issues (discovered via dumpSheet, 2026-04-18)
+
+### Orphan Transactions in rows 1001–1008
+Pre-v9, `findNextEmptyRow_` returned 1001 because `getLastRow()` counted formula-filled cells. Eight transactions categorized between Mar 31 and Apr 10 ended up in rows 1001–1008 of the Transactions tab. They are correctly formatted (Date, Merchant, Amount, Category) but:
+
+- The named range `Transactions_Amount` is C2:C1000 — so Budget Spent SUMIFS does NOT include them
+- The Main Category formula is only present in rows 2–1000 — so col E is blank for these rows
+- The Period FILTER formula is only present in rows 2–1000 — so col G is blank
+
+**Total invisible spending: $439.10**
+
+| Row | Date | Merchant | Amount | Category |
+|-----|------|----------|--------|----------|
+| 1001 | Mar 31 | SHOPPERS DRUG MART #0387 | -$16.79 | Fahyad spending |
+| 1002 | Apr 1 | SAFEWAY #8892 | -$26.24 | Groceries |
+| 1003 | Apr 1 | ESSO 7-ELEVEN 37839 | -$40.00 | Gas |
+| 1004 | Apr 2 | SHOPPERS DRUG MART #0387 | -$16.79 | Fahyad spending |
+| 1005 | Apr 7 | SHELL C81551 | -$250.00 | Gas |
+| 1006 | Apr 7 | HOMESENSE 123 | -$39.29 | House things |
+| 1007 | Apr 7 | ESSO 7-ELEVEN 37814 | -$30.00 | Gas |
+| 1008 | Apr 10 | PETRO-CANADA 85969 | -$20.00 | Gas |
+
+**Cleanup options (deferred):**
+1. One-shot Apps Script function: read rows 1001–1008, write to first empty rows in 2–1000, delete originals (`deleteRows(1001, 8)`)
+2. Manual cut-paste in the editor (8 rows, ~30 sec)
+3. Delete and re-categorize via the PWA (these are NOT in Pending tab anymore — would need to re-add)
+
+### Fixed Monthly Expenses → Due Day formatted as Date
+The Due Day column (C) is formatted as Date instead of Number. When you type "1" (meaning 1st of month), Sheets stores it as Date(1) → "Dec 31, 1899" in display. Underlying value coerces to numeric `1` in formulas, so the SUMPRODUCT in Budget _income (`=DATE(2026,M,dueDay)`) evaluates correctly — verified Budget Dec 25–Jan 20 _income = -$1948 = sum of all 4 expenses.
+
+**But it's fragile.** Editing this column to change a Due Day will produce confusing display and may break the formula if Sheets coerces the new value differently.
+
+**Cleanup (deferred):**
+- Select C2:C5 → Format → Number → Plain
+- Re-enter values 1, 1, 1, 1 (or actual due days)
 
 ## Sign Convention
 - **Purchases:** negative (e.g. -50)

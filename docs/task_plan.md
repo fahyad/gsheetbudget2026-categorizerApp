@@ -5,10 +5,11 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v9 — deployed, hardened with LockService + activity logging + write verification. Lives at `apps-script/Code.js` (managed via clasp, NOT manual paste).
+- **Apps Script:** v10 — v9 + `dumpSheet` read-only endpoint for Claude inspection. Lives at `apps-script/Code.js` (managed via clasp).
 - **PWA:** v0.7 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — batch sync, hardcoded API URL, key-only setup.
-- **Workflow:** `clasp` CLI (no more manual paste). `./deploy.sh "description"` is the one-command production deploy.
+- **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
+- **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
 
 ## Phases — Completed
 
@@ -64,15 +65,38 @@
 - API key rotated to fresh value (set via Apps Script menu by user)
 - **Status:** complete
 
+### Phase 12: Sheet Inspection from Claude (v10)
+- Drive MCP disconnected; gcloud OAuth blocked for personal Gmail; community MCPs hit same wall
+- Added `dumpSheet` read-only endpoint to Code.gs (modes: metadata, values, formulas)
+- API-key gated, capped at 10000 cells/request
+- Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
+- **Status:** complete
+
 ## Phases — Future
 
-### Phase 12: Auto-Categorization (not started)
+### Phase 13: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
 - [ ] Known merchants auto-categorize during parseAndFetch (skip Pending queue)
 - [ ] Only unknown merchants need manual review in PWA
 - **Status:** future
 
-### Phase 13: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
+
+### Orphan Transactions in rows 1001–1008 ($439.10 invisible spending)
+- 8 transactions categorized via the buggy `findNextEmptyRow_` (pre-v9) ended up below the named range
+- Detail in findings.md "Known Data Issues" section
+- **Cleanup options:**
+  - [ ] One-shot Apps Script function: read rows 1001–1008, write to first empty rows in 2–1000, deleteRows
+  - [ ] Manual cut-paste in editor (8 rows)
+  - [ ] Delete and re-add via PWA (these are not in Pending anymore)
+
+### Fixed Monthly Expenses Due Day formatted as Date
+- Cells display "Dec 31, 1899" instead of "1"
+- Underlying value coerces correctly in formulas (Budget _income shows -$1948 = correct sum)
+- But fragile — re-editing Due Day will likely break things
+- **Cleanup:** select C2:C5 → Format → Number → Plain → re-enter values
+
+### Phase 14: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
 - [ ] Hardcoded 2026 pay dates (problem in 2027)
 - [ ] 999-row pre-filled formulas overhead (cleanup)
 - [ ] Pagination for very large Pending lists

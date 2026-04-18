@@ -357,11 +357,75 @@ See findings.md "⚠️ CRITICAL: Always update the existing deployment" section
 - PWA v0.7 live on GitHub Pages
 - Awaiting user: (1) set new API key in Apps Script, (2) update PWA on each device
 
+## Session: 2026-04-18 — v10 dumpSheet endpoint + sheet inspection
+
+### Goal
+User asked if I could read the Google Sheet directly without Chrome MCP. Investigated and found:
+- Drive MCP server: disconnected (restart didn't bring it back)
+- gcloud + Sheets API: blocked ("This app is blocked" for personal Gmail OAuth verification)
+- Community MCP servers (mcp-google-sheets etc.): same OAuth wall
+- Anthropic native Sheets connector: not in MCP registry yet (Sheets via Cowork "in development" per Feb 2026 announcement)
+- Best path: add a read-only endpoint to the Apps Script we already own + use existing API key
+
+### v10: dumpSheet endpoint
+**New action `dumpSheet`** in Code.gs (read-only, API-key gated, capped at 10000 cells/request):
+
+- `?action=dumpSheet&apiKey=...&metadata=true` → list all tabs + dimensions + colors
+- `?action=dumpSheet&apiKey=...&tab=X&range=A1:F50` → display values
+- `?action=dumpSheet&apiKey=...&tab=X&range=...&includeFormulas=true` → formulas + values mixed
+
+Bug found and fixed during testing: `getTabColorObject().asRgbColor()` throws on tabs without color → wrapped in try/catch, returns null instead.
+
+Two deploys: v10 (initial) + v10.1 (tabColor fix). Both via `./deploy.sh`. Same deployment ID. Production version is now @9.
+
+### Sheet state inspection findings
+
+**Tab inventory (7 tabs):**
+| Tab | Status | Rows | Notes |
+|-----|--------|------|-------|
+| Instructions | OK | 79 | Documentation |
+| Logs | OK | 47 | Activity log working — captured the v10 deploy + tabColor crash |
+| Setup | OK | 27 | 26 periods + 7 categories |
+| Fixed Monthly Expenses | ⚠️ Display bug | 5 | Due Day column formatted as Date — see findings.md |
+| Budget | OK | 209 | 26 periods × 8 rows |
+| Pending | OK | 33 | 32 transactions waiting |
+| Transactions | ⚠️ Orphan rows 1001–1008 | 1008 | Pre-v9 bug wrote 8 transactions to wrong location |
+
+**Discovery 1 — Orphan transactions ($439.10 invisible to budget):**
+8 transactions categorized pre-v9 ended up in rows 1001–1008. They're correctly formatted but outside the named range `Transactions_Amount` (C2:C1000), so Budget Spent SUMIFS doesn't see them. Detailed table in findings.md "Known Data Issues" section.
+
+**Discovery 2 — Fixed Monthly Expenses Due Day shows "Dec 31, 1899":**
+Cell formatted as Date instead of Number. User typed `1` for "1st of month", Sheets stored it as Date(1) = Dec 31, 1899 (Sheets epoch day 1). Underlying value still coerces to numeric `1` so the SUMPRODUCT formula in Budget _income works correctly (verified: -$1948 = sum of 4 fixed expenses for Jan period). Display is just confusing.
+
+**Discovery 3 — Activity Log validated:**
+The Logs tab from v9 is collecting data correctly:
+- 5 successful `dumpSheet` calls this session (durations 331–656ms)
+- 1 crash captured at 15:51:20 (tabColor bug, full stack trace) — proved error capture works
+- Yesterday's `parseAndFetch` from PWA: "parsed 0, returned 24 pending"
+
+### Files changed
+| File | Change |
+|------|--------|
+| `apps-script/Code.js` | Added `handleDumpSheet_()`, route in `routeAction_`, summary case in `summarizeResult_`. Try/catch on tab color. |
+| `CLAUDE.md` | Added "Reading the Google Sheet" section + "Known data issues" section |
+| `docs/findings.md` | Added dumpSheet to API table, "Known Data Issues" section with orphan rows + Due Day bug |
+| `docs/progress.md` | This session entry |
+| `docs/task_plan.md` | New deferred items (orphan cleanup, Due Day formatting) |
+
+### Deferred (don't fix now, but documented)
+1. **Orphan transactions cleanup** — write one-shot Apps Script function to migrate rows 1001–1008 to first empty rows in 2–1000
+2. **Fixed Monthly Expenses Due Day formatting** — change column format Date → Number, re-enter values
+
+### Status
+- v10.1 deployed (production deployment ID unchanged, version @9)
+- Sheet state fully visible to Claude going forward
+- Two real data issues identified and documented for future cleanup
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | PWA v0.7 (URL hardcoded, key-only setup) + Code.gs v9 + clasp workflow live. Awaiting user to rotate API key and update PWA devices. |
-| Where am I going? | User rotates key + tests v0.7. Then optional: clean up orphan deployments, delete Google Drive Code.gs backup, Phase 11 (deferred audit items). |
+| Where am I? | Code.gs v10.1 (added dumpSheet endpoint) + PWA v0.7 + clasp workflow. Sheet now inspectable by Claude via API. Two data issues documented (orphan rows, Due Day format). |
+| Where am I going? | User decides on cleanup of orphan rows ($439 invisible spending) and Due Day formatting. Then optional: delete orphan deployments, Phase 12 auto-categorization. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 9 Code.gs iterations + 7 PWA iterations; getLastRow counts formula-filled cells; batch sync beats per-txn; local-first categorize/undo; LockService for concurrency; write verification as safety net; hardcode public URL, keep key in localStorage; clasp workflow dramatically simpler than manual paste |
-| What have I done? | Script v9 (Logs + LockService + verify) + PWA v0.7 (key-only setup) + clasp migration (git-versioned Code.js, one-command deploy.sh) |
+| What have I learned? | 10 Code.gs iterations + 7 PWA iterations; getLastRow + formula-filled cells (THE lesson, twice now — bit us, then we shipped a fix, then dumpSheet revealed orphan victims); batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail accounts, OAuth-based Google API access is blocked — add an endpoint to the Apps Script you already own instead** |
+| What have I done? | Script v10 (v9 + dumpSheet read-only endpoint for Claude) + PWA v0.7 (key-only setup) + clasp migration (git-versioned Code.js, one-command deploy.sh). Sheet now inspectable from Claude without OAuth. |
