@@ -67,6 +67,7 @@ function routeAction_(action, params) {
   if (action === 'uncategorize')     return handleUncategorize_(params);
   if (action === 'addCategory')      return handleAddCategory_(params);
   if (action === 'batchCategorize')  return handleBatchCategorize_(params);
+  if (action === 'dumpSheet')        return handleDumpSheet_(params);
   return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
 }
 
@@ -626,6 +627,104 @@ function handleBatchCategorize_(params) {
   }
 }
 
+/**
+ * dumpSheet: read-only inspection of any tab/range in the spreadsheet.
+ * Used by Claude to inspect sheet state without OAuth/Sheets-API access.
+ * Gated by API key (same as other endpoints). Caps response at 10000 cells.
+ *
+ * Params:
+ *   tab            - sheet name (e.g. "Budget"). Required unless metadata=true.
+ *   range          - A1 notation (e.g. "A1:F50"). Optional. Defaults to whole used range.
+ *   includeFormulas - "true" to return formulas; otherwise returns evaluated values.
+ *   metadata       - "true" to return list of all tabs + dimensions (no tab/range needed).
+ */
+function handleDumpSheet_(params) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Metadata mode: list all tabs + dimensions
+  if (params.metadata === 'true' || params.metadata === '1') {
+    var sheetList = ss.getSheets().map(function(s) {
+      var color = null;
+      try {
+        var co = s.getTabColorObject();
+        if (co) color = co.asRgbColor().asHexString();
+      } catch (e) { /* tab has no color or unsupported color type */ }
+      return {
+        name: s.getName(),
+        rows: s.getLastRow(),
+        cols: s.getLastColumn(),
+        maxRows: s.getMaxRows(),
+        maxCols: s.getMaxColumns(),
+        hidden: s.isSheetHidden(),
+        tabColor: color
+      };
+    });
+    return jsonResponse_({
+      success: true,
+      spreadsheetName: ss.getName(),
+      sheets: sheetList
+    });
+  }
+
+  if (!params.tab) {
+    return jsonResponse_({ success: false, error: 'Missing tab parameter (or use metadata=true)' });
+  }
+
+  var sheet = ss.getSheetByName(params.tab);
+  if (!sheet) {
+    return jsonResponse_({ success: false, error: 'Tab not found: ' + params.tab });
+  }
+
+  // Resolve range
+  var range;
+  try {
+    if (params.range) {
+      range = sheet.getRange(params.range);
+    } else {
+      // Default: data range (only cells with content)
+      var lastRow = Math.max(sheet.getLastRow(), 1);
+      var lastCol = Math.max(sheet.getLastColumn(), 1);
+      range = sheet.getRange(1, 1, lastRow, lastCol);
+    }
+  } catch (e) {
+    return jsonResponse_({ success: false, error: 'Invalid range: ' + e.toString() });
+  }
+
+  var numRows = range.getNumRows();
+  var numCols = range.getNumColumns();
+  var totalCells = numRows * numCols;
+  if (totalCells > 10000) {
+    return jsonResponse_({
+      success: false,
+      error: 'Range too large (' + totalCells + ' cells, max 10000). Narrow with ?range=A1:Z100'
+    });
+  }
+
+  var data;
+  if (params.includeFormulas === 'true' || params.includeFormulas === '1') {
+    // Mix: formulas where present, values otherwise
+    var formulas = range.getFormulas();
+    var values = range.getValues();
+    data = formulas.map(function(row, r) {
+      return row.map(function(f, c) {
+        return f ? f : values[r][c];
+      });
+    });
+  } else {
+    // displayValues = formatted strings (dates as "Apr 14, 2026", currency as "$50.00")
+    data = range.getDisplayValues();
+  }
+
+  return jsonResponse_({
+    success: true,
+    tab: params.tab,
+    range: range.getA1Notation(),
+    rows: numRows,
+    cols: numCols,
+    values: data
+  });
+}
+
 // ================================================================
 // ACTIVITY LOG
 // ================================================================
@@ -728,6 +827,13 @@ function summarizeResult_(action, parsed) {
     }
     if (action === 'categories') {
       return 'returned ' + ((parsed.categories && parsed.categories.length) || 0) + ' categories';
+    }
+    if (action === 'dumpSheet') {
+      if (parsed.sheets) {
+        return 'metadata: ' + parsed.sheets.length + ' tabs';
+      }
+      return (parsed.tab || '') + ' ' + (parsed.range || '') +
+        ' (' + (parsed.rows || 0) + 'x' + (parsed.cols || 0) + ')';
     }
     if (action === 'batchCategorize') {
       var s = parsed.summary || {};
