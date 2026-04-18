@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v10.2 — v10 + version display in Instructions tab + `?action=version` endpoint. Lives at `apps-script/Code.js` (managed via clasp).
+- **Apps Script:** v10.3 — v10.2 + rewritten Instructions tab content (concise, sectioned, current state only). Lives at `apps-script/Code.js` (managed via clasp).
 - **PWA:** v0.8 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — version info displayed in Setup screen.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
@@ -71,6 +71,13 @@
 - Added `dumpSheet` read-only endpoint to Code.gs (modes: metadata, values, formulas)
 - API-key gated, capped at 10000 cells/request
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
+- **Status:** complete
+
+### Phase 13b: Instructions Tab Rewrite (v10.3)
+- Stale references to manual paste workflow + missing Logs tab + missing v10.x menu items
+- Rewrote `rows[]` array in `buildInstructionsTab_` (10 sections, ~65 rows)
+- Plain numbered steps + color-coded menu function table
+- Brief "For Developers" section pointing to clasp workflow
 - **Status:** complete
 
 ### Phase 13: Version Display (v10.2 + PWA v0.8)

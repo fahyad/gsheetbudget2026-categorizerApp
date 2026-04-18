@@ -405,7 +405,7 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v10.2)
+## Web App API (v10.3)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |

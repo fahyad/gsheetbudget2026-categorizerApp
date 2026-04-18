@@ -473,11 +473,55 @@ User opened an OLD sheet by mistake and didn't realize it was bound to outdated 
 - PWA v0.8 live on GitHub Pages
 - User just needs to reload the sheet (or run "Refresh Version Info" from menu) to see the green "Update needed: No" in the Instructions block
 
+## Session: 2026-04-18 (cont.) — v10.3 Instructions tab rewrite
+
+### Goal
+Existing Instructions tab content was stale (referenced manual paste workflow, missing Logs tab + new menu items + version display). User wanted concise + sectioned + plain numbered steps.
+
+### Changes
+Replaced `rows[]` array in `buildInstructionsTab_` with new content:
+
+**New section flow** (10 sections, ~65 content rows down from ~85):
+1. Title — "BUDGET TOOLS — INSTRUCTIONS"
+2. WHAT IS THIS? — 3-line overview + repo link
+3. TABS — 1-line per tab + purpose (added Logs)
+4. MENU FUNCTIONS — 8 items, color-coded (added View Activity Log + Refresh Version Info)
+5. FIRST-TIME SETUP — 4 numbered steps
+6. DAILY USE — 5 numbered steps (PWA workflow)
+7. ADD / EDIT DATA — 3 sub-blocks
+8. TROUBLESHOOTING — 5-entry problem→fix table
+9. DO NOT — 6 hard rules (red bg)
+10. FOR DEVELOPERS — 4 lines (repo, PWA URL, deploy command, docs)
+
+**Removed (stale):**
+- "HOW TO UPDATE THE SCRIPT CODE" with manual paste steps
+- "HOW TO DEPLOY THE MOBILE APP API" with deployment dialog walkthrough
+- Wordy 5-bullet descriptions for each menu item
+
+**Added (current state):**
+- Logs tab in TABS list
+- View Activity Log + Refresh Version Info menu items
+- Troubleshooting section with PWA + sync + version + auth issues
+- For Developers section pointing to clasp workflow
+
+**Same formatting palette** — colors, fonts, single-column layout. No schema changes to row format.
+
+### Verification
+- `dumpSheet` of rows 7–79 confirms all sections populated correctly ✓
+- Color coding intact (red Build Workbook, yellow Initialize Budget, green safe items, gray info items)
+- Version block (rows 1-6) still works
+- Bumped to v10.3, deployed @14
+
+### Status
+- v10.3 deployed
+- Instructions tab content rewritten and verified
+- Sheet's version cache will refresh on next sheet open (or via Refresh Version Info menu)
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.2 (version display + handleVersion_ endpoint) + PWA v0.8 (version info block) + clasp workflow. Sheet shows version in Instructions rows 1-6. Auth granted for UrlFetchApp scope. |
+| Where am I? | Code.gs v10.3 (Instructions tab rewritten) + PWA v0.8 + clasp workflow. Sheet shows version + concise instructions. |
 | Where am I going? | User decides on cleanup of orphan rows ($439 invisible spending) and Due Day formatting. Then optional: delete orphan deployments, Phase 14 auto-categorization. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 11+ Code.gs iterations + 8 PWA iterations; getLastRow + formulas; batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail OAuth access blocked → use Apps Script endpoints**; **scope changes need manual re-auth via no-try/catch helper function**; deploy.sh auto-bumps timestamp + VERSION.txt for stale-detection from GitHub raw URL. |
-| What have I done? | Script v10.2 (v10 + version display + version endpoint + GitHub-fetched update check) + PWA v0.8 (version info in Setup) + deploy.sh auto-bumps. User no longer confused about which sheet is bound to which version. |
+| What have I learned? | 12+ Code.gs iterations + 8 PWA iterations; getLastRow + formulas; batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail OAuth access blocked → use Apps Script endpoints**; **scope changes need manual re-auth via no-try/catch helper function**; deploy.sh auto-bumps timestamp + VERSION.txt for stale-detection from GitHub raw URL; user-facing instructions live in `buildInstructionsTab_` rows[] array — keep them tight. |
+| What have I done? | Script v10.3 (v10.2 + Instructions tab rewrite — concise, sectioned, current state only) + PWA v0.8 + deploy.sh auto-bumps + version display. Instructions tab now reflects clasp workflow, Logs tab, all v10.x menu items. |

@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v10.2 (v10 + version display in Instructions tab + `version` API endpoint)
+- **Apps Script:** v10.3 (v10.2 + rewritten Instructions tab content — concise, sectioned)
 - **PWA:** v0.8 (v0.7 + version info display in Setup screen)
 
 ## Common commands
