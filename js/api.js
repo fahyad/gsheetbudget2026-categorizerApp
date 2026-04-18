@@ -41,3 +41,7 @@ export async function batchCategorize(items) {
 export async function addCategory(mainCategory, subCategory) {
   return request(buildUrl('addCategory', { mainCategory, subCategory }));
 }
+
+export async function fetchVersion() {
+  return request(buildUrl('version'));
+}

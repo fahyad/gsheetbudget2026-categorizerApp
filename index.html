@@ -13,7 +13,7 @@
 </head>
 <body>
   <header>
-    <h1>Categorizer <span class="version">v0.7</span></h1>
+    <h1>Categorizer <span class="version">v0.8</span></h1>
     <div class="header-actions">
       <button id="sync-btn" disabled>Sync</button>
       <button id="refresh-btn" title="Refresh">Refresh</button>
@@ -36,6 +36,22 @@
         </details>
         <button type="submit">Save</button>
       </form>
+
+      <div id="version-info">
+        <h3>Version info</h3>
+        <div class="version-row">
+          <span class="version-label">PWA</span>
+          <span id="pwa-version-display">—</span>
+        </div>
+        <div class="version-row">
+          <span class="version-label">Apps Script</span>
+          <span id="as-version-display">—</span>
+        </div>
+        <div class="version-row" id="update-status-row" hidden>
+          <span class="version-label">Update needed</span>
+          <span id="update-status-display"></span>
+        </div>
+      </div>
     </section>
 
     <!-- Main app -->

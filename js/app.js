@@ -1,4 +1,5 @@
 import * as config from './config.js';
+import { APP_VERSION, APP_LAST_EDITED } from './config.js';
 import * as api from './api.js';
 import { store } from './store.js';
 
@@ -31,6 +32,10 @@ const newMainInput = document.getElementById('new-main-input');
 const subCatInput = document.getElementById('sub-cat-input');
 const cancelAddCat = document.getElementById('cancel-add-cat');
 const saveAddCat = document.getElementById('save-add-cat');
+const pwaVersionDisplay = document.getElementById('pwa-version-display');
+const asVersionDisplay = document.getElementById('as-version-display');
+const updateStatusRow = document.getElementById('update-status-row');
+const updateStatusDisplay = document.getElementById('update-status-display');
 
 let selectedTimestamp = null;
 
@@ -410,6 +415,48 @@ async function saveNewCategory() {
 }
 
 // ================================================================
+// VERSION INFO (Setup screen)
+// ================================================================
+
+async function populateVersionInfo() {
+  // PWA version is local — always show immediately
+  pwaVersionDisplay.textContent = `${APP_VERSION} (last edited ${APP_LAST_EDITED})`;
+
+  // Apps Script version — need API call. Show loading first.
+  asVersionDisplay.textContent = 'checking…';
+  updateStatusRow.hidden = true;
+
+  if (!config.isConfigured()) {
+    asVersionDisplay.textContent = '(set API key first)';
+    return;
+  }
+
+  try {
+    const data = await api.fetchVersion();
+    const v = data.appsScript;
+
+    asVersionDisplay.textContent = `${v.version} (last edited ${v.lastEdited})`;
+
+    // Show update status
+    updateStatusRow.hidden = false;
+    updateStatusDisplay.classList.remove('update-needed', 'up-to-date');
+
+    if (v.error) {
+      updateStatusDisplay.textContent = '⚠ could not verify (' + v.error + ')';
+    } else if (v.updateNeeded) {
+      updateStatusDisplay.textContent = `YES — latest is ${v.latestVersion}`;
+      updateStatusDisplay.classList.add('update-needed');
+    } else {
+      updateStatusDisplay.textContent = `No (latest: ${v.latestVersion})`;
+      updateStatusDisplay.classList.add('up-to-date');
+    }
+  } catch (err) {
+    asVersionDisplay.textContent = '⚠ could not connect (check API key)';
+    updateStatusRow.hidden = true;
+  }
+}
+
+// ================================================================
 // UI HELPERS
 // ================================================================
 
@@ -417,6 +464,8 @@ function showConfig() {
   configSection.hidden = false;
   appSection.hidden = true;
   emptyState.hidden = true;
+  // Refresh version info each time the setup screen opens
+  populateVersionInfo();
 }
 
 function showApp() {
