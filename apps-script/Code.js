@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v10.3';
-var APP_SCRIPT_LAST_EDITED = '2026-04-18 16:48 MDT';
+var APP_SCRIPT_VERSION = 'v10.4';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 08:20 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -1108,6 +1108,33 @@ function formatDate_(dateVal) {
 }
 
 /**
+ * Trims whitespace from all Setup category cells (D2:E100). Returns count of
+ * cells changed. Catches edge cases where Sheets-direct edits or pre-trim API
+ * writes leave whitespace that breaks INDEX/MATCH lookups.
+ */
+function cleanupSetupWhitespace_(ss) {
+  var setup = ss.getSheetByName('Setup');
+  if (!setup) return 0;
+  var range = setup.getRange('D2:E100');
+  var values = range.getValues();
+  var changed = 0;
+  for (var r = 0; r < values.length; r++) {
+    for (var c = 0; c < 2; c++) {
+      var v = values[r][c];
+      if (typeof v === 'string') {
+        var trimmed = v.trim();
+        if (trimmed !== v) {
+          values[r][c] = trimmed;
+          changed++;
+        }
+      }
+    }
+  }
+  if (changed > 0) range.setValues(values);
+  return changed;
+}
+
+/**
  * Finds the first empty row in a sheet (by checking column A).
  */
 function findNextEmptyRow_(sheet) {
@@ -1364,6 +1391,12 @@ function updateWorkbook() {
     return;
   }
 
+  // --- Trim whitespace in Setup categories (catches Sheets-direct edits) ---
+  var trimmedCount = cleanupSetupWhitespace_(ss);
+  if (trimmedCount > 0) {
+    console.log('cleanupSetupWhitespace_: trimmed ' + trimmedCount + ' Setup category cell(s)');
+  }
+
   // --- Create Pending tab if it doesn't exist (safe) ---
   var pending = ss.getSheetByName('Pending');
   if (!pending) {
@@ -1422,8 +1455,14 @@ function updateWorkbook() {
         budget.getRange(row, 5).setFormula(
           '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + row + ',Transactions_Category,C' + row + ')'
         );
+        // Available formula: prior period's Available + this Budgeted - this Spent.
+        // Wrap MATCH-1 in IF(>1, ..., 0) — for period 1, MATCH-1=0 and INDEX(range,0)
+        // returns the entire range, creating a circular SUMIFS that diverges under
+        // iterative calc. Period 1 explicitly returns 0 (no prior period to roll over).
         budget.getRange(row, 6).setFormula(
-          '=IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0)+D' + row + '-E' + row
+          '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
+            'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
+            '0)+D' + row + '-E' + row
         );
       }
     }
@@ -1896,9 +1935,14 @@ function rebuildBudgetInternal_(mode, ss) {
         '=D' + efRow + '-E' + efRow
       ]);
     } else {
+      // Available formula: see updateWorkbook line ~1426 for the IF(MATCH>1, ..., 0) rationale.
+      // Without this guard, period 1's MATCH-1 = 0 → INDEX returns full range →
+      // SUMIFS becomes circular and diverges under iterative calc.
       formulasEF.push([
         '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
-        '=IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + efRow + ',PayPeriods_Label,0)-1),Budget_Category,C' + efRow + '),0)+D' + efRow + '-E' + efRow
+        '=IF(MATCH(A' + efRow + ',PayPeriods_Label,0)>1,' +
+          'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + efRow + ',PayPeriods_Label,0)-1),Budget_Category,C' + efRow + '),0),' +
+          '0)+D' + efRow + '-E' + efRow
       ]);
     }
   }

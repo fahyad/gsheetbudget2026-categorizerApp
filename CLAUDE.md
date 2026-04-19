@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v10.3 (v10.2 + rewritten Instructions tab content — concise, sectioned)
-- **PWA:** v0.8 (v0.7 + version info display in Setup screen)
+- **Apps Script:** v10.4 (fixed Budget Available circular reference + added Setup whitespace cleanup)
+- **PWA:** v0.9 (defense-in-depth trim on saveNewCategory)
 
 ## Common commands
 
@@ -107,13 +107,17 @@ Bump `<span class="version">vX.Y</span>` in `index.html` AND `CACHE_VERSION` in 
 | `docs/findings.md` | Technical reference (architecture, bugs, decisions) |
 | `docs/progress.md` | Session log (chronological) |
 
-## Known data issues (as of 2026-04-18)
+## Known data issues (as of 2026-04-19)
 
 These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 
 1. **Transactions tab has orphan data in rows 1001–1008.** Eight transactions categorized via the buggy `findNextEmptyRow_` (pre-v9) ended up below the visible/formulaic range. They DON'T contribute to Budget Spent totals (named range `Transactions_Amount` only reaches row 1000). Total: $439.10. Cleanup deferred — see `docs/findings.md` "Orphan Transactions" section.
 
 2. **Fixed Monthly Expenses → Due Day column is formatted as Date, not Number.** Cells display "Dec 31, 1899" instead of "1". Underlying value is a Date object, but it coerces to numeric `1` when used in formulas — so the SUMPRODUCT in Budget _income works correctly. Display is just confusing. Cleanup: change column format to Number and re-enter values 1–31.
+
+3. ~~**Budget Available circular reference (Small trip + Eating out values diverging)**~~ — **FIXED in v10.4.** Wrap of `IF(MATCH(A,PayPeriods_Label,0)>1, ..., 0)` around the prior-period rollover eliminates the bad `INDEX(_, 0)` call.
+
+4. ~~**"Nice Things " trailing space in Setup E10**~~ — **FIXED in v10.4.** New `cleanupSetupWhitespace_` runs on Update Script, trims all D2:E100. PWA's `saveNewCategory` also now trims dropdown values (defense in depth).
 
 ## Things that will trip you up (lessons from past sessions)
 

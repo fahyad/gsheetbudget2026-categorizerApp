@@ -405,7 +405,7 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v10.3)
+## Web App API (v10.4)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |
@@ -487,7 +487,7 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
 - **Fix:** Moved all actions into `doGet()`. PWA now uses GET with URL params for everything. `doPost` kept for backward compatibility (curl testing).
 - **Lesson:** Never use POST from browser to Apps Script web apps. Always use GET with URL params.
 
-### Budget Available Circular Reference Bug (discovered v10.3) — CRITICAL
+### Budget Available Circular Reference Bug (discovered v10.3, FIXED in v10.4) — CRITICAL
 - **Symptom:** "Small trip" and "Eating out" categories showed inflated `Available` values across all 26 periods (e.g. Small trip period 1: $145,200 → $745,200 → $865,200 across queries — values GREW with each sheet recalculation). Other categories (Groceries, Gas, etc.) showed correct $0 / budgeted amounts.
 - **Root cause:** The Available formula uses `INDEX(PayPeriods_Label, MATCH(A2, PayPeriods_Label, 0) - 1)` to find the prior period. For period 1 (`Dec 25 - Jan 20`), `MATCH = 1` so `MATCH - 1 = 0`. **`INDEX(range, 0)` in Sheets returns the entire range as an array.** SUMIFS with an array criterion effectively evaluates "Budget_Period equals ANY of these 26 labels" — matching every Budget row of that category. Since the formula's own cell is in that range, this creates a **self-referential circular formula**: `Available_p1 = SUM(all Available for category) + Budgeted - Spent`.
 - **Why it diverges:** Sheets resolves circular references iteratively. Each recalculation: `new_p1 = old_p1 × ~26 + budgeted_total`. Values grow by ~27× per recalc. Verified across multiple queries — values continually grew.
@@ -504,7 +504,7 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
   Period 1 explicitly returns `0 + Budgeted - Spent` (no rollover, no INDEX call). Eliminates the bad `INDEX(_, 0)` entirely. Eliminates the circular reference. Other periods unchanged.
 - **Lesson:** Never rely on `MATCH - 1` without checking if the result is ≥ 1. `INDEX(range, 0)` returns the full range, not an error.
 
-### Trailing Whitespace in Category Names (discovered v10.3)
+### Trailing Whitespace in Category Names (discovered v10.3, FIXED in v10.4)
 - **Symptom:** Setup E10 has Main Category `"Nice Things "` (with trailing space) for "Eating out". All other rows have `"Nice Things"` without space.
 - **Root cause:** The PWA's "Add Category" function passed user input directly without trimming. User typed `"Nice Things "` accidentally with a trailing space when adding the new category.
 - **Impact:** `INDEX/MATCH` lookups against `"Nice Things"` (no space) won't match this row. Could cause Budget Main Category lookups to fail silently. Doesn't cause the circular reference bug above — but is a fragile data condition.

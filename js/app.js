@@ -383,7 +383,9 @@ function closeAddCategoryModal() {
 
 async function saveNewCategory() {
   const mainVal = mainCatSelect.value;
-  const mainCategory = mainVal === '__new__' ? newMainInput.value.trim() : mainVal;
+  // Always trim — even when picked from dropdown (catches stale whitespace on
+  // existing main categories that crept in before client-side trim was added).
+  const mainCategory = (mainVal === '__new__' ? newMainInput.value : mainVal).trim();
   const subCategory = subCatInput.value.trim();
 
   if (!mainCategory || !subCategory) {

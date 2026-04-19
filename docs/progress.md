@@ -550,18 +550,30 @@ Two new postmortem entries:
 - "Budget Available Circular Reference Bug" — full root cause, divergence math, fix
 - "Trailing Whitespace in Category Names" — root cause, impact, prevention
 
-### Next: Option B implementation
-1. Fix Available formula in `rebuildBudgetInternal_` — wrap MATCH-1 in IF(>1, ..., 0)
-2. Fix Setup E10 trailing space (one-off cell edit via Apps Script function)
-3. Add `.trim()` on PWA's `saveNewCategory` (defense in depth — server already trims)
-4. Deploy + run "Update Script" to refresh formulas → divergent values reset
-5. Bump APP_SCRIPT_VERSION to v10.4
+### Option B implementation (v10.4 + PWA v0.9) — DONE
+- Fixed Available formula in **two** places: `updateWorkbook` line 1426 + `rebuildBudgetInternal_` line 1907. Both now wrap in `IF(MATCH(A,PayPeriods_Label,0)>1, IFERROR(SUMIFS(...)), 0) + Budgeted - Spent` — period 1 explicitly returns 0 for the prior-period rollover, eliminating the bad `INDEX(_, 0)` call entirely
+- Added new `cleanupSetupWhitespace_(ss)` helper. Reads Setup D2:E100, trims any string cells, writes back if changed. Called from `updateWorkbook` start (silently — only logs to Cloud Logging if changes were made)
+- PWA `saveNewCategory` line 386: now always trims `mainCategory` regardless of dropdown vs new-input source
+- Bumped APP_SCRIPT_VERSION to v10.4, PWA to v0.9, SW cache to v9
+- Deployed @15
+
+### Verification (post Update Script)
+- Setup D10 = `"Nice Things"` (len 11) — was `"Nice Things "` (len 12) ✓
+- Budget Small trip period 1 = $0 — was $865,200 ✓
+- Budget Small trip period 8 = $300, periods 9-26 = $300 (rolled forward, stable) ✓
+- Re-queried Available 3x — value stays $0 (was growing each query) — **circular ref gone** ✓
+- Version endpoint: `version=v10.4`, `error=null` ✓
+
+### Status
+- v10.4 deployed and verified — Budget calculation bug fixed
+- PWA v0.9 ready (will auto-deploy via GitHub Pages on push)
+- All known critical bugs resolved as of this session
 
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.3. Discovered critical bug in Budget Available formula (period 1 INDEX-with-row-0 → circular reference → divergent iterative calc). Affects categories where non-zero Budgeted is added after the cells stabilize. Fix planned + about to implement (Option B). |
-| Where am I going? | Implement Option B: formula fix + Setup E10 trailing-space fix + PWA input trim. Deploy as v10.4. Then user runs Update Script to reset divergent values. |
+| Where am I? | Code.gs v10.4 (Budget Available circular ref + Setup whitespace fixes deployed and verified) + PWA v0.9 (defense-in-depth trim). All Budget values stable and correct. |
+| Where am I going? | User decides on remaining deferred cleanups: orphan transactions (rows 1001-1008, $439 invisible), Fixed Monthly Expenses Due Day formatting, hardcoded 2026 pay dates. Or move on to Phase 14 auto-categorization. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | **`INDEX(range, 0)` returns the entire range, not an error** — this is the third "Sheets behavior surprise" bug (after getLastRow with formulas, and the Date format coercion). General lesson: any formula that does arithmetic on MATCH/INDEX results needs explicit guard for boundary cases. |
-| What have I done? | Investigated and root-caused the Budget Available divergence bug via dumpSheet queries (the new endpoint paid for itself this session). Documented in findings.md + progress.md. Fix planned. |
+| What have I learned? | 13 Code.gs iterations + 9 PWA iterations. Three "Sheets behavior surprises" found and fixed: (1) `getLastRow()` counts formulas-with-empty-strings as content, (2) Date-formatted cell coerces typed integers to weird Date(1)=Dec31,1899, (3) `INDEX(range, 0)` returns full range (not error) — combined with SUMIFS becomes unstable circular reference. **Lesson: any MATCH-1 needs explicit `IF(>1, ..., 0)` guard.** Also: defense-in-depth string trimming on both client and server. |
+| What have I done? | Investigated divergent Budget values via dumpSheet, root-caused circular ref + trailing space, planned + implemented Option B (formula fix in 2 places + cleanup helper + PWA trim), deployed v10.4, verified all fixes. |

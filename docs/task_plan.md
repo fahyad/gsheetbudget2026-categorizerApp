@@ -5,8 +5,8 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v10.3 — v10.2 + rewritten Instructions tab content (concise, sectioned, current state only). Lives at `apps-script/Code.js` (managed via clasp).
-- **PWA:** v0.8 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — version info displayed in Setup screen.
+- **Apps Script:** v10.4 — fixed Budget Available circular reference + Setup whitespace cleanup. Lives at `apps-script/Code.js` (managed via clasp).
+- **PWA:** v0.9 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — defense-in-depth client-side trim added.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -111,12 +111,11 @@
   - [ ] Manual cut-paste in editor (8 rows)
   - [ ] Delete and re-add via PWA (these are not in Pending anymore)
 
-### Budget Available Circular Reference + Trailing Space (discovered 2026-04-19)
-- Available formula uses `INDEX(PayPeriods_Label, MATCH-1)`. For period 1, MATCH-1=0 → INDEX returns full range → circular SUMIFS that diverges with iterative calc
-- Affected: Small trip + Eating out (showed $145K-$865K and growing)
-- Secondary: Setup E10 has trailing space in `"Nice Things "` (added via PWA, not trimmed)
-- **Fix:** Option B (formula + trailing space + PWA trim) — about to implement as v10.4
-- See findings.md "Budget Available Circular Reference Bug"
+### ✅ Budget Available Circular Reference + Trailing Space (FIXED in v10.4, 2026-04-19)
+- Available formula now wraps in `IF(MATCH(A,PayPeriods_Label,0)>1, IFERROR(SUMIFS(...)), 0)` for period 1
+- New `cleanupSetupWhitespace_` helper trims D2:E100 on every Update Script
+- PWA `saveNewCategory` always trims (defense in depth)
+- Verified: Small trip period 1 = $0 (was $865K growing), value stable across re-queries
 
 ### Fixed Monthly Expenses Due Day formatted as Date
 - Cells display "Dec 31, 1899" instead of "1"
