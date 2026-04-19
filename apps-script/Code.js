@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.1';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 12:15 MDT';
+var APP_SCRIPT_VERSION = 'v11.2';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 12:22 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -1690,22 +1690,42 @@ function updateWorkbook() {
   if (!fixed) fixed = ss.getSheetByName('Fixed Monthly Expenses');
   setNamedRanges_(ss, setup, fixed, budget, txn);
 
-  // --- Refresh Budget tab dashboard (rows 1-6) ---
+  // --- Refresh Budget tab dashboard (rows 1-6) and header (row 7) ---
+  // (rewriting these defensively in case a previous bad updateWorkbook
+  // clobbered them with stale formulas)
   buildBudgetDashboard_(budget);
+  budget.getRange(7, 1, 1, 6)
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
+    .setFontWeight('bold').setBackground('#d9ead3');
+  // Clear any stray formulas in row 7 cols B/E/F (left over from the v11.0/11.1 bug)
+  budget.getRange(7, 2).clearContent();
+  budget.getRange(7, 5).clearContent();
+  budget.getRange(7, 6).clearContent();
+  budget.getRange(7, 1, 1, 6)
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']]);
 
   // --- Update Budget category formulas ---
-  // Scan from row 2 to lastRow — handles old format (data at row 2 with _income
-  // rows interleaved) and new format (data at row 8). _income rows are skipped
-  // (their formulas are no longer maintained — they should be removed via
-  // Initialize Budget). Category rows get formula refresh in either format.
+  // Only refresh rows where col A is a valid PayPeriods_Label (i.e., a real
+  // data row). This skips the dashboard rows (1-6 with labels like "Net
+  // Income" in A3) and the header row (7 with "Period" in A7).
+  // Pre-load PayPeriods_Label into a Set for O(1) membership check.
+  var validPeriods = {};
+  var labelData = setup.getRange('C2:C27').getValues();
+  for (var p = 0; p < labelData.length; p++) {
+    if (labelData[p][0]) validPeriods[labelData[p][0]] = true;
+  }
+
   var lastRow = budget.getLastRow();
   if (lastRow > 1) {
     var budgetData = budget.getRange(2, 1, lastRow - 1, 4).getValues();
 
     for (var i = 0; i < budgetData.length; i++) {
       var row = i + 2;
+      var period = budgetData[i][0];
       var category = budgetData[i][2];
 
+      // Skip if A is not a valid period label (dashboard rows, header row, blanks)
+      if (!period || !validPeriods[period]) continue;
       // Skip _income rows (legacy — should be removed via Initialize Budget) and blanks
       if (!category || category === '_income') continue;
 

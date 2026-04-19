@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.1 (single-ledger architecture — Pending tab eliminated; Transactions is the source of truth; categorize updates a Category cell in place)
+- **Apps Script:** v11.2 (single-ledger + fixed updateWorkbook clobbering dashboard rows)
 - **PWA:** v0.9 (defense-in-depth trim on saveNewCategory) — unchanged in v11; API contract preserved
 
 ## Common commands

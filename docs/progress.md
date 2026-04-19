@@ -669,6 +669,40 @@ Fix: added `consolidateTransactions()` rescue function — reads all rows where 
 - PWA unchanged — same API contract, will work as before
 - Budget tab Apr 1-14 will now reflect $439 of previously-invisible categorized spending
 
+## Session: 2026-04-19 (cont.) — v11.2 fix updateWorkbook clobbering dashboard
+
+### Bug
+After deploying v11.1 single-ledger redesign, user ran Update Script and saw `#N/A`-style errors in cells F3 and F7:
+- "Did not find value 'Net Income' in MATCH evaluation" (F3)
+- "Did not find value 'Period' in MATCH evaluation" (F7)
+
+### Root cause
+`updateWorkbook`'s formula refresh loop iterated rows 2 to lastRow and only skipped rows where col C was empty or `_income`. But the dashboard rows (3 = labels, 4 = values) and header row (7) had non-empty content in col C ("Total Budgeted" in C3, "Category" in C7), so the loop entered them and overwrote the dashboard cells with the Available SUMIFS formula. That formula references `MATCH(A_row, PayPeriods_Label, 0)` — A3 = "Net Income" and A7 = "Period" — both fail MATCH → #N/A.
+
+The earlier (Phase 13c) Budget redesign added the dashboard at rows 1-6 + header at row 7 with data starting at row 8, but the updateWorkbook formula refresh loop wasn't updated to match the new layout boundaries.
+
+### Fix (v11.2)
+1. Pre-load `PayPeriods_Label` into a Set
+2. Skip any row where col A is NOT a valid period label
+3. Defensively rewrite header row 7 each Update Script (so any old corruption is fixed)
+4. Defensively clear stray formulas in row 7 cols B/E/F before re-writing labels
+
+This ensures only real data rows (rows 8+ where col A is "Dec 25 - Jan 20" etc.) get formula refresh.
+
+### Verification
+- F3 = "READY TO ASSIGN" (label) ✓
+- F4 = -$1,948.00 (correct computed value for Dec 25 period — fixed expenses minus zero paycheck)
+- F7 = "Available" (header) ✓
+- B7 = "Main Category" (header) ✓
+- All 39 transaction rows still in correct positions
+
+### Lesson
+**When you change a tab's row layout, audit ALL functions that iterate the tab.** updateWorkbook and rebuildBudgetInternal_ both iterate Budget rows but only one was updated for the new layout. Pre-loading valid period labels into a Set is a more robust filter than checking col C — it correctly identifies "this is a data row" regardless of what's in C.
+
+### Status
+- v11.2 deployed @22
+- Errors gone; dashboard, header, and data rows all correct
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
@@ -676,4 +710,4 @@ Fix: added `consolidateTransactions()` rescue function — reads all rows where 
 | Where am I going? | User tests PWA flow end-to-end (Refresh → categorize → Sync). If working, the deferred cleanup items become non-blockers (orphans already gone). Future: Phase 14 auto-categorization, Goals/Transfers/Sparklines from ZBB report still available but deferred. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
 | What have I learned? | 16 Code.gs iterations. **NEW:** When designing migrations, BACKWARDS CHRONOLOGY — clean up legacy data BEFORE adding new data. My first migration (v11.0) put orphan cleanup AFTER pending append, which made the cleanup target the new rows too. Required a v11.0.1 rescue function. Lesson: write a "consolidate" / "compact" function as a generic rescue tool — it's a useful primitive even outside migration scenarios. |
-| What have I done? | Investigated user's "not moving" complaint via dumpSheet + Logs (turned out to be old orphans, not a current bug). Designed + implemented full single-ledger redesign (v11.0). Fixed migration order-of-operations bug with consolidateTransactions (v11.0.1). Removed one-shot menu items in v11.1. All 39 transactions now visible at top of Transactions tab. |
+| What have I done? | Single-ledger redesign (v11.0 → v11.2): Pending tab eliminated, Transactions is source of truth with new Timestamp col H. 5 handlers refactored. ~60 lines of Apps Script removed. Migration moved 30 pending + 8 categorized + 8 orphan rows to Transactions; Pending archived + deleted. v11.0.1 added consolidateTransactions rescue (migration order-of-ops bug). v11.1 removed migration menu items. v11.2 fixed updateWorkbook clobbering dashboard/header (Budget redesign hadn't audited the formula-refresh loop's row boundary check). |

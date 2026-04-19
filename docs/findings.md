@@ -454,7 +454,7 @@ This catches silent write failures (protected ranges, data validation rejects, q
 - Backed up Pending tab to `Pending_Archive_<timestamp>` before deletion
 - Both menu items removed in v11.1 once migration verified
 
-## Web App API (v11.1)
+## Web App API (v11.2)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |

@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.1 — Single-ledger architecture. Pending tab eliminated; Transactions is the source of truth (8 cols, with new Timestamp at H). Categorize updates Category cell of existing row, no copy/move. Lives at `apps-script/Code.js` (managed via clasp).
+- **Apps Script:** v11.2 — Single-ledger architecture (v11.0+) plus updateWorkbook fix to skip dashboard/header rows during formula refresh. Pending tab eliminated; Transactions is the source of truth (8 cols, with Timestamp at H). Categorize updates Category cell of existing row, no copy/move.
 - **PWA:** v0.9 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — defense-in-depth client-side trim added.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
