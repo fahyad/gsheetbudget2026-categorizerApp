@@ -517,11 +517,51 @@ Replaced `rows[]` array in `buildInstructionsTab_` with new content:
 - Instructions tab content rewritten and verified
 - Sheet's version cache will refresh on next sheet open (or via Refresh Version Info menu)
 
+## Session: 2026-04-19 — Budget calculation bug investigation
+
+### Symptom reported
+User opened Budget tab and saw inflated `Available` values for "Small trip" ($145,200) and "Eating out" ($89,700) — even though Budgeted = $0 and Spent = $0 in those cells. Other categories (Groceries, Gas, etc.) showed correct values.
+
+### Investigation via dumpSheet
+- Read full Budget tab — 234 data rows, 26 periods × 9 categories per period (1 _income + 8 sub-cats)
+- Ran multiple `dumpSheet` queries minutes apart. **The bad values GREW each time** — Small trip went $145,200 → $745,200 → $865,200. Definite iterative calculation divergence.
+- Read formulas with `includeFormulas=true` — confirmed all 208 Available cells use the IDENTICAL formula
+- Verified Budgeted column underlying values are clean integers (0 or 300)
+- Checked for whitespace differences in category names — Budget col C is clean, Setup col E mostly clean BUT "Eating out" row has main category `"Nice Things "` with trailing space
+
+### Root cause identified
+The Available formula:
+```
+=IFERROR(SUMIFS(Budget_Available, Budget_Period,
+    INDEX(PayPeriods_Label, MATCH(A2, PayPeriods_Label, 0) - 1),
+    Budget_Category, C2), 0) + D2 - E2
+```
+
+For period 1, `MATCH - 1 = 0`. **`INDEX(range, 0)` in Sheets returns the entire range as an array**, not an error. SUMIFS with array criterion matches Budget_Period against ANY of the 26 labels — effectively summing Available across all periods of the same category. This includes the cell itself → circular reference. Sheets resolves iteratively, with values multiplying ~27× per recalc for any category with non-zero Budgeted somewhere.
+
+### Why only Small trip + Eating out diverge
+All 208 cells use the same formula. Theory: Sheets caches a stable $0 fixed point for cells that were $0 when first evaluated. Older categories (Groceries, etc.) found this stable point before the user added $300/$200 Budgeted to period 8. Small trip and Eating out either were added later or had cells edited afterward — landed in the divergent iteration instead.
+
+### Secondary issue
+PWA's "Add Category" function passed user input without trimming → `"Nice Things "` (trailing space) saved to Setup E10. Will cause future INDEX/MATCH lookups for "Nice Things" (no space) to silently fail.
+
+### Documented in findings.md
+Two new postmortem entries:
+- "Budget Available Circular Reference Bug" — full root cause, divergence math, fix
+- "Trailing Whitespace in Category Names" — root cause, impact, prevention
+
+### Next: Option B implementation
+1. Fix Available formula in `rebuildBudgetInternal_` — wrap MATCH-1 in IF(>1, ..., 0)
+2. Fix Setup E10 trailing space (one-off cell edit via Apps Script function)
+3. Add `.trim()` on PWA's `saveNewCategory` (defense in depth — server already trims)
+4. Deploy + run "Update Script" to refresh formulas → divergent values reset
+5. Bump APP_SCRIPT_VERSION to v10.4
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.3 (Instructions tab rewritten) + PWA v0.8 + clasp workflow. Sheet shows version + concise instructions. |
-| Where am I going? | User decides on cleanup of orphan rows ($439 invisible spending) and Due Day formatting. Then optional: delete orphan deployments, Phase 14 auto-categorization. |
+| Where am I? | Code.gs v10.3. Discovered critical bug in Budget Available formula (period 1 INDEX-with-row-0 → circular reference → divergent iterative calc). Affects categories where non-zero Budgeted is added after the cells stabilize. Fix planned + about to implement (Option B). |
+| Where am I going? | Implement Option B: formula fix + Setup E10 trailing-space fix + PWA input trim. Deploy as v10.4. Then user runs Update Script to reset divergent values. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 12+ Code.gs iterations + 8 PWA iterations; getLastRow + formulas; batch sync; local-first categorize/undo; LockService; write verification; clasp workflow; sheet-based logging; **for personal Gmail OAuth access blocked → use Apps Script endpoints**; **scope changes need manual re-auth via no-try/catch helper function**; deploy.sh auto-bumps timestamp + VERSION.txt for stale-detection from GitHub raw URL; user-facing instructions live in `buildInstructionsTab_` rows[] array — keep them tight. |
-| What have I done? | Script v10.3 (v10.2 + Instructions tab rewrite — concise, sectioned, current state only) + PWA v0.8 + deploy.sh auto-bumps + version display. Instructions tab now reflects clasp workflow, Logs tab, all v10.x menu items. |
+| What have I learned? | **`INDEX(range, 0)` returns the entire range, not an error** — this is the third "Sheets behavior surprise" bug (after getLastRow with formulas, and the Date format coercion). General lesson: any formula that does arithmetic on MATCH/INDEX results needs explicit guard for boundary cases. |
+| What have I done? | Investigated and root-caused the Budget Available divergence bug via dumpSheet queries (the new endpoint paid for itself this session). Documented in findings.md + progress.md. Fix planned. |

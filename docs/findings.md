@@ -487,6 +487,31 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
 - **Fix:** Moved all actions into `doGet()`. PWA now uses GET with URL params for everything. `doPost` kept for backward compatibility (curl testing).
 - **Lesson:** Never use POST from browser to Apps Script web apps. Always use GET with URL params.
 
+### Budget Available Circular Reference Bug (discovered v10.3) — CRITICAL
+- **Symptom:** "Small trip" and "Eating out" categories showed inflated `Available` values across all 26 periods (e.g. Small trip period 1: $145,200 → $745,200 → $865,200 across queries — values GREW with each sheet recalculation). Other categories (Groceries, Gas, etc.) showed correct $0 / budgeted amounts.
+- **Root cause:** The Available formula uses `INDEX(PayPeriods_Label, MATCH(A2, PayPeriods_Label, 0) - 1)` to find the prior period. For period 1 (`Dec 25 - Jan 20`), `MATCH = 1` so `MATCH - 1 = 0`. **`INDEX(range, 0)` in Sheets returns the entire range as an array.** SUMIFS with an array criterion effectively evaluates "Budget_Period equals ANY of these 26 labels" — matching every Budget row of that category. Since the formula's own cell is in that range, this creates a **self-referential circular formula**: `Available_p1 = SUM(all Available for category) + Budgeted - Spent`.
+- **Why it diverges:** Sheets resolves circular references iteratively. Each recalculation: `new_p1 = old_p1 × ~26 + budgeted_total`. Values grow by ~27× per recalc. Verified across multiple queries — values continually grew.
+- **Why ONLY Small trip and Eating out:** All 208 cells use the same formula. Best theory: Sheets caches a stable $0 fixed point for cells that were $0 when first evaluated. Categories present at workbook build (Groceries, Gas, Parking, House things, Saajidah spending, Fahyad spending) found this stable point before any non-zero Budgeted was added. Small trip and Eating out were either added or had their cells edited AFTER the Apr 15-28 Budgeted values were entered, forcing fresh evaluation that didn't find $0 — instead landing in the divergent iteration. **Practical takeaway: any category that gets non-zero Budgeted introduced after its cells stabilize is a ticking time bomb.**
+- **Fix:** Change the formula to explicitly handle period 1:
+  ```
+  =IF(MATCH(A2, PayPeriods_Label, 0) > 1,
+      IFERROR(SUMIFS(Budget_Available, Budget_Period,
+          INDEX(PayPeriods_Label, MATCH(A2, PayPeriods_Label, 0) - 1),
+          Budget_Category, C2), 0),
+      0
+  ) + D2 - E2
+  ```
+  Period 1 explicitly returns `0 + Budgeted - Spent` (no rollover, no INDEX call). Eliminates the bad `INDEX(_, 0)` entirely. Eliminates the circular reference. Other periods unchanged.
+- **Lesson:** Never rely on `MATCH - 1` without checking if the result is ≥ 1. `INDEX(range, 0)` returns the full range, not an error.
+
+### Trailing Whitespace in Category Names (discovered v10.3)
+- **Symptom:** Setup E10 has Main Category `"Nice Things "` (with trailing space) for "Eating out". All other rows have `"Nice Things"` without space.
+- **Root cause:** The PWA's "Add Category" function passed user input directly without trimming. User typed `"Nice Things "` accidentally with a trailing space when adding the new category.
+- **Impact:** `INDEX/MATCH` lookups against `"Nice Things"` (no space) won't match this row. Could cause Budget Main Category lookups to fail silently. Doesn't cause the circular reference bug above — but is a fragile data condition.
+- **Fix (one-off):** Edit Setup E10 to remove trailing space.
+- **Fix (preventive):** `handleAddCategory_` already calls `.trim()` on inputs (line 339-340) — but this case slipped through, suggesting either (a) the trim was added after this row was written, or (b) the trim happens after a different validation. Also add trimming in the PWA's `saveNewCategory` before sending to API.
+- **Lesson:** Trim user inputs at BOTH client and server. Belt-and-suspenders.
+
 ### getLastRow Formula-Filled Rows Bug (v8 → v9) — CRITICAL
 - **Issue:** After batch sync, Pending rows marked "categorized" but Transactions tab showed NO new rows
 - **Root cause:** `getLastRow()` counts formula-filled cells as content **even when formulas return empty string**. The Transactions tab has `=IF(A="","",...)` formulas pre-filled in rows 2-1000 (cols E and G, via `setTransactionFormulas_`). `getLastRow()` reports 1000 even on an empty sheet. Therefore `findNextEmptyRow_(txn)` returned 1001. Every `setValues()` went to rows 1001+, far below the visible data range

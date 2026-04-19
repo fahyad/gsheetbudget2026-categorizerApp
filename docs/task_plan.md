@@ -111,6 +111,13 @@
   - [ ] Manual cut-paste in editor (8 rows)
   - [ ] Delete and re-add via PWA (these are not in Pending anymore)
 
+### Budget Available Circular Reference + Trailing Space (discovered 2026-04-19)
+- Available formula uses `INDEX(PayPeriods_Label, MATCH-1)`. For period 1, MATCH-1=0 → INDEX returns full range → circular SUMIFS that diverges with iterative calc
+- Affected: Small trip + Eating out (showed $145K-$865K and growing)
+- Secondary: Setup E10 has trailing space in `"Nice Things "` (added via PWA, not trimmed)
+- **Fix:** Option B (formula + trailing space + PWA trim) — about to implement as v10.4
+- See findings.md "Budget Available Circular Reference Bug"
+
 ### Fixed Monthly Expenses Due Day formatted as Date
 - Cells display "Dec 31, 1899" instead of "1"
 - Underlying value coerces correctly in formulas (Budget _income shows -$1948 = correct sum)
