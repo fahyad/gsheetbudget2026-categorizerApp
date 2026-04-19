@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v10.5 (Budget tab redesigned — top dashboard at rows 1-6, no more `_income` rows, data starts at row 8)
-- **PWA:** v0.9 (defense-in-depth trim on saveNewCategory)
+- **Apps Script:** v11.1 (single-ledger architecture — Pending tab eliminated; Transactions is the source of truth; categorize updates a Category cell in place)
+- **PWA:** v0.9 (defense-in-depth trim on saveNewCategory) — unchanged in v11; API contract preserved
 
 ## Common commands
 
@@ -72,7 +72,20 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 
 Caps at 10000 cells per request. Read-only (no writes). API-key gated.
 
-Tabs in this sheet: `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Pending`, `Transactions`.
+Tabs in this sheet (v11.0+): `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Transactions`.
+
+**Pending tab REMOVED in v11.0** — single-ledger architecture. The Transactions tab now holds:
+- All categorized transactions (manual + email-parsed + PWA-categorized)
+- All UNCATEGORIZED transactions (Category column empty = "needs categorization")
+
+PWA reads Transactions where Category="" AND Timestamp is set. Categorize action updates the Category cell of an existing row. No copy/move between tabs.
+
+**Transactions tab layout (v11.0+):** 8 columns:
+- A: Date | B: Merchant | C: Amount (signed) | D: Category (empty = uncategorized)
+- E: Main Category (formula from D + Setup) | F: Transaction # (manual) | G: Period (formula from A + PayPeriods)
+- H: Timestamp (NEW in v11.0 — precise datetime from email; blank for manual entries)
+
+**Categorization rule:** PWA only sees rows where `Category=""` AND `Timestamp` is set. Manual rows (Timestamp blank) are invisible to PWA — by design, they're already categorized.
 
 **Budget tab layout (v10.5+):**
 - **Rows 1-6:** Dashboard (display only). B1 = period dropdown. Row 4 shows Net Income / Fixed Expenses / Total Budgeted / Ready to Assign for the selected period. F1 shows period progress ("Day X of Y").

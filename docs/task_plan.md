@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v10.5 — Budget tab redesigned with display-only dashboard at top (rows 1-6), removed 26 `_income` rows, data shifted to row 8+, slicer with explicit column filter. Lives at `apps-script/Code.js` (managed via clasp).
+- **Apps Script:** v11.1 — Single-ledger architecture. Pending tab eliminated; Transactions is the source of truth (8 cols, with new Timestamp at H). Categorize updates Category cell of existing row, no copy/move. Lives at `apps-script/Code.js` (managed via clasp).
 - **PWA:** v0.9 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — defense-in-depth client-side trim added.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
@@ -73,6 +73,17 @@
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
 - **Status:** complete
 
+### Phase 13d: Single-Ledger Redesign (v11.0 → v11.1)
+- Pending tab → eliminated; Transactions tab is the single source of truth
+- New Timestamp column (H) on Transactions for PWA dedup matching
+- Empty Category = "needs categorization" (replaces Pending status field)
+- 5 handlers refactored: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
+- Net: ~60 lines of Apps Script removed; copy/move bug class eliminated
+- One-shot `migratePendingToTransactions()` + `consolidateTransactions()` rescue
+- PWA contract preserved — no PWA changes needed
+- Resolves: orphan rows 1001-1008 ($439 invisible spending) — automatically cleaned up during migration
+- **Status:** complete
+
 ### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
 - After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
 - Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
@@ -114,13 +125,10 @@
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
-### Orphan Transactions in rows 1001–1008 ($439.10 invisible spending)
-- 8 transactions categorized via the buggy `findNextEmptyRow_` (pre-v9) ended up below the named range
-- Detail in findings.md "Known Data Issues" section
-- **Cleanup options:**
-  - [ ] One-shot Apps Script function: read rows 1001–1008, write to first empty rows in 2–1000, deleteRows
-  - [ ] Manual cut-paste in editor (8 rows)
-  - [ ] Delete and re-add via PWA (these are not in Pending anymore)
+### ✅ Orphan Transactions (RESOLVED in v11.0)
+- 8 transactions stuck at rows 1001-1008 from pre-v9 `findNextEmptyRow_` bug
+- Resolved automatically during single-ledger migration: orphans matched with Pending categorized rows, merged in place with Timestamp + Category, then consolidated to top of Transactions tab
+- $439.10 of previously-invisible spending now visible in Budget
 
 ### ✅ Budget Available Circular Reference + Trailing Space (FIXED in v10.4, 2026-04-19)
 - Available formula now wraps in `IF(MATCH(A,PayPeriods_Label,0)>1, IFERROR(SUMIFS(...)), 0)` for period 1

@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v10.5';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 10:47 MDT';
+var APP_SCRIPT_VERSION = 'v11.1';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 12:15 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -156,21 +156,22 @@ function doPost(e) {
 }
 
 /**
- * parseAndFetch: runs email parser, then returns pending transactions.
- * Accepts optional knownTimestamps to exclude already-loaded transactions.
+ * parseAndFetch (v11.0 single-ledger): runs email parser, then returns
+ * uncategorized transactions from the Transactions tab (where Category is
+ * empty AND Timestamp is set). PWA contract is unchanged.
  */
 function handleParseAndFetch_(params) {
-  // Run email parser (internal, no UI)
+  // Run email parser (internal, no UI) — writes new emails to Transactions tab
   var parseResult = processInfoAlerts_();
 
-  // Read pending transactions
+  // Read uncategorized transactions from Transactions
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var pending = ss.getSheetByName('Pending');
-  if (!pending || pending.getLastRow() < 2) {
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn || txn.getLastRow() < 2) {
     return jsonResponse_({ success: true, parsed: parseResult.parsed, transactions: [] });
   }
 
-  // Build set of known timestamps for dedup
+  // Build set of known timestamps for dedup (legacy PWA support)
   var knownSet = {};
   if (params.knownTimestamps) {
     var known = params.knownTimestamps.split(',');
@@ -179,24 +180,35 @@ function handleParseAndFetch_(params) {
     }
   }
 
-  // Read all pending rows and filter
-  var data = pending.getRange(2, 1, pending.getLastRow() - 1, 7).getValues();
+  // Read cols A-D + H (Date, Merchant, Amount, Category, Timestamp)
+  // Could read 8 cols, but we only need A-D and H
+  var lastRow = txn.getLastRow();
+  var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
   var transactions = [];
   for (var i = 0; i < data.length; i++) {
-    var rawTs = data[i][0];
+    var date = data[i][0];           // A
+    var merchant = data[i][1];       // B
+    var amount = data[i][2];         // C
+    var category = data[i][3];       // D
+    var rawTs = data[i][7];          // H
+
+    // Skip rows that are categorized OR have no Timestamp (manual entries)
+    if (category && category !== '') continue;
+    if (!rawTs) continue;
+    if (!merchant) continue;  // safety: skip rows where merchant somehow missing
+
     var timestamp = (rawTs instanceof Date)
       ? Utilities.formatDate(rawTs, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
       : rawTs.toString();
-    var status = data[i][5];
-    // Only return pending (uncategorized) rows not already known to PWA
-    if (status === 'pending' && !knownSet[timestamp]) {
-      transactions.push({
-        timestamp: timestamp,
-        date: formatDate_(data[i][1]),
-        merchant: data[i][2],
-        amount: data[i][3]
-      });
-    }
+
+    if (knownSet[timestamp]) continue;
+
+    transactions.push({
+      timestamp: timestamp,
+      date: formatDate_(date),
+      merchant: merchant,
+      amount: amount
+    });
   }
 
   return jsonResponse_({
@@ -229,7 +241,8 @@ function handleCategories_() {
 }
 
 /**
- * categorize: moves a pending transaction to the Transactions tab.
+ * categorize (v11.0 single-ledger): updates the Category cell of an existing
+ * Transactions row matched by Timestamp.
  * Expects: { timestamp, category }
  */
 function handleCategorize_(body) {
@@ -247,11 +260,10 @@ function handleCategorize_(body) {
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var pending = ss.getSheetByName('Pending');
     var txn = ss.getSheetByName('Transactions');
     var setup = ss.getSheetByName('Setup');
 
-    if (!pending || !txn || !setup) {
+    if (!txn || !setup) {
       return jsonResponse_({ success: false, error: 'Required tab not found' });
     }
 
@@ -265,25 +277,31 @@ function handleCategorize_(body) {
       return jsonResponse_({ success: false, error: 'Invalid category: ' + category });
     }
 
-    // Find the pending row by timestamp
-    var lastRow = pending.getLastRow();
+    // Find Transactions row by Timestamp where Category is currently empty
+    var lastRow = txn.getLastRow();
     if (lastRow < 2) {
-      return jsonResponse_({ success: false, error: 'No pending transactions found' });
+      return jsonResponse_({ success: false, error: 'No transactions found' });
     }
 
-    var data = pending.getRange(2, 1, lastRow - 1, 7).getValues();
+    // Read Category (col D) and Timestamp (col H) for all rows
+    var range = txn.getRange(2, 4, lastRow - 1, 5).getValues();  // D..H
     var foundRow = -1;
-    var txnDate, txnMerchant, txnAmount;
+    var txnMerchant, txnAmount, txnDate;
 
-    for (var i = 0; i < data.length; i++) {
-      var rowTs = (data[i][0] instanceof Date)
-        ? Utilities.formatDate(data[i][0], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
-        : data[i][0].toString();
-      if (rowTs === timestamp && data[i][5] === 'pending') {
+    for (var i = 0; i < range.length; i++) {
+      var existingCat = range[i][0];     // col D
+      var ts = range[i][4];               // col H
+      var rowTs = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
+
+      if (rowTs === timestamp && (!existingCat || existingCat === '')) {
         foundRow = i + 2;
-        txnDate = data[i][1];
-        txnMerchant = data[i][2];
-        txnAmount = data[i][3];
+        // Read merchant + date for response
+        var rowFull = txn.getRange(foundRow, 1, 1, 3).getValues()[0];
+        txnDate = rowFull[0];
+        txnMerchant = rowFull[1];
+        txnAmount = rowFull[2];
         break;
       }
     }
@@ -292,28 +310,22 @@ function handleCategorize_(body) {
       return jsonResponse_({ success: false, error: 'Transaction not found or already categorized' });
     }
 
-    // Write to Transactions tab
-    var txnLastRow = findNextEmptyRow_(txn);
-    txn.getRange(txnLastRow, 1, 1, 4).setValues([[txnDate, txnMerchant, txnAmount, category]]);
+    // Update Category cell
+    txn.getRange(foundRow, 4).setValue(category);
     SpreadsheetApp.flush();
 
-    // Verify write
-    var verify = txn.getRange(txnLastRow, 1, 1, 4).getValues()[0];
-    if (String(verify[1]) !== String(txnMerchant)) {
+    // Verify
+    var actual = txn.getRange(foundRow, 4).getValue();
+    if (String(actual) !== String(category)) {
       logActivity_('categorize_verify', 0, 'write_verify_fail',
-        'Expected merchant "' + txnMerchant + '" at row ' + txnLastRow +
-        ', got "' + verify[1] + '"', '');
+        'Expected category "' + category + '" at row ' + foundRow + ', got "' + actual + '"', '');
       return jsonResponse_({
         success: false,
-        error: 'Transaction write verification failed — Pending not updated. Check Logs tab.'
+        error: 'Categorize verification failed. Check Logs tab.'
       });
     }
 
-    // Update Pending row (batched into one setValues call)
-    pending.getRange(foundRow, 6, 1, 2).setValues([['categorized', category]]);
-
-    // Read back the auto-calculated Period from Transactions
-    var period = txn.getRange(txnLastRow, 7).getDisplayValue();
+    var period = txn.getRange(foundRow, 7).getDisplayValue();
 
     return jsonResponse_({
       success: true,
@@ -331,15 +343,13 @@ function handleCategorize_(body) {
 }
 
 /**
- * uncategorize: reverses a categorization.
- * Deletes the matching row from Transactions, restores Pending row to "pending".
- * Expects: { timestamp, merchant, amount, category }
+ * uncategorize (v11.0 single-ledger): clears the Category cell of an existing
+ * Transactions row matched by Timestamp.
+ * Expects: { timestamp } (merchant/amount/category fields ignored — kept for
+ * backward compat with PWA's API contract)
  */
 function handleUncategorize_(body) {
   var timestamp = body.timestamp;
-  var merchant = body.merchant;
-  var amount = (typeof body.amount === 'string') ? parseFloat(body.amount) : body.amount;
-  var category = body.category;
 
   if (!timestamp) {
     return jsonResponse_({ success: false, error: 'Missing timestamp' });
@@ -353,60 +363,37 @@ function handleUncategorize_(body) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var txn = ss.getSheetByName('Transactions');
-    var pending = ss.getSheetByName('Pending');
 
-    if (!txn || !pending) {
-      return jsonResponse_({ success: false, error: 'Transactions or Pending tab not found' });
+    if (!txn) {
+      return jsonResponse_({ success: false, error: 'Transactions tab not found' });
     }
 
-    // Find and delete the matching row in Transactions (last match = most recent)
-    var txnLastRow = txn.getLastRow();
-    var deletedRow = -1;
+    var lastRow = txn.getLastRow();
+    if (lastRow < 2) {
+      return jsonResponse_({ success: true, transaction: { timestamp: timestamp } });
+    }
 
-    if (txnLastRow >= 2) {
-      var txnData = txn.getRange(2, 1, txnLastRow - 1, 4).getValues();
-      // Search from bottom up to find the most recently added match.
-      // Skip rows with empty merchant (formula-only rows).
-      for (var i = txnData.length - 1; i >= 0; i--) {
-        var rowMerchant = txnData[i][1];
-        if (rowMerchant === '' || rowMerchant === null) continue;
-        var rowAmount = txnData[i][2];
-        var rowCategory = txnData[i][3];
-
-        if (rowMerchant === merchant && rowAmount === amount && rowCategory === category) {
-          deletedRow = i + 2;
-          break;
-        }
-      }
-
-      if (deletedRow > 0) {
-        txn.deleteRow(deletedRow);
+    // Find row by Timestamp (search from bottom — likely most recent)
+    var range = txn.getRange(2, 8, lastRow - 1, 1).getValues();  // col H = Timestamp
+    var foundRow = -1;
+    for (var i = range.length - 1; i >= 0; i--) {
+      var ts = range[i][0];
+      var rowTs = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
+      if (rowTs === timestamp) {
+        foundRow = i + 2;
+        break;
       }
     }
 
-    // Restore the Pending row regardless of whether Transactions row was found
-    var pendingLastRow = pending.getLastRow();
-    if (pendingLastRow >= 2) {
-      var pendingData = pending.getRange(2, 1, pendingLastRow - 1, 7).getValues();
-      for (var j = 0; j < pendingData.length; j++) {
-        var rowTs = (pendingData[j][0] instanceof Date)
-          ? Utilities.formatDate(pendingData[j][0], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
-          : pendingData[j][0].toString();
-        if (rowTs === timestamp) {
-          var pendingRow = j + 2;
-          pending.getRange(pendingRow, 6, 1, 2).setValues([['pending', '']]);
-          break;
-        }
-      }
+    if (foundRow > 0) {
+      txn.getRange(foundRow, 4).setValue('');  // Clear Category
     }
 
     return jsonResponse_({
       success: true,
-      transaction: {
-        timestamp: timestamp,
-        merchant: merchant,
-        amount: amount
-      }
+      transaction: { timestamp: timestamp }
     });
   } finally {
     lock.releaseLock();
@@ -482,14 +469,15 @@ function handleAddCategoryInner_(mainCategory, subCategory) {
 }
 
 /**
- * batchCategorize: processes multiple categorizations in one call.
+ * batchCategorize (v11.0 single-ledger): updates the Category cell of existing
+ * Transactions rows matched by Timestamp. No copy/move — the Pending tab is gone.
+ *
  * Expects: { items: JSON string of [{ts, cat}, ...] }
  *
  * Guarantees:
  * - Serialized via LockService (no concurrent runs)
  * - Category validated against Setup E:E before writes
- * - Transactions written first; Pending only updated if Transactions write verifies
- * - Single setValues() for Transactions + Pending updates (batched)
+ * - Per-row verification after update — rollback (clear Category) if any verify fails
  */
 function handleBatchCategorize_(params) {
   if (!params.items) {
@@ -514,12 +502,11 @@ function handleBatchCategorize_(params) {
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var pending = ss.getSheetByName('Pending');
     var txn = ss.getSheetByName('Transactions');
     var setup = ss.getSheetByName('Setup');
 
-    if (!pending || !txn || !setup) {
-      return jsonResponse_({ success: false, error: 'Required tab not found (Pending/Transactions/Setup)' });
+    if (!txn || !setup) {
+      return jsonResponse_({ success: false, error: 'Required tab not found (Transactions/Setup)' });
     }
 
     // Load valid categories once for validation
@@ -529,22 +516,23 @@ function handleBatchCategorize_(params) {
       if (catData[c][0]) validCategories[catData[c][0]] = true;
     }
 
-    // Read ALL pending data once (not per-item)
-    var pendingLastRow = pending.getLastRow();
-    var pendingData = (pendingLastRow >= 2)
-      ? pending.getRange(2, 1, pendingLastRow - 1, 7).getValues()
+    // Read all Transactions Timestamps + Category once. We scan to find rows
+    // matching each item's timestamp where Category is currently empty.
+    var txnLastRow = txn.getLastRow();
+    var txnData = (txnLastRow >= 2)
+      ? txn.getRange(2, 4, txnLastRow - 1, 5).getValues()  // cols D..H = Category, MainCat, Tx#, Period, Timestamp
       : [];
 
-    // Format all timestamps once for comparison (store at index 7)
-    for (var p = 0; p < pendingData.length; p++) {
-      pendingData[p][7] = (pendingData[p][0] instanceof Date)
-        ? Utilities.formatDate(pendingData[p][0], Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
-        : pendingData[p][0].toString();
+    // Normalize Timestamps to strings for comparison
+    for (var p = 0; p < txnData.length; p++) {
+      var ts = txnData[p][4];  // col H = index 4 in our slice (D=0, E=1, F=2, G=3, H=4)
+      txnData[p][5] = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
     }
 
     var results = [];
-    var txnRows = [];         // Rows to batch-write to Transactions
-    var pendingUpdates = [];  // {row, category} to update in Pending
+    var updates = [];  // {row, category} — rows where we'll write the Category
 
     for (var i = 0; i < items.length; i++) {
       var timestamp = items[i].ts;
@@ -555,16 +543,17 @@ function handleBatchCategorize_(params) {
         continue;
       }
 
-      // Validate category against Setup
       if (!validCategories[category]) {
         results.push({ timestamp: timestamp, success: false, error: 'Invalid category: ' + category });
         continue;
       }
 
-      // Find matching pending row
+      // Find matching Transactions row by Timestamp where Category is empty
       var foundIdx = -1;
-      for (var j = 0; j < pendingData.length; j++) {
-        if (pendingData[j][7] === timestamp && pendingData[j][5] === 'pending') {
+      for (var j = 0; j < txnData.length; j++) {
+        var existingCat = txnData[j][0];  // col D
+        var rowTs = txnData[j][5];         // normalized timestamp
+        if (rowTs === timestamp && (!existingCat || existingCat === '')) {
           foundIdx = j;
           break;
         }
@@ -575,53 +564,41 @@ function handleBatchCategorize_(params) {
         continue;
       }
 
-      // Mark as processed in local data (prevent double-matching within batch)
-      pendingData[foundIdx][5] = 'categorized';
+      // Mark in local data to prevent double-matching within this batch
+      txnData[foundIdx][0] = category;
 
-      // Queue the writes
-      txnRows.push([pendingData[foundIdx][1], pendingData[foundIdx][2], pendingData[foundIdx][3], category]);
-      pendingUpdates.push({ row: foundIdx + 2, category: category });
+      var sheetRow = foundIdx + 2;
+      updates.push({ row: sheetRow, category: category, timestamp: timestamp });
       results.push({ timestamp: timestamp, success: true });
     }
 
-    // Write Transactions FIRST, verify, then update Pending.
-    if (txnRows.length > 0) {
-      var txnStartRow = findNextEmptyRow_(txn);
-      txn.getRange(txnStartRow, 1, txnRows.length, 4).setValues(txnRows);
+    // Apply updates to col D of each row, then verify
+    if (updates.length > 0) {
+      for (var u = 0; u < updates.length; u++) {
+        txn.getRange(updates[u].row, 4).setValue(updates[u].category);
+      }
       SpreadsheetApp.flush();
 
-      // Verify: read back the first row and confirm merchant matches
-      var verify = txn.getRange(txnStartRow, 1, 1, 4).getValues()[0];
-      if (String(verify[1]) !== String(txnRows[0][1]) ||
-          Number(verify[2]) !== Number(txnRows[0][2])) {
-        // Write did not land where we expected — do NOT update Pending
+      // Verify each update — re-read col D for each updated row
+      var rollback = [];
+      for (var v = 0; v < updates.length; v++) {
+        var actual = txn.getRange(updates[v].row, 4).getValue();
+        if (String(actual) !== String(updates[v].category)) {
+          rollback.push(updates[v]);
+        }
+      }
+
+      if (rollback.length > 0) {
+        // Roll back ALL updates from this batch (atomicity)
+        for (var r = 0; r < updates.length; r++) {
+          txn.getRange(updates[r].row, 4).setValue('');
+        }
         logActivity_('batchCategorize_verify', 0, 'write_verify_fail',
-          'Expected merchant "' + txnRows[0][1] + '" amount ' + txnRows[0][2] +
-          ' at row ' + txnStartRow + ', got merchant "' + verify[1] + '" amount ' + verify[2], '');
+          rollback.length + '/' + updates.length + ' verifications failed — rolled back batch', '');
         return jsonResponse_({
           success: false,
-          error: 'Transaction write verification failed — Pending not updated. Check Logs tab.'
+          error: 'Verification failed for ' + rollback.length + ' rows — entire batch rolled back. Check Logs tab.'
         });
-      }
-
-      // Update Pending in a single batched setValues when rows are contiguous
-      pendingUpdates.sort(function(a, b) { return a.row - b.row; });
-      var contiguous = true;
-      for (var k = 1; k < pendingUpdates.length; k++) {
-        if (pendingUpdates[k].row !== pendingUpdates[k - 1].row + 1) {
-          contiguous = false;
-          break;
-        }
-      }
-
-      if (contiguous) {
-        var updates = pendingUpdates.map(function(u) { return ['categorized', u.category]; });
-        pending.getRange(pendingUpdates[0].row, 6, updates.length, 2).setValues(updates);
-      } else {
-        for (var u = 0; u < pendingUpdates.length; u++) {
-          pending.getRange(pendingUpdates[u].row, 6, 1, 2)
-            .setValues([['categorized', pendingUpdates[u].category]]);
-        }
       }
     }
 
@@ -630,8 +607,8 @@ function handleBatchCategorize_(params) {
       results: results,
       summary: {
         total: items.length,
-        succeeded: txnRows.length,
-        failed: items.length - txnRows.length
+        succeeded: updates.length,
+        failed: items.length - updates.length
       }
     });
   } finally {
@@ -1074,6 +1051,296 @@ function showLogsTab() {
 }
 
 // ================================================================
+// V11.0 MIGRATION — Pending tab → Transactions tab (one-time)
+// ================================================================
+
+/**
+ * Migrates all data from the Pending tab into the Transactions tab using the
+ * v11.0 single-ledger model. Then deletes the Pending tab.
+ *
+ * Logic:
+ *   - "pending" rows in Pending → write to Transactions with empty Category + Timestamp
+ *   - "categorized" rows in Pending → search Transactions for matching row by
+ *     Date+Merchant+Amount; if found (e.g. orphan rows at 1001-1008), update
+ *     in place with Timestamp + Category. If not found, write new row.
+ *   - After migration, scan Transactions rows 1001+ for any leftover orphans
+ *     and move them to first empty rows in 2-1000.
+ *   - Backup Pending data to a Pending_Archive tab, then delete Pending.
+ *
+ * Safe to run multiple times — second run will find no Pending tab and do nothing.
+ */
+/**
+ * Consolidates Transactions data by compacting all non-empty rows into the
+ * top of the sheet (starting at row 2). Useful as a "rescue" if data ends
+ * up scattered (e.g., from a migration bug, or the orphan-row class of bug).
+ *
+ * Preserves: formulas in cols E (Main Cat) and G (Period) — those auto-fill
+ * from cols D and A respectively.
+ *
+ * Read/Write columns A (Date), B (Merchant), C (Amount), D (Category),
+ * F (Tx#), and H (Timestamp) — skips E and G.
+ */
+function consolidateTransactions() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn) { ui.alert('Transactions tab not found'); return; }
+
+  var lastRow = txn.getLastRow();
+  if (lastRow < 2) { ui.alert('Nothing to consolidate'); return; }
+
+  // Read all data cols for rows 2..lastRow (we'll use B = Merchant as "non-empty" marker)
+  var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
+
+  // Filter rows where Merchant has data (skips truly empty rows that just have formulas)
+  var nonEmpty = [];
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][1] && String(data[i][1]).trim() !== '') {
+      nonEmpty.push(data[i]);
+    }
+  }
+
+  if (nonEmpty.length === 0) {
+    ui.alert('No data rows found.');
+    return;
+  }
+
+  var confirm = ui.alert(
+    'Consolidate Transactions',
+    'Found ' + nonEmpty.length + ' rows with data.\n' +
+    'This will move them all to rows 2-' + (1 + nonEmpty.length) + '.\n' +
+    '(Cols E, G are formulas — they\'ll auto-recompute.)\n\n' +
+    'Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  // Clear data cols (A:D, F, H) — leave E and G alone (formulas)
+  if (lastRow > 1) {
+    var rowCount = lastRow - 1;
+    txn.getRange(2, 1, rowCount, 4).clearContent();    // A:D
+    txn.getRange(2, 6, rowCount, 1).clearContent();    // F
+    txn.getRange(2, 8, rowCount, 1).clearContent();    // H
+  }
+  SpreadsheetApp.flush();
+
+  // Write data back starting at row 2 (cols A:D, F, H separately)
+  var rowsAD = nonEmpty.map(function(r) { return [r[0], r[1], r[2], r[3]]; });
+  var rowsF  = nonEmpty.map(function(r) { return [r[5]]; });
+  var rowsH  = nonEmpty.map(function(r) { return [r[7]]; });
+  txn.getRange(2, 1, nonEmpty.length, 4).setValues(rowsAD);
+  txn.getRange(2, 6, nonEmpty.length, 1).setValues(rowsF);
+  txn.getRange(2, 8, nonEmpty.length, 1).setValues(rowsH);
+  SpreadsheetApp.flush();
+
+  logActivity_('consolidateTransactions', 0, 'success',
+    'Consolidated ' + nonEmpty.length + ' rows', '');
+
+  ui.alert('Consolidation complete.\n\n' + nonEmpty.length + ' rows now at rows 2-' + (1 + nonEmpty.length) + '.');
+}
+
+function migratePendingToTransactions() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var pending = ss.getSheetByName('Pending');
+  var txn = ss.getSheetByName('Transactions');
+
+  if (!txn) {
+    ui.alert('Error: Transactions tab not found. Run Build Workbook first.');
+    return;
+  }
+
+  if (!pending) {
+    ui.alert('No Pending tab found — migration already complete (or nothing to migrate).');
+    return;
+  }
+
+  // Confirm with user
+  var confirm = ui.alert(
+    'Migrate Pending → Transactions',
+    'This will:\n' +
+    '  1. Move all Pending rows into Transactions\n' +
+    '  2. Move orphan rows from row 1001+ back into the visible range\n' +
+    '  3. Backup Pending to a Pending_Archive_<timestamp> tab\n' +
+    '  4. DELETE the Pending tab\n\n' +
+    'This is a one-way operation. Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  // Ensure Transactions has H column header (Timestamp)
+  if (txn.getRange('H1').getValue() !== 'Timestamp') {
+    txn.getRange('H1').setValue('Timestamp')
+      .setFontWeight('bold').setBackground('#d9ead3');
+    txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  }
+
+  var stats = { pendingMigrated: 0, categorizedMerged: 0, categorizedNew: 0,
+                orphansMoved: 0, errors: 0 };
+
+  // --- Step 1: Read all Pending data ---
+  var pendingLastRow = pending.getLastRow();
+  if (pendingLastRow < 2) {
+    ui.alert('Pending tab has no data — nothing to migrate. Will still delete the tab.');
+  }
+
+  var pendingData = (pendingLastRow >= 2)
+    ? pending.getRange(2, 1, pendingLastRow - 1, 7).getValues()
+    : [];
+
+  // --- Step 2: Read all Transactions data for matching ---
+  var txnLastRow = txn.getLastRow();
+  // Read cols A:D for matching (Date, Merchant, Amount, Category)
+  var txnData = (txnLastRow >= 2)
+    ? txn.getRange(2, 1, txnLastRow - 1, 4).getValues()
+    : [];
+
+  // --- Step 3: Process each Pending row ---
+  // Collect updates separately for: in-place merge, new pending rows, new categorized rows
+  var inPlaceUpdates = [];   // { sheetRow, timestamp, category }
+  var newPendingRows = [];   // [date, merchant, amount, '', '', '', '', timestamp]
+  var newCategorizedRows = []; // same shape with category set
+
+  for (var i = 0; i < pendingData.length; i++) {
+    var pTimestamp = pendingData[i][0];
+    var pDate = pendingData[i][1];
+    var pMerchant = pendingData[i][2];
+    var pAmount = pendingData[i][3];
+    var pStatus = pendingData[i][5];
+    var pCategory = pendingData[i][6];
+
+    if (!pMerchant || !pDate) continue; // skip blank rows
+
+    var tsStr = (pTimestamp instanceof Date)
+      ? Utilities.formatDate(pTimestamp, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+      : (pTimestamp ? pTimestamp.toString() : '');
+
+    if (pStatus === 'pending' || pStatus === '') {
+      // Uncategorized — append to Transactions with empty Category
+      newPendingRows.push({
+        date: pDate, merchant: pMerchant, amount: pAmount,
+        category: '', timestamp: tsStr
+      });
+      stats.pendingMigrated++;
+    } else if (pStatus === 'categorized') {
+      // Search Transactions for matching row by Date+Merchant+Amount
+      var matchedRow = -1;
+      for (var j = 0; j < txnData.length; j++) {
+        var tDate = txnData[j][0];
+        var tMerchant = txnData[j][1];
+        var tAmount = txnData[j][2];
+        if (!tMerchant) continue;
+        // Match dates by string conversion (avoids tz issues)
+        var dateMatch = (tDate instanceof Date && pDate instanceof Date)
+          ? (Utilities.formatDate(tDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') ===
+             Utilities.formatDate(pDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'))
+          : (String(tDate) === String(pDate));
+        if (dateMatch && String(tMerchant) === String(pMerchant) &&
+            Number(tAmount) === Number(pAmount)) {
+          matchedRow = j + 2;  // sheet row
+          break;
+        }
+      }
+
+      if (matchedRow > 0) {
+        // Update in place: set Timestamp at H, ensure Category at D
+        inPlaceUpdates.push({ sheetRow: matchedRow, timestamp: tsStr, category: pCategory });
+        stats.categorizedMerged++;
+      } else {
+        // Categorized in Pending but not found in Transactions — append as new
+        newCategorizedRows.push({
+          date: pDate, merchant: pMerchant, amount: pAmount,
+          category: pCategory, timestamp: tsStr
+        });
+        stats.categorizedNew++;
+      }
+    }
+  }
+
+  // --- Step 4: Apply in-place updates ---
+  for (var u = 0; u < inPlaceUpdates.length; u++) {
+    var upd = inPlaceUpdates[u];
+    txn.getRange(upd.sheetRow, 4).setValue(upd.category);
+    txn.getRange(upd.sheetRow, 8).setValue(upd.timestamp);
+  }
+
+  // --- Step 5: Append new rows (cols A:D + H, skip E/F/G to preserve formulas) ---
+  function appendNewRows(rows) {
+    if (!rows.length) return;
+    var startRow = findNextEmptyRow_(txn);
+    var rowsAD = rows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
+    var rowsH = rows.map(function(r) { return [r.timestamp]; });
+    txn.getRange(startRow, 1, rows.length, 4).setValues(rowsAD);
+    txn.getRange(startRow, 8, rows.length, 1).setValues(rowsH);
+  }
+  appendNewRows(newPendingRows);
+  appendNewRows(newCategorizedRows);
+  SpreadsheetApp.flush();
+
+  // --- Step 6: Clean up orphan rows at 1001+ ---
+  // Re-read Transactions to find any rows past 1000 with data
+  var newLastRow = txn.getLastRow();
+  if (newLastRow > 1000) {
+    var orphanRange = txn.getRange(1001, 1, newLastRow - 1000, 8).getValues();
+    var orphansToMove = [];
+    var orphanSheetRows = [];
+    for (var o = 0; o < orphanRange.length; o++) {
+      var oMerchant = orphanRange[o][1];
+      if (oMerchant && oMerchant !== '') {
+        orphansToMove.push({
+          date: orphanRange[o][0],
+          merchant: orphanRange[o][1],
+          amount: orphanRange[o][2],
+          category: orphanRange[o][3],
+          timestamp: orphanRange[o][7] || ''
+        });
+        orphanSheetRows.push(1001 + o);
+      }
+    }
+    if (orphansToMove.length > 0) {
+      // Append to first empty rows in 2-1000
+      appendNewRows(orphansToMove);
+      // Clear the orphan rows (cols A-H, leave formulas in E and G to recompute as empty)
+      for (var or = 0; or < orphanSheetRows.length; or++) {
+        var sr = orphanSheetRows[or];
+        txn.getRange(sr, 1, 1, 4).clearContent();  // A:D (Date, Merchant, Amount, Category)
+        txn.getRange(sr, 8).clearContent();         // H (Timestamp)
+        // F (Tx#) is rarely set; leave it
+      }
+      stats.orphansMoved = orphansToMove.length;
+    }
+  }
+  SpreadsheetApp.flush();
+
+  // --- Step 7: Archive Pending tab ---
+  var archiveName = 'Pending_Archive_' + Utilities.formatDate(
+    new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+  var archive = pending.copyTo(ss).setName(archiveName);
+
+  // --- Step 8: Delete Pending tab ---
+  ss.deleteSheet(pending);
+
+  // --- Step 9: Refresh named ranges (Transactions_Timestamp etc.) ---
+  var setup = ss.getSheetByName('Setup');
+  var fixed = ss.getSheetByName('Fixed Monthly Expenses');
+  var budget = ss.getSheetByName('Budget');
+  if (setup && fixed && budget) {
+    setNamedRanges_(ss, setup, fixed, budget, txn);
+  }
+
+  // --- Step 10: Log + summary alert ---
+  var summary = 'Migration complete:\n' +
+    '  • Pending → Transactions: ' + stats.pendingMigrated + ' uncategorized rows\n' +
+    '  • Categorized merged with existing Transactions rows: ' + stats.categorizedMerged + '\n' +
+    '  • Categorized appended as new rows: ' + stats.categorizedNew + '\n' +
+    '  • Orphan rows (row 1001+) moved into visible range: ' + stats.orphansMoved + '\n\n' +
+    'Pending tab archived as: ' + archiveName + '\n' +
+    'Pending tab deleted.';
+  logActivity_('migratePendingToTransactions', 0, 'success', JSON.stringify(stats), '');
+  ui.alert(summary);
+}
+
+// ================================================================
 // API HELPERS
 // ================================================================
 
@@ -1207,7 +1474,9 @@ function buildWorkbook() {
   }
 
   // --- Create / get tabs ---
-  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions', 'Pending'];
+  // (Pending tab removed in v11.0 — single-ledger architecture; Transactions
+  // is now the source of truth, with empty Category = "needs categorization".)
+  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions'];
   var sheets = {};
   for (var t = 0; t < tabNames.length; t++) {
     var name = tabNames[t];
@@ -1325,42 +1594,32 @@ function buildWorkbook() {
   var txn = sheets['Transactions'];
   txn.clear();
 
-  txn.getRange('A1:G1')
-    .setValues([['Date', 'Merchant', 'Amount', 'Category', 'Main Category', 'Transaction #', 'Period']])
+  // 8 columns now — added Timestamp at H in v11.0 for PWA dedup matching.
+  // Empty Category (col D) = "needs categorization" (replaces old Pending tab).
+  txn.getRange('A1:H1')
+    .setValues([['Date', 'Merchant', 'Amount', 'Category', 'Main Category', 'Transaction #', 'Period', 'Timestamp']])
     .setFontWeight('bold').setBackground(HDR_BG);
 
   txn.getRange('A2:A1000').setNumberFormat('MMM d, yyyy');
   txn.getRange('C2:C1000').setNumberFormat('$#,##0.00');
+  txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
   setTransactionFormulas_(txn);
 
   var catRule = SpreadsheetApp.newDataValidation()
     .requireValueInRange(setup.getRange('E2:E100'), true)
-    .setAllowInvalid(false)
+    .setAllowInvalid(true)  // allow empty (uncategorized) cells
     .build();
   txn.getRange('D2:D1000').setDataValidation(catRule);
 
-  // ============================================================
-  // PENDING TAB
-  // ============================================================
-  var pending = sheets['Pending'];
-  pending.clear();
-
-  pending.getRange('A1:G1')
-    .setValues([['Timestamp', 'Date', 'Merchant', 'Amount', 'Email Subject', 'Status', 'Category']])
-    .setFontWeight('bold').setBackground(HDR_BG);
-
-  pending.getRange('A2:A1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
-  pending.getRange('B2:B1000').setNumberFormat('MMM d, yyyy');
-  pending.getRange('D2:D1000').setNumberFormat('$#,##0.00');
-  pending.setTabColor('#ff9800');
+  // (Pending tab removed in v11.0 — single-ledger architecture)
 
   // ============================================================
-  // NAMED RANGES (15 total)
+  // NAMED RANGES (16 total — added Transactions_Timestamp in v11.0)
   // ============================================================
   setNamedRanges_(ss, setup, fixed, budget, txn);
 
   // Auto-resize all tabs
-  var allSheets = [setup, fixed, budget, txn, pending];
+  var allSheets = [setup, fixed, budget, txn];
   for (var s = 0; s < allSheets.length; s++) {
     var cols = allSheets[s].getLastColumn();
     if (cols > 0) allSheets[s].autoResizeColumns(1, cols);
@@ -1368,9 +1627,10 @@ function buildWorkbook() {
 
   ui.alert(
     'Workbook built!\n\n' +
-    '6 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Pending\n' +
+    '5 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions\n' +
+    'Logs tab will be created on first API call.\n' +
     '4 fixed expenses defined (add more anytime — no script needed)\n' +
-    '15 named ranges defined\n\n' +
+    '16 named ranges defined\n\n' +
     'Next step: Run "Budget Tools → 2. Initialize Budget"'
   );
 }
@@ -1399,19 +1659,15 @@ function updateWorkbook() {
     console.log('cleanupSetupWhitespace_: trimmed ' + trimmedCount + ' Setup category cell(s)');
   }
 
-  // --- Create Pending tab if it doesn't exist (safe) ---
-  var pending = ss.getSheetByName('Pending');
-  if (!pending) {
-    pending = ss.insertSheet('Pending');
-    var HDR_BG = '#d9ead3';
-    pending.getRange('A1:G1')
-      .setValues([['Timestamp', 'Date', 'Merchant', 'Amount', 'Email Subject', 'Status', 'Category']])
-      .setFontWeight('bold').setBackground(HDR_BG);
-    pending.getRange('A2:A1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
-    pending.getRange('B2:B1000').setNumberFormat('MMM d, yyyy');
-    pending.getRange('D2:D1000').setNumberFormat('$#,##0.00');
-    pending.setTabColor('#ff9800');
-    pending.autoResizeColumns(1, 7);
+  // (v11.0: Pending tab is no longer created or maintained. Use
+  // "Migrate from Pending (one-time)" menu item to migrate existing data.)
+
+  // --- Add Timestamp column (H) to Transactions if missing (v11.0 migration) ---
+  var txnH1 = txn.getRange('H1').getValue();
+  if (txnH1 !== 'Timestamp') {
+    txn.getRange('H1').setValue('Timestamp')
+      .setFontWeight('bold').setBackground('#d9ead3');
+    txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
   }
 
   // --- Update Instructions tab ---
@@ -1509,11 +1765,11 @@ function processInfoAlerts() {
  */
 function processInfoAlerts_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var pending = ss.getSheetByName('Pending');
+  var txn = ss.getSheetByName('Transactions');
 
   var result = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
 
-  if (!pending) return result;
+  if (!txn) return result;
 
   // --- Step 1: Search for unprocessed infoalert emails ---
   var query = 'from:infoalerts@scotiabank.com subject:"Authorization on your" -label:Budget-Processed';
@@ -1552,7 +1808,13 @@ function processInfoAlerts_() {
         var timeStr = match[3].trim();
         var timestamp = buildTimestamp_(emailDate, timeStr);
 
-        newRows.push([timestamp, emailDate, merchant, amount, subject, 'pending', '']);
+        // v11.0 single-ledger: data-only fields. Cols E (Main Cat) and G (Period)
+        // are pre-existing formulas that auto-fill from D and A respectively —
+        // writing them here would clobber the formulas. We write A,B,C,D + H only.
+        newRows.push({
+          date: emailDate, merchant: merchant, amount: amount,
+          category: '', timestamp: timestamp
+        });
       } else {
         result.errors++;
         result.errorDetails.push(subject + ' (' + emailDate.toDateString() + ')');
@@ -1560,15 +1822,19 @@ function processInfoAlerts_() {
     }
   }
 
-  // --- Step 4: Batch write ---
+  // --- Step 4: Batch write to Transactions tab ---
+  // Write cols A:D and col H separately to avoid clobbering formulas in E and G.
   if (newRows.length > 0) {
-    var lastRow = pending.getLastRow();
-    pending.getRange(lastRow + 1, 1, newRows.length, 7).setValues(newRows);
-    pending.autoResizeColumns(1, 7);
+    var startRow = findNextEmptyRow_(txn);
+    var rowsAD = newRows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
+    var rowsH = newRows.map(function(r) { return [r.timestamp]; });
+    txn.getRange(startRow, 1, newRows.length, 4).setValues(rowsAD);
+    txn.getRange(startRow, 8, newRows.length, 1).setValues(rowsH);
+    SpreadsheetApp.flush();
   }
   result.parsed = newRows.length;
 
-  // --- Step 5: Batch label ---
+  // --- Step 5: Batch label emails as processed ---
   var label = GmailApp.getUserLabelByName('Budget/Processed');
   if (!label) {
     label = GmailApp.createLabel('Budget/Processed');
@@ -1647,9 +1913,11 @@ function setNamedRanges_(ss, setup, fixed, budget, txn) {
   ss.setNamedRange('Budget_Budgeted',  budget.getRange('D8:D500'));
   ss.setNamedRange('Budget_Available', budget.getRange('F8:F500'));
 
-  ss.setNamedRange('Transactions_Amount',   txn.getRange('C2:C1000'));
-  ss.setNamedRange('Transactions_Category', txn.getRange('D2:D1000'));
-  ss.setNamedRange('Transactions_Period',   txn.getRange('G2:G1000'));
+  ss.setNamedRange('Transactions_Amount',    txn.getRange('C2:C1000'));
+  ss.setNamedRange('Transactions_Category',  txn.getRange('D2:D1000'));
+  ss.setNamedRange('Transactions_Period',    txn.getRange('G2:G1000'));
+  // Added v11.0 for single-ledger PWA dedup matching
+  ss.setNamedRange('Transactions_Timestamp', txn.getRange('H2:H1000'));
 }
 
 // ================================================================

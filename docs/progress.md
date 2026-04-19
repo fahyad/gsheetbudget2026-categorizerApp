@@ -620,11 +620,60 @@ Two deploys: @16 (initial v10.5) + @17 (slicer fix).
 - All Budgeted values preserved
 - Slicer working with explicit setColumnPosition(1)
 
+## Session: 2026-04-19 (cont.) — v11.0 single-ledger redesign
+
+### Goal
+User reported "appscript not moving categorized transactions" — investigation showed actually no recent batchCategorize calls in Logs (the 8 "categorized" Pending rows were old orphans from v8 still sitting at Transactions row 1001-1008). User asked whether a redesign would be better than just fixing the bug.
+
+### Decision (after discussion)
+Single-ledger redesign (the ZBB report's "Pattern A"):
+- Eliminate Pending tab entirely
+- Transactions becomes the single source of truth
+- Empty Category cell = "needs categorization"
+- Categorize updates an existing row's Category cell — no copy/move
+- PWA contract preserved (same API signatures), so PWA code unchanged
+
+### Implementation
+- New Transactions structure: 8 cols (added H = Timestamp for PWA dedup)
+- Refactored 5 handlers: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
+- All "find row by Pending status" logic replaced with "find row by Timestamp where Category empty"
+- Net: ~60 lines of Apps Script removed
+- Added new named range Transactions_Timestamp = H2:H1000
+- buildWorkbook no longer creates Pending tab
+- updateWorkbook adds Timestamp column header if missing (idempotent)
+- New `migratePendingToTransactions()` one-shot function — moves Pending data to Transactions, archives Pending tab, then deletes it
+
+### Bug found and fixed during migration
+Initial migration (v11.0) had an order-of-operations bug: appended new pending rows to Transactions FIRST (which went past row 1000 since orphans were still at 1001-1008), then ran orphan cleanup which then tried to "move" both the original orphans AND the newly-appended rows up — but they all ended up at rows 1039-1076 (past the named ranges).
+
+Fix: added `consolidateTransactions()` rescue function — reads all rows where Merchant is set, clears the data area (cols A:D, F, H — preserving formulas in E, G), writes the data back starting at row 2.
+
+### Final state (v11.1)
+- 39 rows of data at Transactions rows 2-40 ✓
+- R2 = manual paycheck (no Timestamp)
+- R3-R10 = 8 categorized (formerly orphans at 1001-1008)
+- R11-R40 = 30 uncategorized (waiting for PWA categorization)
+- Rows 1000+ all empty
+- Pending tab gone (archived at `Pending_Archive_20260419_120817`)
+- Migration menu items removed (one-shot job complete)
+
+### Deploys this session
+- @18: v11.0 initial single-ledger
+- @19: v11.0.1 added Consolidate Transactions rescue
+- @20: (force-push artifact)
+- @21: v11.1 removed migration menu items
+
+### Status
+- v11.1 deployed and verified
+- All transaction data consolidated and visible
+- PWA unchanged — same API contract, will work as before
+- Budget tab Apr 1-14 will now reflect $439 of previously-invisible categorized spending
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.5 (Budget tab dashboard at rows 1-6, no `_income` rows, data at row 8+, slicer with explicit column filter). PWA v0.9. All Budgeted values preserved through rebuild. |
-| Where am I going? | User decides on remaining cleanups (orphan transactions, Due Day formatting, hardcoded 2026 dates) or moves to Phase 14 auto-categorization. ZBB enhancement options remain available (Goals, Category Transfers, Sparklines) but explicitly deferred. |
+| Where am I? | Code.gs v11.1 (single-ledger architecture — Pending tab eliminated; Transactions has 8 cols including new Timestamp at H; categorize updates Category cell in place; ~60 lines of Apps Script removed). PWA v0.9 unchanged. |
+| Where am I going? | User tests PWA flow end-to-end (Refresh → categorize → Sync). If working, the deferred cleanup items become non-blockers (orphans already gone). Future: Phase 14 auto-categorization, Goals/Transfers/Sparklines from ZBB report still available but deferred. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 14 Code.gs iterations + 9 PWA iterations. **NEW:** programmatically-created slicers default to NO filter column — must explicitly call `setColumnPosition(N)` after `insertSlicer()` or filtering UI silently breaks. Added to the running list of Sheets behavior surprises (getLastRow + Date coercion + INDEX-with-row-0 + slicer column position). Also: Budget tab restructure preserves Budgeted values automatically via existingBudgetedMap (verified). |
-| What have I done? | Read ZBB research report, mapped recommendations to current system. User chose dashboard + period progress (rejected negative-carry, Goals, Transfers ledger). Implemented v10.5: dashboard at top of Budget tab, removed 26 _income rows, slicer fixed with setColumnPosition(1). All Budgeted values preserved through rebuild. |
+| What have I learned? | 16 Code.gs iterations. **NEW:** When designing migrations, BACKWARDS CHRONOLOGY — clean up legacy data BEFORE adding new data. My first migration (v11.0) put orphan cleanup AFTER pending append, which made the cleanup target the new rows too. Required a v11.0.1 rescue function. Lesson: write a "consolidate" / "compact" function as a generic rescue tool — it's a useful primitive even outside migration scenarios. |
+| What have I done? | Investigated user's "not moving" complaint via dumpSheet + Logs (turned out to be old orphans, not a current bug). Designed + implemented full single-ledger redesign (v11.0). Fixed migration order-of-operations bug with consolidateTransactions (v11.0.1). Removed one-shot menu items in v11.1. All 39 transactions now visible at top of Transactions tab. |

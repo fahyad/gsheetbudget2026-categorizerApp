@@ -79,29 +79,31 @@
 
 **Slicer:** anchored at (row 1, col 8). Filters by column 1 (Period). Created with `setColumnPosition(1)` after insertion — without that explicit call, the slicer has no filter column and breaks UX.
 
-### Transactions Tab (cols A–G)
+### Transactions Tab (cols A–H, v11.0+)
+**The single ledger.** Holds all transactions, categorized or not. Empty Category = "needs categorization".
+
 | Col | Header | Type |
 |-----|--------|------|
-| A | Date | Date (manual or from categorizer) |
-| B | Merchant | Text (manual or from categorizer) |
-| C | Amount | Currency (negative=purchase, positive=income/refund) |
-| D | Category | Dropdown from CategoryList (manual or from categorizer) |
-| E | Main Category | Formula: INDEX/MATCH from Setup |
-| F | Transaction # | Text (manual) |
-| G | Period | Formula: FILTER by date range |
+| A | Date | Date (manual or from email) |
+| B | Merchant | Text (manual or from email) |
+| C | Amount | Currency (negative=purchase, positive=income) |
+| D | Category | Dropdown from CategoryList (empty = uncategorized) |
+| E | Main Category | Formula: `=IF(D="","",INDEX(Setup!D,MATCH(D,Setup!E,0)))` |
+| F | Transaction # | Text (manual reference) |
+| G | Period | Formula: `=IF(A="","",FILTER(PayPeriods_Label,...))` |
+| H | Timestamp | Date/time (NEW v11.0; blank for manual entries; precise datetime from email parser; **PWA dedup key**) |
 
-### Pending Tab (cols A–G)
-| Col | Header | Type |
-|-----|--------|------|
-| A | Timestamp | Date/time string "yyyy-mm-dd hh:mm:ss" (**dedup key**) |
-| B | Date | Date (transaction date from email) |
-| C | Merchant | Text (parsed from email body) |
-| D | Amount | Currency (negative for purchases) |
-| E | Email Subject | Text (for debugging) |
-| F | Status | Text: "pending" or "categorized" |
-| G | Category | Text (filled by PWA when categorized) |
+PWA flow: reads rows where `Category=""` AND `Timestamp` is set → user categorizes → backend writes Category cell of existing row (no copy/move).
 
-Orange tab color. Populated by Parse Emails, consumed by PWA.
+### Pending Tab — REMOVED in v11.0
+The Pending tab was eliminated in the v11.0 single-ledger redesign. Email-parsed transactions now write directly to Transactions tab with empty Category. Categorize updates the same row's Category cell.
+
+Pre-v11.0 architecture (kept here for historical reference):
+- Pending was a 7-col inbox with Timestamp + Date + Merchant + Amount + Email Subject + Status + Category
+- Categorize moved row from Pending → Transactions (copy operation, prone to orphan-row bugs)
+- v8 `findNextEmptyRow_` bug caused 8 rows to land at row 1001+ (invisible to Budget)
+
+After migration: backed up to `Pending_Archive_<timestamp>` tab, then deleted.
 
 ## Named Ranges (15 total)
 | Name | Tab | Range |
@@ -121,6 +123,7 @@ Orange tab color. Populated by Parse Emails, consumed by PWA.
 | Transactions_Amount | Transactions | C2:C1000 |
 | Transactions_Category | Transactions | D2:D1000 |
 | Transactions_Period | Transactions | G2:G1000 |
+| Transactions_Timestamp | Transactions | H2:H1000 (added v11.0 for PWA dedup matching) |
 
 ## Formula Inventory (v6)
 | Formula | Location | Purpose |
@@ -424,7 +427,34 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v10.5)
+## Single-Ledger Architecture (v11.0+)
+
+**Before (v10.x and earlier):** Two-tab design with Pending → Transactions copy operation.
+**After (v11.0+):** Single Transactions ledger. Empty Category = "needs categorization".
+
+### Why the change
+- Eliminates entire class of "find next empty row → orphan" bugs (no more copying)
+- Removes ~60 lines of Apps Script (handler simplification)
+- Single source of truth — no Pending/Transactions desync risk
+- Matches "Pattern A" from ZBB research report
+- PWA contract unchanged — same `parseAndFetch`/`batchCategorize` API signatures
+
+### How handlers changed
+| Handler | Before (two-tab) | After (single-ledger) |
+|---|---|---|
+| `processInfoAlerts_` | Wrote 7 cols to Pending tab | Writes A:D + H to Transactions, empty Category |
+| `handleParseAndFetch_` | Read Pending where status='pending' | Reads Transactions where Category="" AND Timestamp set |
+| `handleBatchCategorize_` | Find Pending row → write to Transactions → verify → mark Pending categorized (~150 lines) | Find Transactions row by Timestamp → update Category cell → verify (~50 lines) |
+| `handleCategorize_` | Same complex flow | Update single Category cell |
+| `handleUncategorize_` | Delete Transactions row + restore Pending status | Clear Category cell of existing row |
+
+### One-shot migration (v11.0)
+- `migratePendingToTransactions()` — moved 30 pending + 8 categorized + 8 orphans
+- `consolidateTransactions()` — fixed an order-of-operations bug (initial migration appended past row 1000; consolidate compacts data to top)
+- Backed up Pending tab to `Pending_Archive_<timestamp>` before deletion
+- Both menu items removed in v11.1 once migration verified
+
+## Web App API (v11.1)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |
