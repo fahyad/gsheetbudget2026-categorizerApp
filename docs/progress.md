@@ -569,11 +569,62 @@ Two new postmortem entries:
 - PWA v0.9 ready (will auto-deploy via GitHub Pages on push)
 - All known critical bugs resolved as of this session
 
+## Session: 2026-04-19 (cont.) — v10.5 Budget tab dashboard redesign
+
+### Goal
+After reading a Claude research report on ZBB best practices, user identified `_income` rows as "functional but not that useable" — scattered across 26 periods, hard to find, and hidden behind the slicer filter. Wanted a dedicated dashboard at top of Budget tab showing budgetable income for ONE period at a time (selected via dropdown). Display-only, fixed at top.
+
+User explicitly REJECTED the YNAB-style negative-carry rule (`max(prior, 0)` rollover) — preferred shuffling money mid-period over having debt zeroed between periods.
+
+### Design
+- Rows 1-6: dashboard (frozen with row 7)
+- Row 1: PERIOD dropdown (B1) + PROGRESS text (F1: "Day X of Y (Z% elapsed)")
+- Row 4: 4 metrics — Net Income (raw paycheck), Fixed Expenses (only periods containing 1st of month), Total Budgeted, READY TO ASSIGN (color-coded green/red/yellow)
+- Row 7: original header (now shifted from row 1)
+- Row 8+: category data (no `_income` rows)
+- Slicer: kept independent (filters category rows below; doesn't drive dashboard)
+
+### Code.js changes (v10.5)
+- Refactored `buildIncomeFormula_(row)` → split into `buildPaycheckFormula_(periodCellRef)` + `buildFixedExpensesFormula_(periodCellRef)` for dashboard reuse
+- New `buildBudgetDashboard_(budget)` helper — writes rows 1-6 with formulas, dropdown data validation, conditional formatting on Ready to Assign, sets frozen rows = 7
+- `rebuildBudgetInternal_`: removed `_income` row generation, all data writes start at row 8 instead of row 2, recreates slicer at row 7+ range
+- `updateWorkbook`: removed `_income` branch, calls `buildBudgetDashboard_` to refresh dashboard
+- `setNamedRanges_`: Budget_* ranges shifted from `*2:*500` to `*8:*500` (skip dashboard + header)
+- `buildWorkbook`: Budget header moved from A1:F1 to A7:F7
+
+### Bug found and fixed during deploy
+**Slicer broken after Initialize Budget** — "no values show up when filtering for period". Root cause: `insertSlicer()` programmatically creates a slicer with NO column filter set. User clicking the slicer would see no filter options work properly.
+
+Fix: explicitly call `newSlicer.setColumnPosition(1)` after `insertSlicer()`. This sets the slicer to filter by column 1 of the data range (Period column).
+
+Two deploys: @16 (initial v10.5) + @17 (slicer fix).
+
+### Verification (after Initialize Budget x2)
+- Dashboard rows 1-6 populated with formulas ✓
+- B1 dropdown defaults to "Apr 15 - 28" — when changed, all metrics recalculate ✓
+- Net Income = $2,795, Fixed Exp = $0 (Apr 15-28 doesn't contain 1st), Total Budgeted = $1,850, RtA = $945 (yellow — under-allocated) ✓
+- Period progress: "Day 5 of 14 (36% elapsed)" — TODAY is Apr 19, period started Apr 15 ✓
+- Header at row 7, data at row 8+, no `_income` rows anywhere ✓
+- Apr 15-28 Budgeted values preserved through rebuild: Groceries $300, Gas $100, Parking $100, House things $350, Saajidah $200, Fahyad $200, Small trip $300, Eating out $300 ✓
+- Slicer filters by Period correctly after re-Initialize ✓
+
+### Decisions explicitly NOT taken (user choice)
+- ❌ YNAB-style negative-carry rollover rule — kept current behavior
+- ❌ Category Transfers ledger
+- ❌ Sinking fund / Goals columns
+- ❌ AutoCat rules (deferred to Phase 14)
+- ❌ Sparkline progress bars per category row
+
+### Status
+- v10.5 deployed @17 — Budget tab restructured
+- All Budgeted values preserved
+- Slicer working with explicit setColumnPosition(1)
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v10.4 (Budget Available circular ref + Setup whitespace fixes deployed and verified) + PWA v0.9 (defense-in-depth trim). All Budget values stable and correct. |
-| Where am I going? | User decides on remaining deferred cleanups: orphan transactions (rows 1001-1008, $439 invisible), Fixed Monthly Expenses Due Day formatting, hardcoded 2026 pay dates. Or move on to Phase 14 auto-categorization. |
+| Where am I? | Code.gs v10.5 (Budget tab dashboard at rows 1-6, no `_income` rows, data at row 8+, slicer with explicit column filter). PWA v0.9. All Budgeted values preserved through rebuild. |
+| Where am I going? | User decides on remaining cleanups (orphan transactions, Due Day formatting, hardcoded 2026 dates) or moves to Phase 14 auto-categorization. ZBB enhancement options remain available (Goals, Category Transfers, Sparklines) but explicitly deferred. |
 | What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 13 Code.gs iterations + 9 PWA iterations. Three "Sheets behavior surprises" found and fixed: (1) `getLastRow()` counts formulas-with-empty-strings as content, (2) Date-formatted cell coerces typed integers to weird Date(1)=Dec31,1899, (3) `INDEX(range, 0)` returns full range (not error) — combined with SUMIFS becomes unstable circular reference. **Lesson: any MATCH-1 needs explicit `IF(>1, ..., 0)` guard.** Also: defense-in-depth string trimming on both client and server. |
-| What have I done? | Investigated divergent Budget values via dumpSheet, root-caused circular ref + trailing space, planned + implemented Option B (formula fix in 2 places + cleanup helper + PWA trim), deployed v10.4, verified all fixes. |
+| What have I learned? | 14 Code.gs iterations + 9 PWA iterations. **NEW:** programmatically-created slicers default to NO filter column — must explicitly call `setColumnPosition(N)` after `insertSlicer()` or filtering UI silently breaks. Added to the running list of Sheets behavior surprises (getLastRow + Date coercion + INDEX-with-row-0 + slicer column position). Also: Budget tab restructure preserves Budgeted values automatically via existingBudgetedMap (verified). |
+| What have I done? | Read ZBB research report, mapped recommendations to current system. User chose dashboard + period progress (rejected negative-carry, Goals, Transfers ledger). Implemented v10.5: dashboard at top of Budget tab, removed 26 _income rows, slicer fixed with setColumnPosition(1). All Budgeted values preserved through rebuild. |

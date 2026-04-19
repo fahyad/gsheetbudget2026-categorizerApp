@@ -50,15 +50,34 @@
 
 **One row per expense.** No expanded date rows. Budget formulas auto-calculate which months' due dates fall in each period using SUMPRODUCT. Adding/removing expenses is instant — no script needed.
 
-### Budget Tab (cols A–F)
+### Budget Tab (cols A–F, v10.5)
+**Rows 1-6: dashboard (display-only, frozen)**
+| Cell | Content |
+|------|---------|
+| A1 | "PERIOD:" label |
+| B1 | Dropdown (data validation from PayPeriods_Label) — drives all dashboard formulas |
+| E1 | "PROGRESS:" label |
+| F1 | Formula: "Day X of Y (Z% elapsed)" using TODAY() and selected period start/end |
+| A3:C3,F3 | Metric labels (Net Income / Fixed Expenses / Total Budgeted / READY TO ASSIGN) |
+| A4 | `buildPaycheckFormula_($B$1)` — sum of Paycheck transactions in selected period |
+| B4 | `buildFixedExpensesFormula_($B$1)` — SUMPRODUCT of fixed expenses due in selected period |
+| C4 | `=IFERROR(SUMIFS(Budget_Budgeted, Budget_Period, $B$1), 0)` — sum of Budgeted across all categories for the period |
+| F4 | `=A4 - B4 - C4` — Ready to Assign (color-coded: red <0, green =0, yellow >0) |
+
+**Row 7: header** (Period | Main Category | Category | Budgeted | Spent | Available) — frozen with row 7
+
+**Rows 8+: data** (no more `_income` rows; 8 sub-categories × 26 periods = 208 rows)
+
 | Col | Header | Type |
 |-----|--------|------|
 | A | Period | Text (period label value) |
-| B | Main Category | Formula: INDEX/MATCH from Setup (blank for _income) |
-| C | Category | Text (sub category name or "_income") |
-| D | Budgeted | Manual entry (formula for _income rows: Net Income via SUMPRODUCT) |
+| B | Main Category | Formula: INDEX/MATCH from Setup |
+| C | Category | Text (sub category name) |
+| D | Budgeted | Manual entry (preserved across rebuilds via existingBudgetedMap) |
 | E | Spent | Formula: -SUMIFS from Transactions |
-| F | Available | Formula: rollover + budgeted - spent |
+| F | Available | Formula: rollover + budgeted - spent (with IF(MATCH>1, ..., 0) guard from v10.4) |
+
+**Slicer:** anchored at (row 1, col 8). Filters by column 1 (Period). Created with `setColumnPosition(1)` after insertion — without that explicit call, the slicer has no filter column and breaks UX.
 
 ### Transactions Tab (cols A–G)
 | Col | Header | Type |
@@ -95,10 +114,10 @@ Orange tab color. Populated by Parse Emails, consumed by PWA.
 | CategoryMain | Setup | D2:D100 |
 | FixedExpenses_Amount | Fixed Monthly Expenses | B2:B50 |
 | FixedExpenses_DueDay | Fixed Monthly Expenses | C2:C50 |
-| Budget_Period | Budget | A2:A500 |
-| Budget_Category | Budget | C2:C500 |
-| Budget_Budgeted | Budget | D2:D500 |
-| Budget_Available | Budget | F2:F500 |
+| Budget_Period | Budget | A8:A500 (v10.5: shifted to skip dashboard rows) |
+| Budget_Category | Budget | C8:C500 |
+| Budget_Budgeted | Budget | D8:D500 |
+| Budget_Available | Budget | F8:F500 |
 | Transactions_Amount | Transactions | C2:C1000 |
 | Transactions_Category | Transactions | D2:D1000 |
 | Transactions_Period | Transactions | G2:G1000 |
@@ -405,7 +424,7 @@ if (String(verify[1]) !== String(rows[0][1])) {
 ```
 This catches silent write failures (protected ranges, data validation rejects, quota hiccups, row-placement bugs).
 
-## Web App API (v10.4)
+## Web App API (v10.5)
 
 ### Endpoints
 | Method | Action | URL Params | Returns |

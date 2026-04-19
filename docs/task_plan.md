@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v10.4 — fixed Budget Available circular reference + Setup whitespace cleanup. Lives at `apps-script/Code.js` (managed via clasp).
+- **Apps Script:** v10.5 — Budget tab redesigned with display-only dashboard at top (rows 1-6), removed 26 `_income` rows, data shifted to row 8+, slicer with explicit column filter. Lives at `apps-script/Code.js` (managed via clasp).
 - **PWA:** v0.9 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — defense-in-depth client-side trim added.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
@@ -71,6 +71,17 @@
 - Added `dumpSheet` read-only endpoint to Code.gs (modes: metadata, values, formulas)
 - API-key gated, capped at 10000 cells/request
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
+- **Status:** complete
+
+### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
+- After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
+- Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
+- Dashboard rows 1-6: dropdown + Net Income + Fixed Expenses + Total Budgeted + Ready to Assign (color-coded) + Period progress
+- Header at row 7, data starts at row 8
+- Frozen rows = 7 so dashboard always visible while scrolling
+- Slicer kept independent (filters category rows below) — required explicit `setColumnPosition(1)` after `insertSlicer()` to avoid broken filter UX
+- Named ranges shifted: `Budget_*` from row 2 to row 8
+- User explicitly REJECTED YNAB-style negative-carry rule, Goals columns, Category Transfers ledger, Sparklines (deferred for now)
 - **Status:** complete
 
 ### Phase 13b: Instructions Tab Rewrite (v10.3)

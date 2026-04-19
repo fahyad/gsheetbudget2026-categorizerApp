@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v10.4 (fixed Budget Available circular reference + added Setup whitespace cleanup)
+- **Apps Script:** v10.5 (Budget tab redesigned — top dashboard at rows 1-6, no more `_income` rows, data starts at row 8)
 - **PWA:** v0.9 (defense-in-depth trim on saveNewCategory)
 
 ## Common commands
@@ -73,6 +73,14 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 Caps at 10000 cells per request. Read-only (no writes). API-key gated.
 
 Tabs in this sheet: `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Pending`, `Transactions`.
+
+**Budget tab layout (v10.5+):**
+- **Rows 1-6:** Dashboard (display only). B1 = period dropdown. Row 4 shows Net Income / Fixed Expenses / Total Budgeted / Ready to Assign for the selected period. F1 shows period progress ("Day X of Y").
+- **Row 7:** Header row (Period | Main | Category | Budgeted | Spent | Available)
+- **Rows 8+:** Category data (no more `_income` rows). 8 categories × 26 periods = 208 data rows.
+- **Frozen rows:** 7 (dashboard + header always visible when scrolling)
+- **Slicer:** to the right of column F (anchored row 1 col 8). Filters by Period (col 1 of data range). Independent of dashboard dropdown.
+- **Named ranges** (Budget_Period, Budget_Category, Budget_Budgeted, Budget_Available) all start at row 8.
 
 ## Version display (added v10.2)
 

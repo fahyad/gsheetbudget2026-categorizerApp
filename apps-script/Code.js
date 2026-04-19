@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v10.4';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 08:20 MDT';
+var APP_SCRIPT_VERSION = 'v10.5';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 10:47 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -1310,10 +1310,12 @@ function buildWorkbook() {
   // ============================================================
   // BUDGET TAB
   // ============================================================
+  // Header at row 7 (rows 1-6 are reserved for the dashboard, populated by
+  // buildBudgetDashboard_ which is called from rebuildBudgetInternal_).
   var budget = sheets['Budget'];
   budget.clear();
 
-  budget.getRange('A1:F1')
+  budget.getRange('A7:F7')
     .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
     .setFontWeight('bold').setBackground(HDR_BG);
 
@@ -1432,7 +1434,14 @@ function updateWorkbook() {
   if (!fixed) fixed = ss.getSheetByName('Fixed Monthly Expenses');
   setNamedRanges_(ss, setup, fixed, budget, txn);
 
-  // --- Update Budget formulas ---
+  // --- Refresh Budget tab dashboard (rows 1-6) ---
+  buildBudgetDashboard_(budget);
+
+  // --- Update Budget category formulas ---
+  // Scan from row 2 to lastRow — handles old format (data at row 2 with _income
+  // rows interleaved) and new format (data at row 8). _income rows are skipped
+  // (their formulas are no longer maintained — they should be removed via
+  // Initialize Budget). Category rows get formula refresh in either format.
   var lastRow = budget.getLastRow();
   if (lastRow > 1) {
     var budgetData = budget.getRange(2, 1, lastRow - 1, 4).getValues();
@@ -1441,30 +1450,21 @@ function updateWorkbook() {
       var row = i + 2;
       var category = budgetData[i][2];
 
-      if (category === '_income') {
-        budget.getRange(row, 2).setFormula('=""');
-        budget.getRange(row, 4).setFormula(buildIncomeFormula_(row));
-        budget.getRange(row, 5).setFormula(
-          '=SUMIFS(Budget_Budgeted,Budget_Period,A' + row + ',Budget_Category,"<>_income")'
-        );
-        budget.getRange(row, 6).setFormula('=D' + row + '-E' + row);
-      } else if (category !== '') {
-        budget.getRange(row, 2).setFormula(
-          '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + row + ',Setup!$E$2:$E$100,0)),"")'
-        );
-        budget.getRange(row, 5).setFormula(
-          '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + row + ',Transactions_Category,C' + row + ')'
-        );
-        // Available formula: prior period's Available + this Budgeted - this Spent.
-        // Wrap MATCH-1 in IF(>1, ..., 0) — for period 1, MATCH-1=0 and INDEX(range,0)
-        // returns the entire range, creating a circular SUMIFS that diverges under
-        // iterative calc. Period 1 explicitly returns 0 (no prior period to roll over).
-        budget.getRange(row, 6).setFormula(
-          '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
-            'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
-            '0)+D' + row + '-E' + row
-        );
-      }
+      // Skip _income rows (legacy — should be removed via Initialize Budget) and blanks
+      if (!category || category === '_income') continue;
+
+      budget.getRange(row, 2).setFormula(
+        '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + row + ',Setup!$E$2:$E$100,0)),"")'
+      );
+      budget.getRange(row, 5).setFormula(
+        '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + row + ',Transactions_Category,C' + row + ')'
+      );
+      // Available formula: see v10.4 fix for IF(MATCH>1, ..., 0) rationale.
+      budget.getRange(row, 6).setFormula(
+        '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
+          'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
+          '0)+D' + row + '-E' + row
+      );
     }
   }
 
@@ -1472,8 +1472,11 @@ function updateWorkbook() {
     'Script updated!\n\n' +
     'Formulas, named ranges, and data validation have been refreshed.\n' +
     'Pending tab verified/created.\n' +
+    'Budget dashboard refreshed.\n' +
     'Your data (transactions, budgeted amounts, pending) was NOT changed.\n' +
-    'Instructions tab has been updated.'
+    'Instructions tab has been updated.\n\n' +
+    'NOTE: If your Budget tab still shows old _income rows, run\n' +
+    '"Initialize Budget" to fully migrate to the new layout.'
   );
 }
 
@@ -1638,10 +1641,11 @@ function setNamedRanges_(ss, setup, fixed, budget, txn) {
   ss.setNamedRange('FixedExpenses_Amount', fixed.getRange('B2:B50'));
   ss.setNamedRange('FixedExpenses_DueDay', fixed.getRange('C2:C50'));
 
-  ss.setNamedRange('Budget_Period',    budget.getRange('A2:A500'));
-  ss.setNamedRange('Budget_Category',  budget.getRange('C2:C500'));
-  ss.setNamedRange('Budget_Budgeted',  budget.getRange('D2:D500'));
-  ss.setNamedRange('Budget_Available', budget.getRange('F2:F500'));
+  // Budget_* ranges start at row 8 — rows 1-6 are dashboard, row 7 is header.
+  ss.setNamedRange('Budget_Period',    budget.getRange('A8:A500'));
+  ss.setNamedRange('Budget_Category',  budget.getRange('C8:C500'));
+  ss.setNamedRange('Budget_Budgeted',  budget.getRange('D8:D500'));
+  ss.setNamedRange('Budget_Available', budget.getRange('F8:F500'));
 
   ss.setNamedRange('Transactions_Amount',   txn.getRange('C2:C1000'));
   ss.setNamedRange('Transactions_Category', txn.getRange('D2:D1000'));
@@ -1784,21 +1788,142 @@ function addCategory() {
   rebuildBudget_('add');
 }
 
-function buildIncomeFormula_(row) {
+/**
+ * Builds the Budget tab dashboard (rows 1-6) with display-only metrics
+ * for the selected period (B1 dropdown).
+ *
+ * Layout:
+ *   Row 1: PERIOD: [dropdown]                               PROGRESS: Day X of Y (Z% elapsed)
+ *   Row 2: (spacer)
+ *   Row 3: Net Income | Fixed Expenses | Total Budgeted     | | READY TO ASSIGN
+ *   Row 4:   $...        $...             $...                  $... (color-coded)
+ *   Row 5: (spacer)
+ *   Row 6: (spacer)
+ *   Row 7: Period | Main Category | Category | Budgeted | Spent | Available  ← original header
+ */
+function buildBudgetDashboard_(budget) {
+  // --- Clear and set values for rows 1-6 ---
+  budget.getRange(1, 1, 6, 6).clearContent().clearFormat();
+
+  // Row 1: labels + dropdown + progress
+  budget.getRange('A1').setValue('PERIOD:');
+  budget.getRange('E1').setValue('PROGRESS:');
+  budget.getRange('F1').setFormula(
+    '=IFERROR(LET(' +
+      's,INDEX(PayPeriods_Start,MATCH($B$1,PayPeriods_Label,0)),' +
+      'e,INDEX(PayPeriods_End,MATCH($B$1,PayPeriods_Label,0)),' +
+      'total,e-s+1,' +
+      'elapsed,MAX(0,MIN(TODAY()-s+1,total)),' +
+      'pct,elapsed/total,' +
+      '"Day "&elapsed&" of "&total&" ("&TEXT(pct,"0%")&" elapsed)"' +
+    '),"")'
+  );
+
+  // Row 3: metric labels
+  budget.getRange('A3').setValue('Net Income');
+  budget.getRange('B3').setValue('Fixed Expenses');
+  budget.getRange('C3').setValue('Total Budgeted');
+  budget.getRange('F3').setValue('READY TO ASSIGN');
+
+  // Row 4: metric values
+  budget.getRange('A4').setFormula(buildPaycheckFormula_('$B$1'));
+  budget.getRange('B4').setFormula(buildFixedExpensesFormula_('$B$1'));
+  budget.getRange('C4').setFormula('=IFERROR(SUMIFS(Budget_Budgeted,Budget_Period,$B$1),0)');
+  budget.getRange('F4').setFormula('=A4-B4-C4');
+
+  // --- Period dropdown on B1 ---
+  var ss = budget.getParent();
+  var setup = ss.getSheetByName('Setup');
+  if (setup) {
+    var periodRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('C2:C27'), true)
+      .setAllowInvalid(false)
+      .build();
+    budget.getRange('B1').setDataValidation(periodRule);
+    // Default to first period if blank
+    if (!budget.getRange('B1').getValue()) {
+      budget.getRange('B1').setValue('Dec 25 - Jan 20');
+    }
+  }
+
+  // --- Formatting ---
+  // Row 1: header bar (dark blue, white text)
+  budget.getRange('A1:F1').setBackground('#1a237e').setFontColor('#ffffff').setFontWeight('bold');
+  budget.getRange('B1').setBackground('#ffffff').setFontColor('#000000').setHorizontalAlignment('center');
+  budget.getRange('F1').setBackground('#ffffff').setFontColor('#000000').setFontWeight('normal').setHorizontalAlignment('center');
+
+  // Row 3: metric labels (light blue bg, dark blue text, small caps style)
+  budget.getRange('A3:F3').setBackground('#e8eaf6').setFontColor('#1a237e').setFontWeight('bold').setFontSize(10);
+
+  // Row 4: metric values (currency format, larger font)
+  budget.getRange('A4:C4').setNumberFormat('$#,##0.00').setFontSize(13).setHorizontalAlignment('center');
+  budget.getRange('F4').setNumberFormat('$#,##0.00').setFontSize(14).setFontWeight('bold').setHorizontalAlignment('center');
+
+  // Rows 2, 5, 6: spacers (light gray)
+  budget.getRange('A2:F2').setBackground('#f5f5f5');
+  budget.getRange('A5:F6').setBackground('#f5f5f5');
+
+  // --- Conditional formatting on F4 (Ready to Assign) ---
+  // Clear existing CF rules on F4 first
+  var rules = budget.getConditionalFormatRules();
+  var newRules = [];
+  for (var i = 0; i < rules.length; i++) {
+    var ranges = rules[i].getRanges();
+    var keep = true;
+    for (var j = 0; j < ranges.length; j++) {
+      if (ranges[j].getA1Notation() === 'F4') { keep = false; break; }
+    }
+    if (keep) newRules.push(rules[i]);
+  }
+  // Add new rules: red if <0, green if =0, yellow if >0
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThan(0)
+    .setBackground('#ffcdd2').setFontColor('#b71c1c')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberEqualTo(0)
+    .setBackground('#c8e6c9').setFontColor('#1b5e20')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(0)
+    .setBackground('#fff9c4').setFontColor('#f57f17')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  budget.setConditionalFormatRules(newRules);
+
+  // --- Freeze rows 1-7 (dashboard rows 1-6 + header row 7) ---
+  budget.setFrozenRows(7);
+}
+
+/**
+ * Returns the formula for "Paycheck income in selected period" (positive).
+ * @param periodCellRef e.g. '$B$1' (the dashboard period dropdown cell)
+ */
+function buildPaycheckFormula_(periodCellRef) {
+  return '=IFERROR(SUMIFS(Transactions_Amount,Transactions_Period,' + periodCellRef +
+    ',Transactions_Category,"Paycheck"),0)';
+}
+
+/**
+ * Returns the formula for "Fixed expenses due in selected period" (positive).
+ * Sums across 13 months (Jan 2026 - Jan 2027) any fixed expense whose
+ * DATE(2026, M, dueDay) falls within the period's start/end range.
+ * @param periodCellRef e.g. '$B$1' (the dashboard period dropdown cell)
+ */
+function buildFixedExpensesFormula_(periodCellRef) {
   var monthChecks = [];
   for (var m = 1; m <= 13; m++) {
     monthChecks.push('((DATE(2026,' + m + ',dd)>=s)*(DATE(2026,' + m + ',dd)<=e))');
   }
-
-  return '=IFERROR(SUMIFS(Transactions_Amount,Transactions_Period,A' + row +
-    ',Transactions_Category,"Paycheck"),0)' +
-    '-IFERROR(LET(' +
-      's,INDEX(PayPeriods_Start,MATCH(A' + row + ',PayPeriods_Label,0)),' +
-      'e,INDEX(PayPeriods_End,MATCH(A' + row + ',PayPeriods_Label,0)),' +
-      'amt,FixedExpenses_Amount,' +
-      'dd,FixedExpenses_DueDay,' +
-      'valid,(amt<>"")*(dd<>""),' +
-      'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
+  return '=IFERROR(LET(' +
+    's,INDEX(PayPeriods_Start,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
+    'e,INDEX(PayPeriods_End,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
+    'amt,FixedExpenses_Amount,' +
+    'dd,FixedExpenses_DueDay,' +
+    'valid,(amt<>"")*(dd<>""),' +
+    'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
     '),0)';
 }
 
@@ -1859,6 +1984,9 @@ function rebuildBudgetInternal_(mode, ss) {
     return { error: 'No spending categories found in Setup.' };
   }
 
+  // Read existing Budgeted values to preserve. Scan from row 2 to lastRow —
+  // works for both old format (data at row 2, with _income rows) and new
+  // format (data at row 8, no _income rows). _income filtered out by category check.
   var lastRow = budget.getLastRow();
   var budgetedMap = {};
   var existingKeys = {};
@@ -1869,6 +1997,7 @@ function rebuildBudgetInternal_(mode, ss) {
       var period = existingData[e][0];
       var category = existingData[e][2];
       var budgeted = existingData[e][3];
+      if (!period || !category) continue;
       var key = period + '|' + category;
       existingKeys[key] = true;
       if (category !== '_income' && typeof budgeted === 'number') {
@@ -1877,94 +2006,89 @@ function rebuildBudgetInternal_(mode, ss) {
     }
   }
 
+  // Count NEW category rows (for "add" mode optimization)
   var newCount = 0;
   for (var li = 0; li < labels.length; li++) {
-    if (!existingKeys[labels[li] + '|_income']) newCount++;
     for (var ci = 0; ci < budgetCats.length; ci++) {
       if (!existingKeys[labels[li] + '|' + budgetCats[ci]]) newCount++;
     }
   }
 
   if (mode === 'add' && newCount === 0) {
+    // Nothing structurally new, but refresh dashboard in case it's missing
+    buildBudgetDashboard_(budget);
     return { error: null, totalRows: 0, periods: labels.length, categories: budgetCats.length, newCount: 0 };
   }
 
-  if (lastRow > 1) {
-    budget.getRange(2, 1, lastRow - 1, 6).clear();
-  }
+  // Wipe entire Budget tab (dashboard, header, data — clean slate)
+  budget.clear();
 
+  // Build dashboard at rows 1-6 (sets frozen rows = 7, period dropdown, formulas)
+  buildBudgetDashboard_(budget);
+
+  // Header row at row 7
+  budget.getRange(7, 1, 1, 6)
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
+    .setFontWeight('bold').setBackground('#d9ead3');
+
+  // Build category rows (no more _income rows)
+  var DATA_START_ROW = 8;
   var allValues = [];
-  var rowTypes = [];
-
   for (var pi = 0; pi < labels.length; pi++) {
     var label = labels[pi];
-    allValues.push([label, '', '_income', 0, 0, 0]);
-    rowTypes.push('income');
-
     for (var ki = 0; ki < budgetCats.length; ki++) {
       var cat = budgetCats[ki];
       var mapKey = label + '|' + cat;
       var bVal = (budgetedMap[mapKey] !== undefined) ? budgetedMap[mapKey] : 0;
       allValues.push([label, '', cat, bVal, 0, 0]);
-      rowTypes.push('category');
     }
   }
 
   var totalRows = allValues.length;
-  budget.getRange(2, 1, totalRows, 6).setValues(allValues);
+  budget.getRange(DATA_START_ROW, 1, totalRows, 6).setValues(allValues);
 
+  // Column B (Main Category) — lookup formula
   var formulasB = [];
   for (var bi = 0; bi < totalRows; bi++) {
-    var bRow = bi + 2;
-    if (rowTypes[bi] === 'income') {
-      formulasB.push(['=""']);
-    } else {
-      formulasB.push([
-        '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + bRow + ',Setup!$E$2:$E$100,0)),"")'
-      ]);
-    }
+    var bRow = bi + DATA_START_ROW;
+    formulasB.push([
+      '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + bRow + ',Setup!$E$2:$E$100,0)),"")'
+    ]);
   }
-  budget.getRange(2, 2, totalRows, 1).setFormulas(formulasB);
+  budget.getRange(DATA_START_ROW, 2, totalRows, 1).setFormulas(formulasB);
 
+  // Columns E (Spent) and F (Available) — formulas
+  // Available wraps in IF(MATCH>1, ..., 0) to avoid the period-1 INDEX-with-row-0
+  // circular-reference bug fixed in v10.4.
   var formulasEF = [];
   for (var ef = 0; ef < totalRows; ef++) {
-    var efRow = ef + 2;
-    if (rowTypes[ef] === 'income') {
-      formulasEF.push([
-        '=SUMIFS(Budget_Budgeted,Budget_Period,A' + efRow + ',Budget_Category,"<>_income")',
-        '=D' + efRow + '-E' + efRow
-      ]);
-    } else {
-      // Available formula: see updateWorkbook line ~1426 for the IF(MATCH>1, ..., 0) rationale.
-      // Without this guard, period 1's MATCH-1 = 0 → INDEX returns full range →
-      // SUMIFS becomes circular and diverges under iterative calc.
-      formulasEF.push([
-        '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
-        '=IF(MATCH(A' + efRow + ',PayPeriods_Label,0)>1,' +
-          'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + efRow + ',PayPeriods_Label,0)-1),Budget_Category,C' + efRow + '),0),' +
-          '0)+D' + efRow + '-E' + efRow
-      ]);
-    }
+    var efRow = ef + DATA_START_ROW;
+    formulasEF.push([
+      '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
+      '=IF(MATCH(A' + efRow + ',PayPeriods_Label,0)>1,' +
+        'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + efRow + ',PayPeriods_Label,0)-1),Budget_Category,C' + efRow + '),0),' +
+        '0)+D' + efRow + '-E' + efRow
+    ]);
   }
-  budget.getRange(2, 5, totalRows, 2).setFormulas(formulasEF);
+  budget.getRange(DATA_START_ROW, 5, totalRows, 2).setFormulas(formulasEF);
 
-  for (var di = 0; di < totalRows; di++) {
-    if (rowTypes[di] === 'income') {
-      var dRow = di + 2;
-      budget.getRange(dRow, 4).setFormula(buildIncomeFormula_(dRow));
-    }
-  }
-
-  budget.getRange(2, 4, totalRows, 3).setNumberFormat('$#,##0.00');
+  // Currency format on Budgeted/Spent/Available columns
+  budget.getRange(DATA_START_ROW, 4, totalRows, 3).setNumberFormat('$#,##0.00');
   budget.autoResizeColumns(1, 6);
 
-  var slicers = budget.getSlicers();
-  if (slicers.length === 0) {
-    budget.insertSlicer(
-      budget.getRange(1, 1, totalRows + 1, 6),
-      1, 8
-    );
+  // Recreate slicer over header + data only (skip dashboard rows 1-6).
+  // Explicitly set the filter column to 1 (Period) so the slicer shows period
+  // values when clicked. Without setColumnPosition, programmatically-created
+  // slicers default to no filter column → broken filtering UX.
+  var existingSlicers = budget.getSlicers();
+  for (var s = 0; s < existingSlicers.length; s++) {
+    existingSlicers[s].remove();
   }
+  var newSlicer = budget.insertSlicer(
+    budget.getRange(7, 1, totalRows + 1, 6),
+    1, 8
+  );
+  newSlicer.setColumnPosition(1);  // Filter by Period (col A of the data range)
 
   return { error: null, totalRows: totalRows, periods: labels.length, categories: budgetCats.length, newCount: newCount };
 }
