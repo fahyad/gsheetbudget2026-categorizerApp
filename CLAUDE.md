@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.2 (single-ledger + fixed updateWorkbook clobbering dashboard rows)
-- **PWA:** v0.9 (defense-in-depth trim on saveNewCategory) — unchanged in v11; API contract preserved
+- **Apps Script:** v11.6 (single-ledger + 4 phases of review-driven correctness/polish work; see `docs/progress.md` 2026-04-19 entry)
+- **PWA:** v0.10 (cache v13) — A4 sync/undo race guard, A6 refresh-debounce, A9 localStorage quota guard, B7 success toast, beforeunload prompt fix
 
 ## Common commands
 
@@ -124,7 +124,7 @@ Bump `<span class="version">vX.Y</span>` in `index.html` AND `CACHE_VERSION` in 
 | Path | Purpose |
 |------|---------|
 | `index.html`, `js/`, `css/`, `sw.js`, `manifest.json` | PWA (GitHub Pages) |
-| `apps-script/Code.js` | Apps Script source (1600+ lines) |
+| `apps-script/Code.js` | Apps Script source (~2400 lines) |
 | `apps-script/deploy.sh` | One-command production deploy |
 | `apps-script/.clasp.json` | Apps Script project link (scriptId + rootDir) |
 | `apps-script/.claspignore` | Allowlist (only Code.js + appsscript.json get pushed) |

@@ -5,8 +5,8 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.2 — Single-ledger architecture (v11.0+) plus updateWorkbook fix to skip dashboard/header rows during formula refresh. Pending tab eliminated; Transactions is the source of truth (8 cols, with Timestamp at H). Categorize updates Category cell of existing row, no copy/move.
-- **PWA:** v0.9 — deployed at https://fahyad.github.io/gsheetbudget2026-categorizerApp/ — defense-in-depth client-side trim added.
+- **Apps Script:** v11.6 — Single-ledger architecture (v11.0+) plus 4 phases of integrated-review work (v11.3 → v11.6). LockService on processInfoAlerts_, unique timestamp suffixes, batched verify-read, stricter validation, scoped named-range removal, no-match errors on uncategorize, and many docs/polish fixes. See `docs/progress.md` 2026-04-19 entry for the detailed phase breakdown.
+- **PWA:** v0.10 (cache v13) — sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, version sourced from `APP_VERSION` constant.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -115,11 +115,19 @@
 - `deploy.sh` auto-bumps `LAST_EDITED` timestamp + writes `VERSION.txt` on every deploy
 - **Status:** complete
 
+### Phase 14: Integrated Code Review (v11.3 → v11.6 + PWA v0.10)
+Three independent reviews (mine + 2 external) merged into a single 26-item plan, executed in 4 phases:
+- **Phase 1 (v11.3):** S1 leaked API key scrub + rotation; S2 sw.js cache version bump (was stuck on v9 across multiple PWA-affecting releases); S3 unique-suffix Timestamps so two same-second emails can't collide; S4 LockService on processInfoAlerts_ (was racing with PWA syncs).
+- **Phase 2 (v11.4):** A3 res.ok HTTP status check (was masking 500s as JSON parse errors); A4 sync/undo race guard; A6 refresh button debounce; A8 handleUncategorize_ no-match returns error (was silent success); A9 localStorage quota guard with fallback recovery.
+- **Phase 3 (v11.5):** A2 batched verify-read in handleBatchCategorize_ (~30x fewer reads on a 30-item batch); A5 handleAddCategoryInner_ capacity error instead of silent overflow; A7 stricter setAllowInvalid validation; B1 findNextEmptyRow_ throws past row 1000 (was silently writing orphans); B3 setNamedRanges_ scoped to owned prefixes; B4 beforeunload prompt actually fires now.
+- **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
+- **Status:** complete
+
 ## Phases — Future
 
-### Phase 14: Auto-Categorization (not started)
+### Phase 15: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
-- [ ] Known merchants auto-categorize during parseAndFetch (skip Pending queue)
+- [ ] Known merchants auto-categorize during parseAndFetch (skip the uncategorized queue)
 - [ ] Only unknown merchants need manual review in PWA
 - **Status:** future
 
@@ -142,17 +150,16 @@
 - But fragile — re-editing Due Day will likely break things
 - **Cleanup:** select C2:C5 → Format → Number → Plain → re-enter values
 
-### Phase 15: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
-- [ ] Hardcoded 2026 pay dates (problem in 2027)
+### Phase 16: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+- [x] Hardcoded 2026 in fixed-expenses formula → `BUDGET_YEAR` constant (B9, v11.6). PayPeriods array still hardcoded — annual rollover touches 2 places.
 - [ ] 999-row pre-filled formulas overhead (cleanup)
-- [ ] Pagination for very large Pending lists
+- [ ] Pagination for very large uncategorized-transaction lists (no longer "Pending" — single ledger)
 - [ ] Complex income formula simplification
 - [ ] Retry logic for transient API errors
-- [ ] Pending tab timestamp number format (lowercase h)
-- [ ] `handleAddCategory_` off-by-one at line 371
-- [ ] `setNamedRanges_` deletes all named ranges every time
+- [x] `handleAddCategory_` off-by-one — fixed (A5, v11.5): now returns explicit capacity error
+- [x] `setNamedRanges_` deletes all named ranges every time — fixed (B3, v11.5): scoped to owned prefixes
 - [ ] `rebuildBudgetInternal_` silently clears budget rows in add mode
-- **Status:** future
+- **Status:** ongoing — 3 of 8 items resolved by Phase 14 review work
 
 ## Workflow Reference (CRITICAL)
 

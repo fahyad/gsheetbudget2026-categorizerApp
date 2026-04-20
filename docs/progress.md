@@ -2,9 +2,9 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v9 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.6 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
-> **PWA:** v0.7 — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`.
+> **PWA:** v0.10 (cache v13) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -703,11 +703,65 @@ This ensures only real data rows (rows 8+ where col A is "Dec 25 - Jan 20" etc.)
 - v11.2 deployed @22
 - Errors gone; dashboard, header, and data rows all correct
 
+## Session: 2026-04-19 — Integrated Code Review (4 phases, v11.3 → v11.6 + PWA v0.10)
+
+### Setup
+After the v11.2 dashboard fix, we ran three independent code reviews of the entire system:
+1. **My own review** — 13 findings via 3 parallel Explore agents (Apps Script correctness, PWA contract, data integrity)
+2. **External Review #1** — focused review of v11.x changes (PR-style diff review)
+3. **External Review #2** — comprehensive review of full project (18 files, 23 commits)
+
+The three reviews were merged into a single 26-item plan grouped by severity (Tier S/A/B/C) and themed by phase. Pre-flight review caught 1 false positive (A1 — `handleBatchCategorize_` was claimed to have a perf regression but the v11.0 code already reads timestamps once outside the loop) and 1 partial misread (A2 — rollback IS comprehensive in current code, but the verify reads were N individual calls; batched them into 1).
+
+### Phase 1 (v11.3) — security + active data loss
+- **S1 leaked API key.** The 40-char production API key was committed in plaintext to `CLAUDE.md` (line 61) and `docs/progress.md` (line 313). Repo is public on GitHub Pages. Scrubbed from current files; rotated server-side; added `.git/hooks/pre-commit` that blocks future commits matching the pattern (verified working). Old key remains in git history — rotation is the actual fix, history-rewrite would be theater.
+- **S2 stale service worker cache.** `sw.js CACHE_VERSION` was stuck at `'v9'` across multiple PWA-affecting releases. Returning users were running stale code indefinitely. Bumped to `'v10'`. Established practice: bump on every PWA release.
+- **S3 timestamp collisions.** Email parser used `YYYY-MM-DD HH:MM:SS` (one-second resolution). Two charges in the same second would have identical timestamps; PWA's `addToSyncQueue` removes by timestamp before push, so the second one would silently overwrite the first. Added a 4-char MD5 suffix derived from `merchant|amount`, with in-batch collision counter (`-1`, `-2`). New format: `YYYY-MM-DD HH:MM:SS#<hex>`. Backward compatible — old rows still match by string equality.
+- **S4 trigger race.** `processInfoAlerts_` had no LockService. Gmail trigger could fire while user hit Sync from PWA → both writers call `findNextEmptyRow_`, both pick the same row, one silently clobbers the other. Wrapped in `LockService.getScriptLock(20000)`. Lock failure logs and skips run; emails retry on next trigger.
+
+### Phase 2 (v11.4) — correctness gaps
+- **A3 PWA `res.ok` check.** `api.js` was calling `res.json()` without checking HTTP status. Apps Script returns HTML error pages on 500s; `res.json()` on HTML throws "Unexpected token <" with no clue the server actually 500'd. Now throws `HTTP <status> <statusText>`.
+- **A4 sync/undo race.** User taps Sync (1-3s in flight), then taps Undo on an already-categorized item. Undo removed it from local syncQueue, but the backend write had already landed. Result: row stayed categorized in the spreadsheet, but PWA thought it was undone. Added `syncInFlight` module flag; Undo refuses with "Wait for sync to finish before undoing" message; Undo button visually disabled during sync.
+- **A6 refresh debounce.** Triple-tapping Refresh fired `parseAndFetch` 3x (each triggers a Gmail scan on backend). Added `refreshInFlight` flag + button disable during fetch. Same pattern as A4.
+- **A8 silent uncategorize success.** `handleUncategorize_` returned `success: true` whether or not it found a matching row. PWA would treat empty-sheet or no-match as success and remove the item from syncQueue. Now returns `{success: false, error: 'Row not found for timestamp: ...'}` on no-match.
+- **A9 localStorage quota.** Every `setItem` was unwrapped — quota exceeded would crash the app. Wrapped in `safeSetItem_` helper that detects QuotaExceededError across browsers (name, code, legacy code). Categories cache failures are silent (will refetch). SyncQueue failures attempt one recovery (drop categories cache, retry) before setting `store.persistFailed = true` and console.erroring loudly.
+
+### Phase 3 (v11.5) — correctness polish
+- **A2 batched verify-read.** `handleBatchCategorize_` was doing N individual `getValue` calls during verification. Replaced with one `getValues` over min..max row span. ~30x fewer sheet reads on a 30-item batch. Writes still individual (rows non-contiguous; `setValues` doesn't help).
+- **A5 add-category capacity error.** Loop in `handleAddCategoryInner_` could advance `nextRow` to 101 if all 99 slots were full, then silently write outside the `CategoryMain` named range. Now returns explicit "Categories tab full" error.
+- **A7 strict validation.** `setAllowInvalid(true)` in buildWorkbook vs `false` in updateWorkbook → behavior depended on which path created the validation. Both now `false`. Misleading "allow empty" comment removed (empty cells are always allowed regardless of this flag).
+- **B1 row-1000 ceiling.** `findNextEmptyRow_` would silently return 1001+ if data crept past the named-range ceiling — exactly the bug class that produced the v8 orphan rows. Now throws a descriptive error with the sheet name and row number. Optional `maxRow` arg lets callers override.
+- **B3 scoped named-range removal.** `setNamedRanges_` previously deleted EVERY named range on the spreadsheet before re-creating ours. Any user-defined named range would be wiped on every Update Script run. Now scoped to known prefixes (`PayPeriods`, `CategoryList`, `CategoryMain`, `FixedExpenses_`, `Budget_`, `Transactions_`).
+- **B4 beforeunload prompt.** Chrome (and modern Firefox/Safari) require BOTH `e.preventDefault()` AND assigning a string to `e.returnValue` for the unsaved-changes prompt to actually fire. We had only the first. Added `e.returnValue = ''`.
+
+### Phase 4 (v11.6) — polish
+- **B2 rescue rename.** `consolidateTransactions` → `consolidateTransactionsRescue` with stronger DESTRUCTIVE warning in docstring. Function isn't in the menu (already wasn't); only callable from the editor.
+- **B5 PWA version unification.** Removed the hardcoded `v0.9` from `index.html` header span. `app.js` now sets it from the `APP_VERSION` constant in `config.js` at boot. Two final sources of truth: `APP_VERSION` (semantic) and `CACHE_VERSION` (cache invalidation marker) — conceptually different, kept independent.
+- **B7 success toast.** Sync success was using `showError()` (red styling). Added `showSuccess()` helper using a `.success` class on the same `#error-toast` element (green via `background: #2e7d32`).
+- **B8 portable sed.** `deploy.sh` used BSD-only `sed -i ''`. Replaced with `sed -i.bak ... && rm -f file.bak` which works on both BSD (macOS) and GNU (Linux).
+- **B9 BUDGET_YEAR constant.** `buildFixedExpensesFormula_` had `2026` hardcoded in 13 month checks. Now sourced from `BUDGET_YEAR` constant at top of Code.js. Annual rollover: bump constant + update `PayPeriods` array (still hardcoded — out of scope for this pass).
+- **B10 buildAvailableFormula_.** The Available formula `=IF(MATCH>1, ..., 0)+D-E` was duplicated in `rebuildBudgetInternal_` (full rebuild) and updateWorkbook's formula-refresh loop. Extracted to a single helper.
+- **C1 Pending references.** Scrubbed surviving Pending references in user-visible places (Instructions tab content, updateWorkbook alert, processInfoAlerts report, findNextEmptyRow_ comment, CLAUDE.md "trip you up" item 6). Historical references in docstrings and migration code kept (they're correct context).
+- **C2 dead code.** Reviewed `handleBatchCategorize_` end-to-end. False positive — no v10-era leftover; v11.0 rewrite is clean.
+- **C3 log rotation.** Reviewed rotation logic at `rotateLogsIfNeeded_`. Threshold 5001 rows; copyTo + clearContent pattern is sound. Manual stress test skipped (would require populating 5000+ rows just to confirm working logic).
+
+### Lessons from running 3 reviews
+- 14 of 26 findings (54%) came from the external reviews — meaningful incremental coverage.
+- External reviews are best at: cross-system integration concerns (race conditions, cache invalidation, leaked secrets), things that require breadth.
+- My own review was best at: data-shape invariants (timestamp collisions, quota, hardcoded literals).
+- The single-pass merge into a tier-ranked plan with phase grouping was high-leverage. Doing the same again on future PRs would be cheap and catch a similar percentage of issues.
+
+### Status
+- v11.3 deployed @23, v11.4 @24, v11.5 @25, v11.6 @26
+- PWA cache: v9 → v10 → v11 → v12 → v13 across phases
+- Commits: `bce9f2b`, `6f872eb`, `12eab16`, `68b43ad`
+- All 4 phases live in production; pushed to GitHub main
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Code.gs v11.1 (single-ledger architecture — Pending tab eliminated; Transactions has 8 cols including new Timestamp at H; categorize updates Category cell in place; ~60 lines of Apps Script removed). PWA v0.9 unchanged. |
-| Where am I going? | User tests PWA flow end-to-end (Refresh → categorize → Sync). If working, the deferred cleanup items become non-blockers (orphans already gone). Future: Phase 14 auto-categorization, Goals/Transfers/Sparklines from ZBB report still available but deferred. |
-| What's the goal? | Budget sheet + mobile transaction categorizer system |
-| What have I learned? | 16 Code.gs iterations. **NEW:** When designing migrations, BACKWARDS CHRONOLOGY — clean up legacy data BEFORE adding new data. My first migration (v11.0) put orphan cleanup AFTER pending append, which made the cleanup target the new rows too. Required a v11.0.1 rescue function. Lesson: write a "consolidate" / "compact" function as a generic rescue tool — it's a useful primitive even outside migration scenarios. |
-| What have I done? | Single-ledger redesign (v11.0 → v11.2): Pending tab eliminated, Transactions is source of truth with new Timestamp col H. 5 handlers refactored. ~60 lines of Apps Script removed. Migration moved 30 pending + 8 categorized + 8 orphan rows to Transactions; Pending archived + deleted. v11.0.1 added consolidateTransactions rescue (migration order-of-ops bug). v11.1 removed migration menu items. v11.2 fixed updateWorkbook clobbering dashboard/header (Budget redesign hadn't audited the formula-refresh loop's row boundary check). |
+| Where am I? | Code.js v11.6 (4 phases of integrated-review work on top of v11.0 single-ledger architecture). PWA v0.10 with cache v13. All 26 review items addressed except 2 confirmed false positives (C2, partially A1) and 1 manual test deferred (C3 log rotation stress). |
+| Where am I going? | System is stable and well-reviewed. Open paths: (a) Phase 15 auto-categorization — merchant→category mapping; (b) Phase 16 deferred audit — 5 of 8 items still open (income formula simplification, retry logic, rebuildBudgetInternal_ silent clear, etc.); (c) ZBB report deferred features (Goals, Transfers, Sparklines). User chooses. |
+| What's the goal? | Budget sheet + mobile transaction categorizer system, with code quality high enough to be confidently maintained. |
+| What have I learned? | Multi-source code review with merged tier-ranked plan is high-leverage. External reviews catch breadth issues my deep-dive misses, and vice versa. **Don't trust review claims without verifying against current code** — A1's "perf regression" was a false positive because the reviewer misread the loop structure. **Bump cache version on every PWA release** — the 4-release stale-cache window meant returning users had been running outdated code. **Loud-fail beats silent corruption** — every "this should never happen" branch should throw with a descriptive error, not silently no-op. |
+| What have I done? | 4-phase integrated review: 16 commits, 4 deploys (v11.3-v11.6), 4 PWA cache bumps. Touched ~7 files across Apps Script + PWA + ops. Closed 23 of 26 review items (3 = false positives or non-actionable). Established LockService-everywhere pattern, unique-suffix Timestamps, loud-fail row-1000 ceiling, scoped named-range management, single APP_VERSION source for PWA. Rotated leaked API key + added pre-commit guard. |
