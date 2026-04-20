@@ -310,7 +310,7 @@ Full audit ranked findings into critical/high/medium/low. This session addressed
 - `isConfigured()` now checks only for key (URL is always configured)
 
 **API key rotation:**
-- Generated new 40-char key `p0LiMHcdpP0xeYaN0gBCnk4z91Pjhf4czZ0OjVS1` via `openssl rand -base64 36`
+- Generated new 40-char key via `openssl rand -base64 36` (key value redacted from this log; never commit)
 - User sets in Apps Script via "Budget Tools → Set API Key"
 - User updates PWA on each device (one-time, per device)
 

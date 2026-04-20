@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.2';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 12:22 MDT';
+var APP_SCRIPT_VERSION = 'v11.3';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 18:51 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -1784,84 +1784,112 @@ function processInfoAlerts() {
  * Safe to call from doGet() web app context.
  */
 function processInfoAlerts_() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var txn = ss.getSheetByName('Transactions');
+  // v11.3 (S4): Wrap body in LockService so this trigger can't race with
+  // user-initiated writes (handleBatchCategorize_, handleCategorize_, etc.).
+  // Without this, two writers can both call findNextEmptyRow_ and pick the
+  // same row, silently clobbering one another.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) {
+    // Another writer holds the lock. Skip this run; emails are still
+    // unlabeled, so the next trigger will pick them up. Logged so we can
+    // detect contention if it ever becomes frequent.
+    logActivity_('processInfoAlerts', 0, 'lock_timeout',
+      'lock unavailable after 20s; skipping run, emails retry on next trigger', '');
+    return { parsed: 0, threads: 0, errors: 0, errorDetails: [], skipped: true };
+  }
 
-  var result = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var txn = ss.getSheetByName('Transactions');
 
-  if (!txn) return result;
+    var result = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
 
-  // --- Step 1: Search for unprocessed infoalert emails ---
-  var query = 'from:infoalerts@scotiabank.com subject:"Authorization on your" -label:Budget-Processed';
-  var threads = GmailApp.search(query);
-  result.threads = threads.length;
+    if (!txn) return result;
 
-  if (threads.length === 0) return result;
+    // --- Step 1: Search for unprocessed infoalert emails ---
+    var query = 'from:infoalerts@scotiabank.com subject:"Authorization on your" -label:Budget-Processed';
+    var threads = GmailApp.search(query);
+    result.threads = threads.length;
 
-  // --- Step 2: Batch fetch all messages ---
-  var allMessages = GmailApp.getMessagesForThreads(threads);
+    if (threads.length === 0) return result;
 
-  // --- Step 3: Parse each message in memory ---
-  var regex = /for \$([\d,]+\.\d{2}) at (.+?) on account .+? at\s+(\d{1,2}:\d{2}\s*[ap]m)/i;
-  var newRows = [];
+    // --- Step 2: Batch fetch all messages ---
+    var allMessages = GmailApp.getMessagesForThreads(threads);
 
-  for (var t = 0; t < allMessages.length; t++) {
-    for (var m = 0; m < allMessages[t].length; m++) {
-      var msg = allMessages[t][m];
-      var body = msg.getBody()
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&#39;/g, "'")
-        .replace(/&#34;/g, '"')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/\s+/g, ' ');
-      var subject = msg.getSubject();
-      var emailDate = msg.getDate();
+    // --- Step 3: Parse each message in memory ---
+    var regex = /for \$([\d,]+\.\d{2}) at (.+?) on account .+? at\s+(\d{1,2}:\d{2}\s*[ap]m)/i;
+    var newRows = [];
 
-      var match = regex.exec(body);
-      if (match) {
-        var amountStr = match[1].replace(/,/g, '');
-        var amount = -parseFloat(amountStr);
-        var merchant = match[2].trim();
-        var timeStr = match[3].trim();
-        var timestamp = buildTimestamp_(emailDate, timeStr);
+    // v11.3 (S3): Track timestamps assigned in this batch so we can guarantee
+    // uniqueness even if two emails share the exact same merchant+amount+second.
+    var batchKeys = {};
 
-        // v11.0 single-ledger: data-only fields. Cols E (Main Cat) and G (Period)
-        // are pre-existing formulas that auto-fill from D and A respectively —
-        // writing them here would clobber the formulas. We write A,B,C,D + H only.
-        newRows.push({
-          date: emailDate, merchant: merchant, amount: amount,
-          category: '', timestamp: timestamp
-        });
-      } else {
-        result.errors++;
-        result.errorDetails.push(subject + ' (' + emailDate.toDateString() + ')');
+    for (var t = 0; t < allMessages.length; t++) {
+      for (var m = 0; m < allMessages[t].length; m++) {
+        var msg = allMessages[t][m];
+        var body = msg.getBody()
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&#39;/g, "'")
+          .replace(/&#34;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ');
+        var subject = msg.getSubject();
+        var emailDate = msg.getDate();
+
+        var match = regex.exec(body);
+        if (match) {
+          var amountStr = match[1].replace(/,/g, '');
+          var amount = -parseFloat(amountStr);
+          var merchant = match[2].trim();
+          var timeStr = match[3].trim();
+          var baseTimestamp = buildTimestamp_(emailDate, timeStr);
+
+          // v11.3 (S3): Append a 4-char hash of merchant+amount, plus a
+          // collision counter, so two charges in the same second are always
+          // distinguishable. Old rows without a suffix still match correctly
+          // (string equality) — backward compatible.
+          var timestamp = baseTimestamp + uniqueSuffix_(baseTimestamp, merchant, amount, batchKeys);
+
+          // v11.0 single-ledger: data-only fields. Cols E (Main Cat) and G (Period)
+          // are pre-existing formulas that auto-fill from D and A respectively —
+          // writing them here would clobber the formulas. We write A,B,C,D + H only.
+          newRows.push({
+            date: emailDate, merchant: merchant, amount: amount,
+            category: '', timestamp: timestamp
+          });
+        } else {
+          result.errors++;
+          result.errorDetails.push(subject + ' (' + emailDate.toDateString() + ')');
+        }
       }
     }
-  }
 
-  // --- Step 4: Batch write to Transactions tab ---
-  // Write cols A:D and col H separately to avoid clobbering formulas in E and G.
-  if (newRows.length > 0) {
-    var startRow = findNextEmptyRow_(txn);
-    var rowsAD = newRows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
-    var rowsH = newRows.map(function(r) { return [r.timestamp]; });
-    txn.getRange(startRow, 1, newRows.length, 4).setValues(rowsAD);
-    txn.getRange(startRow, 8, newRows.length, 1).setValues(rowsH);
-    SpreadsheetApp.flush();
-  }
-  result.parsed = newRows.length;
+    // --- Step 4: Batch write to Transactions tab ---
+    // Write cols A:D and col H separately to avoid clobbering formulas in E and G.
+    if (newRows.length > 0) {
+      var startRow = findNextEmptyRow_(txn);
+      var rowsAD = newRows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
+      var rowsH = newRows.map(function(r) { return [r.timestamp]; });
+      txn.getRange(startRow, 1, newRows.length, 4).setValues(rowsAD);
+      txn.getRange(startRow, 8, newRows.length, 1).setValues(rowsH);
+      SpreadsheetApp.flush();
+    }
+    result.parsed = newRows.length;
 
-  // --- Step 5: Batch label emails as processed ---
-  var label = GmailApp.getUserLabelByName('Budget/Processed');
-  if (!label) {
-    label = GmailApp.createLabel('Budget/Processed');
-  }
-  label.addToThreads(threads);
+    // --- Step 5: Batch label emails as processed ---
+    var label = GmailApp.getUserLabelByName('Budget/Processed');
+    if (!label) {
+      label = GmailApp.createLabel('Budget/Processed');
+    }
+    label.addToThreads(threads);
 
-  return result;
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // ================================================================
@@ -1890,6 +1918,43 @@ function buildTimestamp_(emailDate, timeStr) {
     return y + '-' + mo + '-' + d + ' ' + h + ':' + mi + ':00';
   }
   return Utilities.formatDate(emailDate, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+}
+
+/**
+ * v11.3 (S3): Returns a 4-char hex hash of an input string.
+ * Non-cryptographic — used only for distinguishing transactions with the
+ * same timestamp.
+ */
+function shortHash_(input) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, input);
+  var hex = '';
+  for (var i = 0; i < 2; i++) {
+    var b = bytes[i] & 0xff;
+    hex += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return hex;
+}
+
+/**
+ * v11.3 (S3): Returns a unique suffix to append to a timestamp so that
+ * two charges arriving in the same second don't collide in PWA storage
+ * or batchCategorize matching.
+ *
+ * Format: '#<hex>' for the first occurrence, '#<hex>-<n>' if the same
+ * (timestamp, merchant, amount) triple repeats inside the same batch.
+ *
+ * batchKeys: object the caller passes in once per processInfoAlerts_ run;
+ * we mutate it to track collisions.
+ */
+function uniqueSuffix_(timestamp, merchant, amount, batchKeys) {
+  var hex = shortHash_(merchant + '|' + amount);
+  var key = timestamp + '#' + hex;
+  if (!batchKeys[key]) {
+    batchKeys[key] = 1;
+    return '#' + hex;
+  }
+  batchKeys[key]++;
+  return '#' + hex + '-' + batchKeys[key];
 }
 
 /**

@@ -58,7 +58,11 @@ You have a `dumpSheet` endpoint that lets you read any tab via the existing API 
 
 ```bash
 URL="https://script.google.com/macros/s/AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ/exec"
-KEY="p0LiMHcdpP0xeYaN0gBCnk4z91Pjhf4czZ0OjVS1"
+# API key is NOT committed to this repo. Get it from one of these sources, in order:
+#   1. Ask the user
+#   2. Open the PWA in a browser, DevTools → Application → Local Storage → key `budget_api_key`
+#   3. Apps Script editor → Project Settings → Script Properties → API_KEY
+KEY="<paste-api-key-here>"
 
 # List all tabs + dimensions
 curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&metadata=true" | python3 -m json.tool
