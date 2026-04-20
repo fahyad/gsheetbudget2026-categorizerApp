@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.10 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.11 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
 > **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
@@ -1027,3 +1027,94 @@ User ran Budget Tools → Update Script to create the Saving tab from v11.8 depl
 - v11.10 deployed @30 (commit `dbb010d`) — B3 XLOOKUP replacement + G IFERROR defense
 - User needs to run Update Script ONE MORE TIME to overwrite broken formulas in their existing Saving tab with v11.10 versions
 - Budget model formulas unchanged (still brittle — user explicitly deferred redesign)
+
+## Session: 2026-04-20 (later) — Saving Schema Refactor (v11.11)
+
+### Setup
+User ran v11.10 Update Script and verified the core formulas worked (B3 resolved to "Apr 15 - 28" correctly). They then budgeted exactly the suggested $222.22 for the current period's Europe trip category. Came back to the Saving tab and the Per-Period Need showed **$209.88** instead of staying at $222.22.
+
+User's feedback was two-pronged:
+1. "On Track?" column (text with DONE/ON PACE/CLOSE/BEHIND/OVERDUE coloring) doesn't provide information beyond the numeric columns. Remove it.
+2. The Per-Period Need drift is confusing — they expected "if I budgetted the correct amount this calculation should stay the same."
+
+Proposed schema change: remove On Track?, add "Allocated This Period" (visible current-period budgeting), rename "Per-Period Need" → "Needed Future Periods" (adaptive based on current allocation).
+
+### Diagnosis of the $222 → $209 drift
+- Target: $4000, Target Period: Dec 23-Jan 5 (pos 26)
+- Current Period: Apr 15-28 (pos 8)
+- Periods Remaining (old formula `MATCH(target) - MATCH(current)`): 18
+- Before allocation: (4000 - 0) / 18 = $222.22
+- After allocating $222.22: CurrentlySaved = $222.22 (Budget Available = prior 0 + Budgeted 222.22 - Spent 0)
+  - Formula: (4000 - 222.22) / 18 = $209.88 — what the user saw
+
+Mathematically correct but semantically surprising. The formula's divisor (18) treated the 18 positions from current-exclusive to target-inclusive as "future periods to distribute over" — but `CurrentlySaved` already included the current period's allocation. So the math was: "$3777.78 remaining, needs to come from 18 future periods, therefore $209.88/period going forward." The user's mental model: "I allocated the amount you told me to; the amount shouldn't change."
+
+### Fix design
+Add an "Allocated This Period" column to make the per-period commitment visible, and adapt the Needed Future formula based on whether current is allocated:
+- If F (Allocated This Period) > 0: `(Target - CurrentlySaved) / (G - 1)` — "current already counted, split remainder over future-excluding-current"
+- If F = 0: `(Target - CurrentlySaved) / G` — "assume user will budget the shown amount each period INCLUDING this one"
+
+Verification the fix preserves "stays constant" behavior:
+- Before allocation: 4000 / 18 = $222.22
+- After allocating $222.22: (4000 - 222.22) / (18 - 1) = $222.22 ✓
+- Over-budget $400: (4000 - 400) / 17 = $211.76 (less needed future)
+- Under-budget $100: (4000 - 100) / 17 = $229.41 (more needed future)
+
+### Changes in v11.11
+**Schema (9 columns, positions unchanged but cells F/G/H reworked):**
+```
+OLD: ... | Periods Left (F) | Per-Period Need (G) | On Track? (H) | Notes (I)
+NEW: ... | Allocated This Period (F) | Periods Remaining (G) | Needed Future Periods (H) | Notes (I)
+```
+
+**Formulas:**
+- E (Currently Saved) — unchanged: `SUMIFS(Budget_Available, ..., $B$3)`
+- F (Allocated This Period) — NEW: `SUMIFS(Budget_Budgeted, ..., $B$3)`
+- G (Periods Remaining) — moved from F, formula unchanged
+- H (Needed Future Periods) — replaces Per-Period Need + On Track?:
+  ```
+  =IF(OR(B="",C="",D=""),"",IFERROR(
+    IF(G<=0, 0,
+      IF(E>=C, 0,
+        IF(F>0, MAX(0, (C-E)/MAX(1, G-1)),
+               MAX(0, (C-E)/G)))),""))
+  ```
+
+**Number formats:**
+- C, E, F, H: currency
+- G: integer (was previously F)
+
+**Dashboard (row 2 labels + row 3 formulas):**
+```
+OLD: Today | Current Period | Total Goals | Per-Period Need | Currently Saved | Target Total
+NEW: Today | Current Period | Total Goals | Currently Saved | Needed Future | Target Total
+```
+D3 now sums E (Currently Saved total); E3 now sums H (Needed Future total).
+
+**Conditional formatting:**
+Old On Track? text-based CF rules (DONE/ON PACE/CLOSE/BEHIND/OVERDUE) stripped. Column H is now currency, not text — rules would never match. No replacement CF for v11.11.
+
+**Instructions tab:** SAVING section's "Step 3" updated to describe the new columns.
+
+### User next
+Run Budget Tools → 3. Update Script ONE MORE TIME. `refreshSavingTab_` will:
+- Overwrite formulas in E, F, G, H with v11.11 versions
+- Update dashboard labels and formulas
+- Strip old CF rules
+- Leave user data in A, B, C, D, I intact
+
+Expected result for existing Europe trip goal ($4000, Dec 23-Jan 5, with $222.22 budgeted in current period):
+- E (Currently Saved): $222.22
+- F (Allocated This Period): $222.22
+- G (Periods Remaining): 18
+- H (Needed Future Periods): **$222.22** ← stays constant ✓
+
+### Lessons
+- **Cumulative-vs-flow confusion:** the original formula mixed a cumulative metric (Currently Saved includes current period) with a flow denominator (Periods Remaining excludes current). Arithmetic worked but semantics surprised the user. Making the state visible (new column) + adapting the formula resolved it.
+- **User-directed refactors beat preemptive "I think this should be different" refactors.** The user's proposed column layout was directly what they wanted — no need to second-guess. Implement their design, document the trade-offs.
+- **Removing features is part of good design.** The On Track? status column had six CF rules and a 7-branch IFS formula. It looked useful at design time; the user didn't actually need it. Dropping it reduced code by ~40 lines and gave room for two more-useful columns.
+
+### Status
+- v11.11 deployed @31 (commit `5043293`)
+- User needs to run Update Script to apply the schema change to their existing Saving tab
+- No data loss — user-entered columns (A, B, C, D, I) preserved by refreshSavingTab_

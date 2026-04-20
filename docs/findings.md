@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.10 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab for one-time goals). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.11 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab with adaptive per-period formula). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -585,6 +585,32 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
   `buildWorkbook` was unaffected because there `setNamedRanges_` runs first and Saving builds after.
 - **Fix (v11.9):** moved the Saving-tab block in `updateWorkbook` to immediately after `setNamedRanges_`. Added a defensive comment block at the moved section. Subsequent Update Script runs invoke `refreshSavingTab_` which overwrites the broken formulas with correctly-resolved ones.
 - **Lesson:** **Named-range deletion is destructive to referencing formulas — even if the same name is recreated milliseconds later.** Any new code that writes formulas referencing named ranges in `updateWorkbook` MUST come after `setNamedRanges_`. This is now an ordering invariant. Added to CLAUDE.md trip-up list so future-Claude doesn't repeat this.
+
+### Saving Tab Per-Period Drift + Schema Refactor (v11.11)
+
+- **Symptom:** User set up a goal (Target $4000 by Dec 23-Jan 5 = period 25). Initial dashboard showed "Per-Period Need = $222.22". User budgeted exactly that $222.22 in the current period (Apr 15-28). Re-checking the Saving tab, Per-Period Need had dropped to **$209.88**. User expected it to stay constant: "if I budgetted the correct amount this calculation should stay the same."
+- **Root cause:** the old Per-Period Need formula was:
+  ```
+  =IF(F<=0, 0, MAX(0, (Target - CurrentlySaved) / F))
+  ```
+  where F = Periods Remaining = `MATCH(target, PayPeriods_Label, 0) - MATCH(current, PayPeriods_Label, 0)` = 18. `CurrentlySaved` is the cumulative Budget Available for the category at the current period — it INCLUDES the current period's allocation (because Budget Available = prior + Budgeted - Spent).
+  So after allocating $222.22: `(4000 - 222.22) / 18 = $209.88`. Mathematically the formula was asking "given you've saved $222.22 toward $4000, how much should each of the 18 future periods cover?" But the semantic the user expected was "what should I budget each period (including this one)?"
+- **User-directed redesign:** the user proposed removing the "On Track?" status column (redundant given the numeric columns) and adding a new "Allocated This Period" column to make the per-period budgeting visible and to let "Needed Future Periods" adapt. Implementation:
+  - Dropped column H "On Track?" — text status with CF (DONE / ON PACE / CLOSE / BEHIND / OVERDUE). Can return as a dashboard feature later.
+  - Added column F "Allocated This Period" = `SUMIFS(Budget_Budgeted, Budget_Category, B, Budget_Period, $B$3)`. Distinct from Currently Saved (which includes prior-period rollover) — this is ONLY what the user has budgeted in the current period for this category.
+  - Renamed Per-Period Need → "Needed Future Periods" (column H). Adaptive formula:
+    ```
+    If F > 0: (Target - CurrentlySaved) / (G - 1)   // future only, G-1 because current is already covered
+    If F = 0: (Target - CurrentlySaved) / G         // assume user will budget same amount this period too
+    ```
+    With this formula the per-period value **stays constant** when the user budgets the previously-suggested amount:
+      - Before allocation: 4000 / 18 = $222.22
+      - After allocating $222.22: (4000 - 222.22) / (18 - 1) = $222.22 ✓
+      - Over-budget $400: (4000 - 400) / 17 = $211.76
+      - Under-budget $100: (4000 - 100) / 17 = $229.41
+- **Dashboard adjustments (row 2 labels + row 3 totals):** swapped "Per-Period Need" and "Currently Saved" metrics; added "Needed Future" total (sum of column H). Label row is now: Today | Current Period | Total Goals | Currently Saved | Needed Future | Target Total.
+- **CF cleanup:** old On Track? CF rules (text-based DONE/ON PACE/etc.) stripped. Column H now holds currency, not text — old rules would never match anyway. No replacement CF for v11.11.
+- **Lesson:** when a formula combines a cumulative number (Currently Saved includes current period) with a denominator that treats "remaining" differently (Periods Remaining doesn't account for current being already-budgeted), the math can be arithmetically correct but semantically surprising. Making the state visible to the user (new Allocated This Period column) + making the formula adapt to that state (G vs G-1 divisor) resolves the confusion without changing the underlying math.
 
 ### Saving B3 XLOOKUP Out-of-Range (v11.10)
 

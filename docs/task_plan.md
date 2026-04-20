@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.10 — Saving tab for one-time goals shipped in v11.8 with two follow-up fixes during bring-up: v11.9 fixed a `#REF!` cascade caused by `updateWorkbook` running the Saving tab build before `setNamedRanges_` (Sheets converts formulas to `#REF!` when their named range is deleted — even if immediately recreated); v11.10 replaced a flaky XLOOKUP-with-array-multiplication in the Current Period dashboard cell with INDEX+MATCH, plus IFERROR defense on per-period-need. Full postmortems in `docs/findings.md`.
+- **Apps Script:** v11.11 — Saving tab schema refactored based on user feedback after first-use. Dropped "On Track?" column (status info deferred to a future dashboard). Added "Allocated This Period" column. New adaptive "Needed Future Periods" formula that stays constant when user budgets the previously-suggested amount (fixes $222 → $209 drift). Earlier shakedown: v11.9 fixed `#REF!` cascade from `updateWorkbook` ordering; v11.10 replaced flaky XLOOKUP with INDEX+MATCH. Full postmortems in `docs/findings.md`.
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`

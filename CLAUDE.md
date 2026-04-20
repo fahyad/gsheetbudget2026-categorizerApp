@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.10 (Saving tab for one-time goals + two shakedown fixes: v11.9 corrected updateWorkbook ordering so Saving formulas don't break to #REF! when setNamedRanges_ recreates names; v11.10 replaced a flaky XLOOKUP-with-array-multiplication with INDEX+MATCH, plus IFERROR defense on the per-period formula)
+- **Apps Script:** v11.11 (Saving tab schema refactor — dropped "On Track?" text column, added "Allocated This Period" currency column, adaptive "Needed Future Periods" that stays constant when user budgets the correct amount. Earlier shakedown: v11.9 corrected updateWorkbook ordering so Saving formulas don't break to #REF! when setNamedRanges_ recreates names; v11.10 replaced a flaky XLOOKUP-with-array-multiplication with INDEX+MATCH, plus IFERROR defense.)
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
@@ -91,11 +91,12 @@ PWA reads Transactions where Category="" AND Timestamp is set. Categorize action
 
 **Categorization rule:** PWA only sees rows where `Category=""` AND `Timestamp` is set. Manual rows (Timestamp blank) are invisible to PWA — by design, they're already categorized.
 
-**Saving tab layout (v11.8+):** 9 columns A-I, dashboard at rows 1-3, header at row 5, goals at rows 6-105 (up to 100 goals).
+**Saving tab layout (v11.11+):** 9 columns A-I, dashboard at rows 1-3, header at row 5, goals at rows 6-105 (up to 100 goals).
 - A: Goal Name | B: Linked Category (dropdown) | C: Target | D: Target Period (dropdown)
-- E-H: computed (Currently Saved, Periods Left, Per-Period Need, On Track? with conditional formatting)
+- E-H: computed (Currently Saved, Allocated This Period, Periods Remaining, Needed Future Periods — all currency/integer, no CF)
 - I: Notes
-- Dashboard B3 has the "current period" XLOOKUP that all per-row formulas reference. Don't move it.
+- Dashboard B3 has the "current period" INDEX+MATCH (match_type=1) that all per-row formulas reference. Don't move it; don't replace with XLOOKUP-over-multiplied-booleans (see trip-up #11).
+- Column H's "Needed Future Periods" is adaptive: when F (Allocated This Period) > 0, divides by (G - 1) so the value stays constant when user budgets the previously-shown amount. When F = 0, divides by G. Previous static formula caused confusing user-facing drift from $222 → $209 after allocation.
 - Tab gets created automatically by Update Script if missing — no migration step needed.
 
 **Budget tab layout (v10.5+):**
