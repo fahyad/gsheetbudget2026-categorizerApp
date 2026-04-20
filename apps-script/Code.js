@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.9';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 22:36 MDT';
+var APP_SCRIPT_VERSION = 'v11.10';
+var APP_SCRIPT_LAST_EDITED = '2026-04-20 08:23 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -2236,12 +2236,28 @@ function applySavingStructure_(saving, ss) {
 
   // --- Row 3: dashboard values ---
   // B3 (Current Period) is the helper cell referenced by all per-row
-  // formulas. XLOOKUP returns the period whose start <= today <= end.
-  // If today is outside any period, returns "(out of range)".
+  // formulas — when B3 is broken, every downstream column cascades into
+  // errors. v11.10 fix.
+  //
+  // Originally used XLOOKUP(1, (start<=today)*(end>=today), label). Relied
+  // on Sheets to auto-broadcast the multiplied boolean arrays as XLOOKUP's
+  // lookup vector. In practice that was unreliable — XLOOKUP returned
+  // "no match" even when TODAY() was clearly inside a period, cascading
+  // into #DIV/0! in the Per-Period Need column.
+  //
+  // New approach: MATCH with match_type=1 finds the largest value in
+  // PayPeriods_Start that is <= TODAY(). Since PayPeriods_Start is
+  // ascending-sorted by design (period 0 Dec 25 through period 25 Dec 23),
+  // that position identifies the current period's row; INDEX pulls the
+  // corresponding label. IFERROR catches "TODAY() earlier than all periods".
+  // The outer IF catches "TODAY() later than period 25's end".
   var lastGoalRow = SAVING_MAX_GOAL_ROW; // 105
   saving.getRange('A3').setFormula('=TEXT(TODAY(),"MMM D, YYYY")');
   saving.getRange('B3').setFormula(
-    '=IFERROR(XLOOKUP(1,(PayPeriods_Start<=TODAY())*(PayPeriods_End>=TODAY()),PayPeriods_Label),"(out of range)")'
+    '=IFERROR(' +
+      'IF(TODAY()>INDEX(PayPeriods_End,ROWS(PayPeriods_End)),"(out of range)",' +
+        'INDEX(PayPeriods_Label,MATCH(TODAY(),PayPeriods_Start,1))),' +
+      '"(out of range)")'
   );
   saving.getRange('C3').setFormula('=COUNTA(A6:A' + lastGoalRow + ')');
   saving.getRange('D3').setFormula('=SUM(G6:G' + lastGoalRow + ')');
@@ -2277,8 +2293,10 @@ function applySavingStructure_(saving, ss) {
       // F: Periods Remaining (target idx - current idx). Negative = overdue.
       '=IF(D' + r + '="","",IFERROR(MATCH(D' + r + ',PayPeriods_Label,0)-MATCH($B$3,PayPeriods_Label,0),""))',
       // G: Per-Period Need. 0 if past target or already at/over goal.
+      // v11.10: wrap the division in IFERROR so a broken/empty F never
+      // produces #DIV/0! — cleanly returns "" instead.
       '=IF(OR(B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
-        'IF(F' + r + '<=0,0,MAX(0,(C' + r + '-E' + r + ')/F' + r + ')))',
+        'IFERROR(IF(F' + r + '<=0,0,MAX(0,(C' + r + '-E' + r + ')/F' + r + ')),""))',
       // H: On Track? — IFS chain in declared order of priority.
       '=IFS(' +
         'OR(A' + r + '="",B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
