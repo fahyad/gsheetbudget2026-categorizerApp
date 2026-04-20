@@ -39,6 +39,16 @@ const updateStatusDisplay = document.getElementById('update-status-display');
 
 let selectedTimestamp = null;
 
+// In-flight flags so we can prevent UI races (A4 + A6):
+//   - refreshInFlight blocks duplicate refresh fetches (parseAndFetch is
+//     expensive — triggers a Gmail scan on the backend).
+//   - syncInFlight blocks Undo while a batchCategorize call is mid-flight;
+//     otherwise the user can undo a categorization that already wrote to
+//     the sheet, leaving the row categorized in the spreadsheet but absent
+//     from the local syncQueue (silently desynced).
+let refreshInFlight = false;
+let syncInFlight = false;
+
 // ================================================================
 // INIT
 // ================================================================
@@ -128,6 +138,14 @@ function bindEvents() {
 // ================================================================
 
 async function refresh() {
+  // A6: guard against duplicate in-flight calls. Refresh triggers a Gmail
+  // scan on the backend (~1-3s); double-tapping was firing it 2-3x and
+  // flashing UI states as responses raced.
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  refreshBtn.disabled = true;
+  emptyRefreshBtn.disabled = true;
+
   showLoading(true);
   deselectTransaction();
 
@@ -156,6 +174,9 @@ async function refresh() {
     showError('Failed to load transactions: ' + err.message);
   } finally {
     showLoading(false);
+    refreshInFlight = false;
+    refreshBtn.disabled = false;
+    emptyRefreshBtn.disabled = false;
   }
 }
 
@@ -181,6 +202,15 @@ function categorize(timestamp, category) {
 // ================================================================
 
 function undo() {
+  // A4: don't allow Undo while a sync is in flight. Otherwise we can pull an
+  // item out of the local syncQueue AFTER its batchCategorize write has
+  // already landed in the sheet — the row stays categorized in the
+  // spreadsheet but the user thinks they undid it.
+  if (syncInFlight) {
+    showError('Wait for sync to finish before undoing.');
+    return;
+  }
+
   const last = store.lastCategorized;
   if (!last) return;
 
@@ -207,9 +237,15 @@ function undo() {
 
 async function sync() {
   if (store.syncQueue.length === 0) return;
+  // A4: extra guard in case Sync is double-tapped while in flight.
+  if (syncInFlight) return;
+  syncInFlight = true;
 
   syncBtn.disabled = true;
   syncBtn.textContent = 'Syncing...';
+  // A4: also disable Undo for the duration. The button itself will visually
+  // refresh on the next renderUndo() call after sync completes.
+  undoBtn.disabled = true;
 
   try {
     const data = await api.batchCategorize(store.syncQueue);
@@ -230,6 +266,8 @@ async function sync() {
   } catch (err) {
     showError('Sync failed: ' + err.message + '. Data saved locally.');
   } finally {
+    syncInFlight = false;
+    undoBtn.disabled = false;
     renderSyncButton();
   }
 }

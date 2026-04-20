@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.3';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 18:51 MDT';
+var APP_SCRIPT_VERSION = 'v11.4';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:00 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -369,8 +369,14 @@ function handleUncategorize_(body) {
     }
 
     var lastRow = txn.getLastRow();
+    // A8: empty sheet means the row genuinely doesn't exist — that's a
+    // failure, not a success. Previously this returned success: true and
+    // the PWA would silently delete the item from its local syncQueue.
     if (lastRow < 2) {
-      return jsonResponse_({ success: true, transaction: { timestamp: timestamp } });
+      return jsonResponse_({
+        success: false,
+        error: 'No transactions exist; nothing to uncategorize for ' + timestamp
+      });
     }
 
     // Find row by Timestamp (search from bottom — likely most recent)
@@ -387,9 +393,17 @@ function handleUncategorize_(body) {
       }
     }
 
-    if (foundRow > 0) {
-      txn.getRange(foundRow, 4).setValue('');  // Clear Category
+    // A8: if no matching row was found, fail loudly. The PWA was previously
+    // treating no-match as success, removing the item from syncQueue and
+    // hiding the failure from the user.
+    if (foundRow < 0) {
+      return jsonResponse_({
+        success: false,
+        error: 'Row not found for timestamp: ' + timestamp
+      });
     }
+
+    txn.getRange(foundRow, 4).setValue('');  // Clear Category
 
     return jsonResponse_({
       success: true,

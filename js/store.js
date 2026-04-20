@@ -1,11 +1,35 @@
 const CATEGORIES_KEY = 'budget_categories';
 const SYNC_QUEUE_KEY = 'budget_sync_queue';
 
+// A9: wrap localStorage.setItem so QuotaExceededError doesn't crash the app
+// and we can attempt a recovery for the sync queue (which is the only state
+// we actually care about persisting — categories will just re-fetch).
+function safeSetItem_(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    // QuotaExceededError detection across browsers (name/code/legacy)
+    const isQuota =
+      e && (
+        e.name === 'QuotaExceededError' ||
+        e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        e.code === 22 || e.code === 1014
+      );
+    if (isQuota) {
+      console.error('localStorage quota exceeded for key:', key, '- data not persisted this call');
+      return false;
+    }
+    throw e;
+  }
+}
+
 export const store = {
   transactions: [],
   categories: [],
   syncQueue: [],          // Persisted to localStorage — survives page close
   lastCategorized: null,
+  persistFailed: false,   // A9: set true if syncQueue recovery fails — caller can warn user
 
   loadCache() {
     try {
@@ -25,11 +49,28 @@ export const store = {
   },
 
   saveCache() {
-    localStorage.setItem(CATEGORIES_KEY, JSON.stringify(this.categories));
+    // Categories cache is non-critical — silent best-effort. If it fails,
+    // we'll just re-fetch on next refresh (network call); no data loss.
+    safeSetItem_(CATEGORIES_KEY, JSON.stringify(this.categories));
   },
 
   saveSyncQueue() {
-    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(this.syncQueue));
+    // A9: syncQueue is critical (unsent categorizations live here). If
+    // setItem fails, attempt one recovery: drop the categories cache and
+    // retry. If still failing, set persistFailed so callers can warn.
+    if (safeSetItem_(SYNC_QUEUE_KEY, JSON.stringify(this.syncQueue))) {
+      this.persistFailed = false;
+      return;
+    }
+    console.warn('Quota recovery: dropping cached categories to make room for syncQueue');
+    localStorage.removeItem(CATEGORIES_KEY);
+    if (safeSetItem_(SYNC_QUEUE_KEY, JSON.stringify(this.syncQueue))) {
+      this.persistFailed = false;
+      return;
+    }
+    console.error('localStorage recovery FAILED: syncQueue is in memory only. ' +
+      'Reload will lose ' + this.syncQueue.length + ' unsent categorizations.');
+    this.persistFailed = true;
   },
 
   setCategories(list) {

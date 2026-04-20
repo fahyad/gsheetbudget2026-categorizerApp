@@ -13,6 +13,12 @@ async function request(url) {
 
   try {
     const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    // A3: surface HTTP errors before we try to parse the body. Apps Script
+    // returns HTML error pages on 500s; calling res.json() on HTML throws a
+    // cryptic "Unexpected token <" with no clue the server actually 500'd.
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
+    }
     const data = await res.json();
     if (!data.success) {
       throw new Error(data.error || 'API request failed');
