@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.4';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:00 MDT';
+var APP_SCRIPT_VERSION = 'v11.5';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:07 MDT';
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -454,15 +454,25 @@ function handleAddCategoryInner_(mainCategory, subCategory) {
     }
   }
 
-  // Find first empty row in D:E
+  // A5: find first empty row in D:E. Previous logic would let nextRow advance
+  // to 101 if all 99 slots were full, then silently write outside the named
+  // range (CategoryMain = D2:D100). New behavior: detect "no empty slot" and
+  // return a clean capacity error.
   var catData = setup.getRange('D2:D100').getValues();
-  var nextRow = 2;
+  var nextRow = -1;
   for (var j = 0; j < catData.length; j++) {
-    if (catData[j][0] === '') {
+    var v = catData[j][0];
+    if (v === '' || v === null || v === undefined) {
       nextRow = j + 2;
       break;
     }
-    nextRow = j + 3; // Past the last filled row
+  }
+
+  if (nextRow === -1) {
+    return jsonResponse_({
+      success: false,
+      error: 'Categories tab full (D2:D100 has 99 entries). Cannot add more without expanding the named range.'
+    });
   }
 
   // Write the new category
@@ -586,24 +596,37 @@ function handleBatchCategorize_(params) {
       results.push({ timestamp: timestamp, success: true });
     }
 
-    // Apply updates to col D of each row, then verify
+    // Apply updates to col D of each row, then verify.
+    // Writes are individual (rows are non-contiguous in the typical batch).
+    // Verify is batched into ONE read covering min..max row — was previously
+    // N getValue calls, which on a 30-item batch was ~30x more sheet I/O than
+    // necessary. (A2)
     if (updates.length > 0) {
       for (var u = 0; u < updates.length; u++) {
         txn.getRange(updates[u].row, 4).setValue(updates[u].category);
       }
       SpreadsheetApp.flush();
 
-      // Verify each update — re-read col D for each updated row
+      // A2: compute min/max row, do one bulk read of col D over that range.
+      var minRow = updates[0].row;
+      var maxRow = updates[0].row;
+      for (var b = 1; b < updates.length; b++) {
+        if (updates[b].row < minRow) minRow = updates[b].row;
+        if (updates[b].row > maxRow) maxRow = updates[b].row;
+      }
+      var verifySpan = txn.getRange(minRow, 4, maxRow - minRow + 1, 1).getValues();
+
       var rollback = [];
       for (var v = 0; v < updates.length; v++) {
-        var actual = txn.getRange(updates[v].row, 4).getValue();
+        var actual = verifySpan[updates[v].row - minRow][0];
         if (String(actual) !== String(updates[v].category)) {
           rollback.push(updates[v]);
         }
       }
 
       if (rollback.length > 0) {
-        // Roll back ALL updates from this batch (atomicity)
+        // Roll back ALL updates from this batch (atomicity).
+        // Individual writes here too — rare path, optimization not worth it.
         for (var r = 0; r < updates.length; r++) {
           txn.getRange(updates[r].row, 4).setValue('');
         }
@@ -1418,18 +1441,33 @@ function cleanupSetupWhitespace_(ss) {
 /**
  * Finds the first empty row in a sheet (by checking column A).
  */
-function findNextEmptyRow_(sheet) {
+function findNextEmptyRow_(sheet, maxRow) {
   // CRITICAL: cannot use getLastRow() alone — it counts formula-filled cells
   // (even those returning "") as content. Transactions and Pending tabs have
   // formulas pre-filled in rows 2-1000, so getLastRow() returns 1000 even when
   // empty. We scan column A (always real data, never a formula column) instead.
+  //
+  // B1: throw if the next available row would land past the named-range
+  // ceiling. Previously it would silently return 1001+, which produced
+  // orphan rows invisible to all formulas using Transactions_* named ranges.
+  // Default ceiling matches our existing named ranges (row 1000).
+  if (typeof maxRow === 'undefined') maxRow = 1000;
+
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return 2;
   var colA = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
   for (var i = colA.length - 1; i >= 0; i--) {
     var v = colA[i][0];
     if (v !== '' && v !== null && v !== undefined) {
-      return i + 3; // i is 0-indexed within rows 2..N, so data row = i+2, next = i+3
+      var nextRow = i + 3; // i is 0-indexed within rows 2..N, so data row = i+2, next = i+3
+      if (nextRow > maxRow + 1) {
+        throw new Error(
+          'findNextEmptyRow_: sheet "' + sheet.getName() + '" has data past row ' + maxRow +
+          '; refusing to write at row ' + nextRow + ' (named ranges only cover rows 2-' + maxRow +
+          '). Compact existing rows or extend the named ranges before retrying.'
+        );
+      }
+      return nextRow;
     }
   }
   return 2; // No data, start at row 2
@@ -1619,9 +1657,12 @@ function buildWorkbook() {
   txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
   setTransactionFormulas_(txn);
 
+  // A7: setAllowInvalid(false) — strict. Same policy as updateWorkbook now.
+  // Empty cells are allowed regardless of this flag (data validation never
+  // rejects empty), so the previous "allow empty" comment was misleading.
   var catRule = SpreadsheetApp.newDataValidation()
     .requireValueInRange(setup.getRange('E2:E100'), true)
-    .setAllowInvalid(true)  // allow empty (uncategorized) cells
+    .setAllowInvalid(false)
     .build();
   txn.getRange('D2:D1000').setDataValidation(catRule);
 
@@ -1993,8 +2034,26 @@ function setTransactionFormulas_(txn) {
  * Sets all 15 named ranges. Safe to call repeatedly.
  */
 function setNamedRanges_(ss, setup, fixed, budget, txn) {
+  // B3: only remove ranges we own — previously this wiped EVERY named range
+  // including any user-defined ones. Owned-prefix list mirrors the names
+  // we re-create below. Match by exact name OR known prefix (e.g.
+  // "PayPeriods_Label" matches the "PayPeriods" entry).
+  var ownedPrefixes = [
+    'PayPeriods', 'CategoryList', 'CategoryMain',
+    'FixedExpenses_', 'Budget_', 'Transactions_'
+  ];
   var existing = ss.getNamedRanges();
-  for (var n = 0; n < existing.length; n++) existing[n].remove();
+  for (var n = 0; n < existing.length; n++) {
+    var nm = existing[n].getName();
+    var owned = false;
+    for (var p = 0; p < ownedPrefixes.length; p++) {
+      if (nm === ownedPrefixes[p] || nm.indexOf(ownedPrefixes[p]) === 0) {
+        owned = true;
+        break;
+      }
+    }
+    if (owned) existing[n].remove();
+  }
 
   ss.setNamedRange('PayPeriods',       setup.getRange('A2:C27'));
   ss.setNamedRange('PayPeriods_Label', setup.getRange('C2:C27'));

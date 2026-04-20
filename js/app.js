@@ -125,10 +125,15 @@ function bindEvents() {
 
   saveAddCat.addEventListener('click', () => saveNewCategory());
 
-  // Warn if closing with unsent categorizations
+  // Warn if closing with unsent categorizations.
+  // B4: Chrome (and modern Firefox/Safari) require BOTH preventDefault()
+  // AND assigning a string to returnValue for the prompt to actually fire.
+  // Without the returnValue line, the handler runs but no prompt appears
+  // and users could close the tab with unsynced items in queue.
   window.addEventListener('beforeunload', (e) => {
     if (store.syncQueue.length > 0) {
       e.preventDefault();
+      e.returnValue = '';
     }
   });
 }
