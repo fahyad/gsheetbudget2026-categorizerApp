@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.10';
-var APP_SCRIPT_LAST_EDITED = '2026-04-20 08:23 MDT';
+var APP_SCRIPT_VERSION = 'v11.11';
+var APP_SCRIPT_LAST_EDITED = '2026-04-20 09:48 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -2223,9 +2223,11 @@ function applySavingStructure_(saving, ss) {
   saving.setRowHeight(1, 32);
 
   // --- Row 2: dashboard labels ---
+  // v11.11: dropped the old "Per-Period Need" column + total. Replaced with
+  // "Needed Future" which adjusts based on what's allocated this period.
   saving.getRange('A2:F2').setValues([[
     'Today', 'Current Period', 'Total Goals',
-    'Per-Period Need', 'Currently Saved', 'Target Total'
+    'Currently Saved', 'Needed Future', 'Target Total'
   ]])
     .setBackground(SAVING_DASHBOARD_LABEL_BG)
     .setFontWeight('bold')
@@ -2260,8 +2262,12 @@ function applySavingStructure_(saving, ss) {
       '"(out of range)")'
   );
   saving.getRange('C3').setFormula('=COUNTA(A6:A' + lastGoalRow + ')');
-  saving.getRange('D3').setFormula('=SUM(G6:G' + lastGoalRow + ')');
-  saving.getRange('E3').setFormula('=SUM(E6:E' + lastGoalRow + ')');
+  // D3 now = Currently Saved total (sum of col E). Previously was
+  // Per-Period Need total from col G — column G is now Periods Remaining.
+  saving.getRange('D3').setFormula('=SUM(E6:E' + lastGoalRow + ')');
+  // E3 now = Needed Future total (sum of col H). Previously was
+  // Currently Saved — now rendered in D3 instead.
+  saving.getRange('E3').setFormula('=SUM(H6:H' + lastGoalRow + ')');
   saving.getRange('F3').setFormula('=SUM(C6:C' + lastGoalRow + ')');
   saving.getRange('A3:F3').setHorizontalAlignment('center').setFontSize(11);
   saving.getRange('D3').setNumberFormat('$#,##0.00');
@@ -2273,9 +2279,16 @@ function applySavingStructure_(saving, ss) {
   saving.setRowHeight(4, 8);
 
   // --- Row 5: column headers ---
+  // v11.11: replaced "Per-Period Need" + "On Track?" with
+  // "Allocated This Period" + "Needed Future Periods". On Track? status
+  // (DONE/ON PACE/CLOSE/BEHIND/OVERDUE) removed — the numeric columns now
+  // convey the same information and stay stable when the user allocates
+  // "the right amount" for the current period. Status indicator may return
+  // as a dashboard feature later.
   saving.getRange('A5:I5').setValues([[
     'Goal Name', 'Linked Category', 'Target', 'Target Period',
-    'Currently Saved', 'Periods Left', 'Per-Period Need', 'On Track?', 'Notes'
+    'Currently Saved', 'Allocated This Period', 'Periods Remaining',
+    'Needed Future Periods', 'Notes'
   ]])
     .setBackground(SAVING_HDR_BG)
     .setFontWeight('bold')
@@ -2285,39 +2298,53 @@ function applySavingStructure_(saving, ss) {
   // Reference $B$3 (current period helper). Each row's formula references
   // its own A, B, C, D values. Empty rows produce empty strings — SUM in
   // dashboard ignores them.
+  //
+  // v11.11 layout: E=Currently Saved, F=Allocated This Period,
+  // G=Periods Remaining, H=Needed Future Periods (adaptive).
   var formulaRows = [];
   for (var r = 6; r <= lastGoalRow; r++) {
     formulaRows.push([
-      // E: Currently Saved
+      // E: Currently Saved — cumulative Budget Available for this category
+      // at the current period row (includes this period's allocation since
+      // Budget Available = prior + Budgeted - Spent).
       '=IF(B' + r + '="","",IFERROR(SUMIFS(Budget_Available,Budget_Category,B' + r + ',Budget_Period,$B$3),0))',
-      // F: Periods Remaining (target idx - current idx). Negative = overdue.
+      // F: Allocated This Period (NEW v11.11) — exactly how much the user
+      // has budgeted for this category in the current period. Distinct from
+      // Currently Saved because that includes prior-period rollover.
+      '=IF(B' + r + '="","",IFERROR(SUMIFS(Budget_Budgeted,Budget_Category,B' + r + ',Budget_Period,$B$3),0))',
+      // G: Periods Remaining — from current (inclusive) to target period
+      // (exclusive). `MATCH(D) - MATCH(B3)` gives that count directly.
+      // Negative = past target, 0 = target period is current.
       '=IF(D' + r + '="","",IFERROR(MATCH(D' + r + ',PayPeriods_Label,0)-MATCH($B$3,PayPeriods_Label,0),""))',
-      // G: Per-Period Need. 0 if past target or already at/over goal.
-      // v11.10: wrap the division in IFERROR so a broken/empty F never
-      // produces #DIV/0! — cleanly returns "" instead.
+      // H: Needed Future Periods (NEW v11.11) — adaptive formula:
+      //   - If user has allocated current period (F>0): remaining target
+      //     split across FUTURE periods (G-1). Stays constant when user
+      //     budgets the previously-shown per-period need.
+      //   - If no current allocation (F=0): remaining target split across
+      //     all remaining saving periods including current (G). Same
+      //     semantics as the old "Per-Period Need" column.
+      // Edge cases: goal already met (E>=C) or no periods left (G<=0) → 0.
+      // Malformed G → "" via outer IFERROR defense.
       '=IF(OR(B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
-        'IFERROR(IF(F' + r + '<=0,0,MAX(0,(C' + r + '-E' + r + ')/F' + r + ')),""))',
-      // H: On Track? — IFS chain in declared order of priority.
-      '=IFS(' +
-        'OR(A' + r + '="",B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
-        'E' + r + '>=C' + r + ',"DONE",' +
-        'F' + r + '<0,"OVERDUE",' +
-        'IFERROR(MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0),0)<=0.04,"JUST STARTING",' +
-        'E' + r + '>=C' + r + '*MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0),"ON PACE",' +
-        'E' + r + '>=C' + r + '*MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0)*0.8,"CLOSE",' +
-        'TRUE,"BEHIND"' +
-        ')'
+        'IFERROR(' +
+          'IF(G' + r + '<=0,0,' +
+            'IF(E' + r + '>=C' + r + ',0,' +
+              'IF(F' + r + '>0,MAX(0,(C' + r + '-E' + r + ')/MAX(1,G' + r + '-1)),' +
+                 'MAX(0,(C' + r + '-E' + r + ')/G' + r + '))' +
+            ')' +
+          '),""))'
     ]);
   }
   saving.getRange(6, 5, formulaRows.length, 4).setFormulas(formulaRows);
 
   // --- Number formats ---
-  // Cols C (Target), E (Currently Saved), G (Per-Period Need): currency.
+  // Cols C (Target), E (Currently Saved), F (Allocated), H (Needed Future): currency.
+  // G (Periods Remaining): integer.
   saving.getRange('C6:C' + lastGoalRow).setNumberFormat('$#,##0.00');
   saving.getRange('E6:E' + lastGoalRow).setNumberFormat('$#,##0.00');
-  saving.getRange('G6:G' + lastGoalRow).setNumberFormat('$#,##0.00');
-  // F (Periods Remaining): integer.
-  saving.getRange('F6:F' + lastGoalRow).setNumberFormat('0');
+  saving.getRange('F6:F' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('G6:G' + lastGoalRow).setNumberFormat('0');
+  saving.getRange('H6:H' + lastGoalRow).setNumberFormat('$#,##0.00');
 
   // --- Data validations ---
   // Col B: Linked Category (from CategoryList).
@@ -2337,10 +2364,12 @@ function applySavingStructure_(saving, ss) {
     saving.getRange('D6:D' + lastGoalRow).setDataValidation(periodRule);
   }
 
-  // --- Conditional formatting on H (On Track?) ---
-  // Clear ONLY rules that target our H range. Other CF on the sheet
-  // (none expected here) is preserved.
-  var hRange = saving.getRange('H6:H' + lastGoalRow);
+  // --- Conditional formatting cleanup (v11.11) ---
+  // The previous On Track? column (column H, text values DONE/ON PACE/etc.)
+  // had 6 CF rules. Column H is now Needed Future Periods (currency), so
+  // those text-based rules are stale. Strip any rule that touches column H;
+  // no new CF added for v11.11 (status indicator may return on a future
+  // dashboard).
   var allRules = saving.getConditionalFormatRules();
   var keepRules = [];
   for (var k = 0; k < allRules.length; k++) {
@@ -2350,32 +2379,6 @@ function applySavingStructure_(saving, ss) {
       if (ranges[rg].getColumn() === 8) { touchesH = true; break; }
     }
     if (!touchesH) keepRules.push(allRules[k]);
-  }
-
-  // Build status -> {bg, fg, bold} map.
-  var statusStyles = [
-    ['DONE',          '#1b5e20', '#ffffff', true],   // dark green / white
-    ['ON PACE',       '#2e7d32', '#ffffff', false],  // green / white
-    ['CLOSE',         '#fff59d', '#5d4037', false],  // yellow / dark brown
-    ['BEHIND',        '#c62828', '#ffffff', false],  // red / white
-    ['OVERDUE',       '#b71c1c', '#ffffff', true],   // dark red / white / bold
-    ['JUST STARTING', '#90caf9', '#0d47a1', false]   // light blue / dark blue
-  ];
-  for (var s = 0; s < statusStyles.length; s++) {
-    var rule = SpreadsheetApp.newConditionalFormatRule()
-      .whenTextEqualTo(statusStyles[s][0])
-      .setBackground(statusStyles[s][1])
-      .setFontColor(statusStyles[s][2])
-      .setRanges([hRange])
-      .build();
-    if (statusStyles[s][3]) rule = SpreadsheetApp.newConditionalFormatRule()
-      .whenTextEqualTo(statusStyles[s][0])
-      .setBackground(statusStyles[s][1])
-      .setFontColor(statusStyles[s][2])
-      .setBold(true)
-      .setRanges([hRange])
-      .build();
-    keepRules.push(rule);
   }
   saving.setConditionalFormatRules(keepRules);
 
@@ -2464,8 +2467,8 @@ function buildInstructionsTab_(sheet) {
     ['        Easiest: PWA → "+ Add Category". Then Budget tab gets new rows for that category.', 10, false, null, null],
     ['Step 2: Open the Saving tab → fill row 6+: Goal Name | Linked Category (dropdown) |', 10, false, null, null],
     ['        Target Amount | Target Period (dropdown) | Notes.', 10, false, null, null],
-    ['Step 3: Computed columns auto-fill: Currently Saved (from Budget Available),', 10, false, null, null],
-    ['        Periods Left, Per-Period Need, On Track? (color-coded).', 10, false, null, null],
+    ['Step 3: Computed columns auto-fill: Currently Saved (cumulative from Budget),', 10, false, null, null],
+    ['        Allocated This Period, Periods Remaining, Needed Future Periods.', 10, false, null, null],
     ['Step 4: Each pay period, set Budget Budgeted for that category to the Per-Period Need.', 10, false, null, null],
     ['        Available accumulates across periods until you spend the goal money.', 10, false, null, null],
     ['', 10, false, null, null],
