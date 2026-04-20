@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.6';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:16 MDT';
+var APP_SCRIPT_VERSION = 'v11.7';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 20:13 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -2531,19 +2531,53 @@ function rebuildBudgetInternal_(mode, ss) {
   budget.getRange(DATA_START_ROW, 4, totalRows, 3).setNumberFormat('$#,##0.00');
   budget.autoResizeColumns(1, 6);
 
-  // Recreate slicer over header + data only (skip dashboard rows 1-6).
-  // Explicitly set the filter column to 1 (Period) so the slicer shows period
-  // values when clicked. Without setColumnPosition, programmatically-created
-  // slicers default to no filter column → broken filtering UX.
-  var existingSlicers = budget.getSlicers();
-  for (var s = 0; s < existingSlicers.length; s++) {
-    existingSlicers[s].remove();
+  // Update the slicer to cover header + the new data range.
+  //
+  // History: v10.5 created the slicer with explicit `setColumnPosition(1)` so
+  // it filters on Period. As of late April 2026, that method throws
+  // `TypeError: setColumnPosition is not a function` when called from web-app
+  // context (handleAddCategoryInner_ → here) — Google appears to have changed
+  // the Slicer API. The crash was breaking PWA addCategory entirely.
+  //
+  // Fix strategy: prefer to UPDATE an existing slicer (preserves the filter
+  // column it was originally created with — no setColumnPosition call needed).
+  // Only fall back to recreate when no slicer exists. Wrap everything in
+  // try/catch — the slicer is a convenience widget; its failure must not
+  // crash the parent operation. The user can manually fix the slicer via
+  // Build Workbook or by right-clicking → Set Column if it ever ends up
+  // without a filter column.
+  try {
+    var slicerRange = budget.getRange(7, 1, totalRows + 1, 6);
+    var existingSlicers = budget.getSlicers();
+
+    if (existingSlicers.length > 0) {
+      // Existing slicer: just resize. Filter column stays as it was.
+      existingSlicers[0].setRange(slicerRange);
+      // Remove any extras (defensive — only one expected).
+      for (var sx = 1; sx < existingSlicers.length; sx++) {
+        existingSlicers[sx].remove();
+      }
+    } else {
+      // No slicer yet — create one. Try to set its filter column; tolerate
+      // failure if the API method is unavailable in this context.
+      var newSlicer = budget.insertSlicer(slicerRange, 1, 8);
+      try {
+        if (typeof newSlicer.setColumnPosition === 'function') {
+          newSlicer.setColumnPosition(1); // Filter by Period (col A)
+        } else {
+          console.warn('Slicer.setColumnPosition unavailable; new slicer has no filter column. ' +
+            'User can right-click slicer → Set Column → Period.');
+        }
+      } catch (slicerColErr) {
+        console.warn('Slicer setColumnPosition threw:', slicerColErr.toString(),
+          '— slicer created but without filter column.');
+      }
+    }
+  } catch (slicerErr) {
+    // Slicer rebuild failed entirely. Log + continue — Budget data is
+    // unaffected; only the convenience widget is missing/stale.
+    console.warn('Slicer rebuild skipped (non-fatal):', slicerErr.toString());
   }
-  var newSlicer = budget.insertSlicer(
-    budget.getRange(7, 1, totalRows + 1, 6),
-    1, 8
-  );
-  newSlicer.setColumnPosition(1);  // Filter by Period (col A of the data range)
 
   return { error: null, totalRows: totalRows, periods: labels.length, categories: budgetCats.length, newCount: newCount };
 }
