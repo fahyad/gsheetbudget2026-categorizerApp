@@ -6,7 +6,7 @@
 
 ## Current State (April 2026)
 - **Apps Script:** v11.6 — Single-ledger architecture (v11.0+) plus 4 phases of integrated-review work (v11.3 → v11.6). LockService on processInfoAlerts_, unique timestamp suffixes, batched verify-read, stricter validation, scoped named-range removal, no-match errors on uncategorize, and many docs/polish fixes. See `docs/progress.md` 2026-04-19 entry for the detailed phase breakdown.
-- **PWA:** v0.10 (cache v13) — sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, version sourced from `APP_VERSION` constant.
+- **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -123,9 +123,13 @@ Three independent reviews (mine + 2 external) merged into a single 26-item plan,
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
 - **Status:** complete
 
+### Phase 15: PWA Period Filter (PWA v0.11)
+The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
+- **Status:** complete
+
 ## Phases — Future
 
-### Phase 15: Auto-Categorization (not started)
+### Phase 16: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
 - [ ] Known merchants auto-categorize during parseAndFetch (skip the uncategorized queue)
 - [ ] Only unknown merchants need manual review in PWA
@@ -150,7 +154,7 @@ Three independent reviews (mine + 2 external) merged into a single 26-item plan,
 - But fragile — re-editing Due Day will likely break things
 - **Cleanup:** select C2:C5 → Format → Number → Plain → re-enter values
 
-### Phase 16: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+### Phase 17: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
 - [x] Hardcoded 2026 in fixed-expenses formula → `BUDGET_YEAR` constant (B9, v11.6). PayPeriods array still hardcoded — annual rollover touches 2 places.
 - [ ] 999-row pre-filled formulas overhead (cleanup)
 - [ ] Pagination for very large uncategorized-transaction lists (no longer "Pending" — single ledger)

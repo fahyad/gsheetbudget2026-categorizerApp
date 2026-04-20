@@ -4,7 +4,7 @@
 >
 > **Apps Script:** v11.6 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
-> **PWA:** v0.10 (cache v13) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`.
+> **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -765,3 +765,47 @@ The three reviews were merged into a single 26-item plan grouped by severity (Ti
 | What's the goal? | Budget sheet + mobile transaction categorizer system, with code quality high enough to be confidently maintained. |
 | What have I learned? | Multi-source code review with merged tier-ranked plan is high-leverage. External reviews catch breadth issues my deep-dive misses, and vice versa. **Don't trust review claims without verifying against current code** — A1's "perf regression" was a false positive because the reviewer misread the loop structure. **Bump cache version on every PWA release** — the 4-release stale-cache window meant returning users had been running outdated code. **Loud-fail beats silent corruption** — every "this should never happen" branch should throw with a descriptive error, not silently no-op. |
 | What have I done? | 4-phase integrated review: 16 commits, 4 deploys (v11.3-v11.6), 4 PWA cache bumps. Touched ~7 files across Apps Script + PWA + ops. Closed 23 of 26 review items (3 = false positives or non-actionable). Established LockService-everywhere pattern, unique-suffix Timestamps, loud-fail row-1000 ceiling, scoped named-range management, single APP_VERSION source for PWA. Rotated leaked API key + added pre-commit guard. |
+
+## Session: 2026-04-19 (later) — PWA Period Filter (v0.11)
+
+### Setup
+User wants to scope the uncategorized list to a single pay period. Use case: "I fell behind on April 1-14 categorization, but Apr 15 starts soon and I want to keep current. Let me hit the new period first; circle back to the old stuff later."
+
+User explicitly preferred a PWA-only solution: "may be worth just editing the PWA code and not adding more complexity to the appscript."
+
+### Design analysis (3 options weighed)
+1. **Backend-driven filter (period param on parseAndFetch)** — backend complexity grows; needs period list endpoint; unnecessary network filtering for ~50-item lists.
+2. **PWA-only with backend period source** — one extra round-trip on PWA load to fetch period definitions.
+3. **Pure PWA — derive periods from a constant anchor** — zero backend changes, zero new round-trips, periods are deterministic so client-side computation is trivial.
+
+Picked option 3. Periods are bi-weekly anchored at a known start date — pure arithmetic, no data to fetch.
+
+### Period derivation cleverness
+Naive approach: enumerate all 26 periods in an array. Mirror data between PWA and Code.js, ~30 lines.
+
+Better approach: one anchor + one special case. After re-reading Code.js's `payDateArrays` and the period-build loop:
+- Period 0: Dec 25, 2025 - Jan 20, 2026 (special long start, 27 days)
+- Periods 1-25: bi-weekly cycle from Jan 21, 2026 (14 days each)
+
+So just `PERIOD_REGULAR_ANCHOR_MS = Date.UTC(2026, 0, 21)` + `PERIOD_0` constants → can compute any period from any date with `floor((ts - anchor) / 14d)` for the regular case. ~30 lines including helpers + label formatter. Annual rollover touches 2 constants instead of 26 array entries.
+
+### Implementation
+- **`js/periods.js` (new, 90 lines):** `periodForDate(date)`, `currentPeriod()`, `periodForTimestamp(ts)` (slices first 10 chars for locale-independent date parsing), `formatLabel(start, end)` (matches the Sheet's "MMM D - D" / "MMM D - MMM D" label format).
+- **`index.html`:** new `<div id="period-filter-bar">` with dropdown + label, plus `<div id="period-empty-state">` for the (defensive) "no txns in this period" case.
+- **`css/style.css`:** filter bar styling (gray background, single-row layout, 14px text), period-empty-state styling.
+- **`js/app.js`:**
+  - Module state `selectedPeriodFilter` (null = use default, 'all', or numeric idx)
+  - `populatePeriodFilter()` rebuilds dropdown options from current txn set; periods sorted newest first; current period suffixed with "current"; counts inline; default selection rule: keep user's choice if still valid → current period if it has txns → 'all'
+  - `filterTxnsByPeriod(txns)` filters by current selection
+  - `renderTransactions()` calls populatePeriodFilter then filters before rendering
+  - Change handler in `bindEvents()` updates state + re-renders
+- **`sw.js`:** cache v13 → v14, added `js/periods.js` to APP_SHELL.
+- **`js/config.js`:** APP_VERSION v0.10 → v0.11.
+
+### Sanity testing
+Wrote a 13-case unit test as a one-off node script — covered: first/last days of period 0, 1, 7, 24, 25; cross-month boundaries; out-of-budget dates (before Dec 25, 2025 and after Jan 5, 2027); hash-suffixed timestamps. All 13 passed. Today (Apr 19, 2026) correctly resolved to period 7 = "Apr 15 - 28" — exactly what the user expects.
+
+### Status
+- PWA v0.11 deployed via GitHub Pages on `git push` (commit `ab3bf7f`)
+- No Apps Script changes
+- One new file: `js/periods.js`

@@ -28,7 +28,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 
 ## Current versions
 - **Apps Script:** v11.6 (single-ledger + 4 phases of review-driven correctness/polish work; see `docs/progress.md` 2026-04-19 entry)
-- **PWA:** v0.10 (cache v13) — A4 sync/undo race guard, A6 refresh-debounce, A9 localStorage quota guard, B7 success toast, beforeunload prompt fix
+- **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
 
@@ -123,7 +123,7 @@ Bump `<span class="version">vX.Y</span>` in `index.html` AND `CACHE_VERSION` in 
 
 | Path | Purpose |
 |------|---------|
-| `index.html`, `js/`, `css/`, `sw.js`, `manifest.json` | PWA (GitHub Pages) |
+| `index.html`, `js/`, `css/`, `sw.js`, `manifest.json` | PWA (GitHub Pages). `js/periods.js` derives pay-period info client-side from a single anchor — no backend roundtrip needed for the period filter. |
 | `apps-script/Code.js` | Apps Script source (~2400 lines) |
 | `apps-script/deploy.sh` | One-command production deploy |
 | `apps-script/.clasp.json` | Apps Script project link (scriptId + rootDir) |
