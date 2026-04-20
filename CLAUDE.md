@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.6 (single-ledger + 4 phases of review-driven correctness/polish work; see `docs/progress.md` 2026-04-19 entry)
+- **Apps Script:** v11.7 (single-ledger + 4 phases of review-driven work + Slicer crash fix; see `docs/progress.md` 2026-04-19 entries)
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
@@ -146,6 +146,8 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 
 ## Things that will trip you up (lessons from past sessions)
 
+> ⚠️ **Before you assume "Budget miscalculation"**: the Available column is CUMULATIVE rollover, not "this period only". If a category overspends in any period, the negative balance carries forward forever via the prior-period SUMIFS. A row showing -$280 with $100 budgeted and $40 spent is the formula working correctly against an earlier overspend, not a bug. Trace the chain back through that category before assuming miscalculation. The user has been bitten by this twice (v10.4 circular-ref divergence + late v11.x Gas confusion). Redesign to a non-rollover or two-column model has been discussed but deferred — see `docs/findings.md` "Gas Rollover Investigation (non-bug)".
+
 1. **`getLastRow()` lies on formula-filled sheets.** Transactions tab has formulas in rows 2–1000 that return `""`. `getLastRow()` reports 1000, not the real last data row. Always use `findNextEmptyRow_()` (scans column A) — already fixed in v9.
 
 2. **POST body is lost on Apps Script 302 redirects.** Use GET with URL params for everything. `doGet()` routes all 6 actions; `doPost()` is kept for curl testing only.
@@ -161,6 +163,8 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 7. **API key is in Apps Script Script Properties** (set via Budget Tools → Set API Key menu). Never hardcoded.
 
 8. **The user already manually pasted v9 to Apps Script** before clasp migration. The remote and local are in sync as of clasp clone.
+
+9. **`Slicer.setColumnPosition()` throws TypeError in web-app context** (Google API change discovered Apr 2026). Slicer manipulation in `rebuildBudgetInternal_` is now wrapped in try/catch with a typeof guard, and prefers `setRange()` on the existing slicer instead of destroying-and-recreating. Don't reintroduce the destroy-then-recreate pattern. See `docs/findings.md` "Slicer.setColumnPosition API Change Bug (v11.7)".
 
 ## When in doubt
 - Check `docs/task_plan.md` for current state

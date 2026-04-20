@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.6 Apps Script + v0.10 PWA, single-ledger architecture). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.7 Apps Script + v0.11 PWA, single-ledger architecture). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -560,6 +560,58 @@ Drive MCP server disconnected. gcloud OAuth blocked for personal Gmail accounts 
 **Ongoing updates:**
 Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
 **Never** use plain `clasp deploy` — it creates a new deployment with a new URL and breaks the PWA.
+
+### Slicer.setColumnPosition API Change Bug (v11.7) — CRITICAL UX
+
+- **Symptom:** PWA `addCategory` action started returning generic crash errors. New category was actually created (Setup tab + Budget rows updated correctly), but the PWA reported failure and the slicer ended up in a broken state with no filter column.
+- **Logs:**
+  ```
+  2026-04-19 19:51:56  addCategory  CRASH  3592ms
+  TypeError: newSlicer.setColumnPosition is not a function
+      at rebuildBudgetInternal_ (Code:2546:13)
+      at handleAddCategoryInner_ (Code:488:16)
+      at handleAddCategory_ (Code:441:12)
+      at routeAction_ (Code:85:45)
+      at doGet (Code:106:20)
+  ```
+- **Root cause:** Google appears to have changed the Apps Script Slicer API. The `setColumnPosition()` method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The same code worked in v10.5 when first written; nothing in our codebase changed around the slicer block. This was a silent server-side change.
+- **Why it cascaded:** The original `rebuildBudgetInternal_` block did:
+  ```js
+  // remove all existing slicers
+  for (var s = 0; s < existingSlicers.length; s++) existingSlicers[s].remove();
+  // create new slicer
+  var newSlicer = budget.insertSlicer(...);
+  newSlicer.setColumnPosition(1);  // THROWS HERE
+  ```
+  When `setColumnPosition` threw, control already past the `remove()` calls — so the working slicer was destroyed AND the throw propagated up, crashing the parent. The user was left with: a slicer that exists but has no filter column (broken UX) and a PWA showing a crash.
+- **Fix (v11.7):** Refactored to:
+  1. Prefer `setRange()` on existing slicer (preserves filter column, no `setColumnPosition` call).
+  2. Only recreate when no slicer exists — with `typeof === 'function'` guard around `setColumnPosition`.
+  3. Wrap entire slicer block in top-level try/catch — slicer is a UI convenience; failure must never crash the parent operation.
+- **Lesson:** **UI-widget code paths should never crash data operations.** Slicers, named ranges, formatting — these are decoration. They go in try/catch with non-fatal logging. The data write should always succeed. Also: Google's API contract isn't stable across releases for newer features. Defensive `typeof` guards are cheap insurance.
+
+### Gas Rollover Investigation (v11.x, late April 2026) — non-bug
+
+- **Symptom:** User reported Budget tab row 72 (Apr 15-28 / Gas) showing -$280 Available with $100 budgeted and $40 spent. They flagged it as "the second miscalculation" and asked whether to redesign the formula.
+- **Investigation via dumpSheet:** Traced the Gas chain across periods:
+  | Period | Budgeted | Spent | Available | Notes |
+  |--------|----------|-------|-----------|-------|
+  | Dec 25 - Mar 31 | $0 | $0 | $0 | (no activity) |
+  | Apr 1 - 14 | $0 | **$340** | -$340 | $40 ESSO + **$250 SHELL** + $30 ESSO + $20 PETRO |
+  | Apr 15 - 28 | $100 | $40 | -$280 | rollover -$340 + $100 - $40 |
+- **Root cause:** NOT a bug. The formula correctly rolled the -$340 deficit forward. The deficit was real: Apr 1-14 had $0 budgeted but $340 spent on Gas, anchored by an erroneous SHELL $250 charge that the user had not noticed. The user manually uncategorized SHELL after our investigation, which heals the chain.
+- **Why it was confusing:** The Available column does double duty:
+  - For *spending* categories (Groceries): a small rolling buffer near zero. A negative value here typically means immediate overspend.
+  - For *savings* categories (a future Saving tab): the cumulative pile.
+  - The user's mental model was "this period's remaining budget" (= $60 here), but the formula computes "cumulative position".
+- **What was discussed (and explicitly deferred per user's call):**
+  Four budget design models laid out, all of which would prevent this confusion:
+  - **A.** Each period independent (no rollover) — kills future Savings goal use case
+  - **B.** Positive-only rollover — hides overspend
+  - **C.** Full rollover (current) — honest but confusing
+  - **D.** Two columns: "This Period" + "Cumulative" — best UX, more invasive
+  Plus: move calculations from spreadsheet formulas to Apps Script values (eliminates the entire formula-bug class). User decided to keep the current formula since "it still works, even though brittle" and we'll revisit if it bites again.
+- **Lesson:** Before assuming "miscalculation", trace the rollover chain back through the same category in earlier periods. The bug is almost always in the data, not the formula. Document this in CLAUDE.md so future-Claude doesn't waste time on the same investigation.
 
 ### POST Redirect Bug (all write actions failed from PWA)
 - **Issue:** Apps Script web apps respond with HTTP 302 redirect. Per HTTP spec, browsers convert POST→GET on 302, dropping the request body. All POST-based write actions (categorize, uncategorize, addCategory) silently failed.

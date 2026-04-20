@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.6 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.7 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
 > **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
@@ -809,3 +809,67 @@ Wrote a 13-case unit test as a one-off node script — covered: first/last days 
 - PWA v0.11 deployed via GitHub Pages on `git push` (commit `ab3bf7f`)
 - No Apps Script changes
 - One new file: `js/periods.js`
+
+## Session: 2026-04-19 (later 2) — Gas Rollover Investigation + Slicer Crash Fix (v11.7)
+
+### Setup
+User reported two bugs from a PWA categorization session:
+1. **Bigger:** Budget tab row 72 (Apr 15-28 / Gas) showing -$280 Available with $100 budgeted, $40 spent. Flagged as "the second miscalculation" — user wanted formula tightening or full redesign.
+2. **Smaller:** PWA `addCategory` crashed when adding "Dates" category.
+
+User explicitly framed this as a bigger pattern: "we need to tighten up the formulas or think of a re-design that is simpler and less buggy."
+
+### Investigation flow
+- Used `dumpSheet` to inspect Budget rows 65-80 with both values and formulas, plus Setup categories and Logs tab.
+- Traced Gas across all periods (rows 9, 18, 27, 36, 45, 54, 63, 72, 81). Apr 1-14 had $0 budgeted but $340 spent (Apr 1 ESSO $40 + **Apr 7 SHELL $250** + Apr 7 ESSO $30 + Apr 10 PETRO $20). The -$340 carryover from Apr 1-14 + Apr 15-28's ($100 - $40) = -$280. **Math is correct.** The Available column is a cumulative rollover; not a per-period figure.
+- Logs showed the addCategory crash trace: `TypeError: newSlicer.setColumnPosition is not a function at rebuildBudgetInternal_ (Code:2546:13)`. Apps Script Slicer API change — Google deprecated/removed the method.
+
+### Discussion outcome
+Presented four budget redesign options (independent periods / positive-only rollover / current full rollover / two-column display) plus the meta-option of moving calculations to Apps Script values. User decided to **leave the formula as-is** ("still works, even though brittle"). The SHELL $250 was an erroneous charge — user manually uncategorized it, which heals the chain.
+
+Documented the non-bug in `findings.md` so future-Claude doesn't re-investigate. Added a `> ⚠️` callout in CLAUDE.md "Things that will trip you up" so the rollover semantics are visible up-front.
+
+### Slicer fix (v11.7) — implementation
+Refactored the slicer block in `rebuildBudgetInternal_`:
+
+```js
+try {
+  var slicerRange = budget.getRange(7, 1, totalRows + 1, 6);
+  var existingSlicers = budget.getSlicers();
+
+  if (existingSlicers.length > 0) {
+    // PREFERRED PATH: update existing slicer's range. Preserves the
+    // filter column from initial creation. No setColumnPosition call.
+    existingSlicers[0].setRange(slicerRange);
+    for (var sx = 1; sx < existingSlicers.length; sx++) existingSlicers[sx].remove();
+  } else {
+    // FALLBACK: no slicer exists, create one. Guard setColumnPosition
+    // because Google has changed the API and it may not exist.
+    var newSlicer = budget.insertSlicer(slicerRange, 1, 8);
+    try {
+      if (typeof newSlicer.setColumnPosition === 'function') {
+        newSlicer.setColumnPosition(1);
+      } else {
+        console.warn('Slicer.setColumnPosition unavailable; ...');
+      }
+    } catch (slicerColErr) { /* logged, non-fatal */ }
+  }
+} catch (slicerErr) {
+  // TOP-LEVEL: slicer is a UI widget. Its failure must not crash the
+  // parent operation (addCategory was failing because of this).
+  console.warn('Slicer rebuild skipped (non-fatal):', slicerErr.toString());
+}
+```
+
+User impact: addCategory works again. The user's existing slicer is in the broken-no-column state from the prior crash — one-time manual fix needed (right-click slicer → Set Column → Period). Future addCategory calls only resize the existing slicer, so the manual fix sticks.
+
+### Lessons
+- **UI-widget code paths should never crash data operations.** Slicer manipulation, formatting calls, named-range tweaks — all decoration. Wrap in try/catch with non-fatal logging. The data write should always succeed.
+- **Google's API contract isn't stable for newer features like Slicer.** Defensive `typeof` guards before calling potentially-missing methods is cheap insurance.
+- **Before assuming "miscalculation": trace the rollover chain.** Available column is cumulative; a negative value usually points to a real prior overspend, not a formula bug. Documented in CLAUDE.md so future-Claude (or future-me) doesn't re-investigate.
+- **Some "bugs" are data bugs, not code bugs.** The Gas issue was triggered entirely by the SHELL $250 erroneous charge. No code change needed — user fixed the data and the formulas resolved themselves.
+
+### Status
+- v11.7 deployed @27 (commit `90d7bf0`)
+- Budget formula model unchanged (deferred per user)
+- Slicer crash fix landed; user needs one-time manual slicer column setup
