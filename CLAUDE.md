@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.11 (Saving tab schema refactor — dropped "On Track?" text column, added "Allocated This Period" currency column, adaptive "Needed Future Periods" that stays constant when user budgets the correct amount. Earlier shakedown: v11.9 corrected updateWorkbook ordering so Saving formulas don't break to #REF! when setNamedRanges_ recreates names; v11.10 replaced a flaky XLOOKUP-with-array-multiplication with INDEX+MATCH, plus IFERROR defense.)
+- **Apps Script:** v11.12 (updateWorkbook now delegates Budget refresh to `rebuildBudgetInternal_` because the in-place per-row refresh loop was silently failing — dashboard formulas worked but per-row formulas (rows 8+) stayed `#REF!` indefinitely). Earlier shakedown: v11.9 updateWorkbook ordering so Saving formulas don't break to `#REF!`; v11.10 replaced XLOOKUP-with-array-multiplication with INDEX+MATCH; v11.11 Saving schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods).
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
@@ -177,6 +177,8 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 10. **`setNamedRanges_` deletes-and-recreates ranges — any formula referencing them at deletion time is permanently broken to `#REF!`**. Recreating the same name with the same definition does NOT heal existing formulas. Therefore any code that writes formulas referencing named ranges (Saving tab builder is the current example) MUST run AFTER `setNamedRanges_` in `updateWorkbook`. See `docs/findings.md` "Saving Tab #REF! After Update Script (v11.9)".
 
 11. **XLOOKUP with multiplied-boolean lookup arrays is unreliable in Sheets.** A formula like `XLOOKUP(1, (startCol<=today)*(endCol>=today), labelCol)` may return no-match even when a match clearly exists. Prefer `INDEX(labelCol, MATCH(today, startCol, 1))` when the start column is ascending-sorted — it's more portable and doesn't rely on array-broadcast behavior. See `docs/findings.md` "Saving B3 XLOOKUP Out-of-Range (v11.10)".
+
+12. **updateWorkbook's in-place per-row setFormula refresh silently fails (v11.12).** The same setFormula text that works from `rebuildBudgetInternal_` stored `#REF!` when called from the in-place loop inside `updateWorkbook` — even when the named ranges existed (dashboard formulas in the same tab resolved correctly). Root cause unknown; suspected Apps Script state-commit quirk. Fix: `updateWorkbook` now calls `rebuildBudgetInternal_('refresh', ss)` instead of the per-row loop. Don't reintroduce per-row refresh in `updateWorkbook`. See `docs/findings.md` "Budget #REF! After updateWorkbook (v11.12)".
 
 ## When in doubt
 - Check `docs/task_plan.md` for current state

@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.11 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.12 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
 > **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
@@ -1118,3 +1118,68 @@ Expected result for existing Europe trip goal ($4000, Dec 23-Jan 5, with $222.22
 - v11.11 deployed @31 (commit `5043293`)
 - User needs to run Update Script to apply the schema change to their existing Saving tab
 - No data loss — user-entered columns (A, B, C, D, I) preserved by refreshSavingTab_
+
+## Session: 2026-04-20 (even later) — Budget Tab #REF! Cascade (v11.12)
+
+### Setup
+User ran Update Script after v11.11 to apply the Saving tab schema refactor. Saving tab structure looked correct (v11.11 schema confirmed via dumpSheet). But user noted that the Europe goal in Saving tab still showed $0 Currently Saved even though they had budgeted $222.22 for it.
+
+### Diagnostic dumpSheet reveals
+Pulled Budget tab rows 8 (Groceries Dec 25-Jan 20), 77 (Europe Apr 1-14, where user had actually budgeted the $222.22), 87 (Europe Apr 15-28, the current period). ALL three rows — across different categories and periods — had broken formulas:
+- E (Spent): `=-SUMIFS(#REF!,#REF!,A<row>,#REF!,C<row>)`
+- F (Available): `=IF(MATCH(A<row>,#REF!,0)>1,IFERROR(SUMIFS(#REF!,#REF!,INDEX(#REF!,MATCH(A<row>,#REF!,0)-1),#REF!,C<row>),0),0)+D<row>-E<row>`
+
+But Budget tab DASHBOARD formulas (rows 1, 4) were fine — `PayPeriods_Start`, `PayPeriods_Label`, `Transactions_Amount`, `Budget_Budgeted` all resolved correctly. So named ranges exist; the per-row refresh in `updateWorkbook` wasn't actually committing.
+
+Also observed: user had budgeted $222.22 in period "Apr 1 - 14" (row 77), not "Apr 15 - 28" (row 87, the actual current period). That alone explains why Saving tab's Currently Saved column showed $0 for the current period — but it doesn't explain the #REF! on every Budget row.
+
+### Root-cause investigation
+Looked at updateWorkbook order:
+1. cleanup whitespace, add Timestamp col
+2. Instructions, setTransactionFormulas, data validation
+3. setNamedRanges_ — deletes then recreates every owned-prefix named range (PayPeriods_*, Budget_*, etc.)
+4. Saving tab refresh — sets formulas referencing the freshly-created names → works
+5. Budget dashboard refresh — sets formulas referencing names → works
+6. **Budget per-row refresh loop — supposed to setFormula for every data row → fails silently**
+7. ui.alert
+
+Step 3 breaks all existing Budget per-row formulas to `#REF!` (the known Sheets one-way conversion). Step 6 is supposed to overwrite them with valid references. Dashboard in step 5 works with the same approach, but per-row step 6 doesn't. No obvious reason why — tested that col A values are plain strings (not errors), `validPeriods` lookup should match, formula text is identical to what works elsewhere.
+
+### Fix strategy
+Rather than continue hunting the in-place loop's quirk, swap in the proven path. `rebuildBudgetInternal_('refresh', ss)` is the same code that:
+- Runs inside `handleAddCategoryInner_` (PWA addCategory) — and produces correctly-resolved formulas
+- Runs inside `initializeBudget` (menu)
+- Preserves user-entered Budgeted amounts via `existingBudgetedMap`
+
+Replacement in `updateWorkbook`:
+```js
+SpreadsheetApp.flush(); // commit setNamedRanges_ state
+var rebuildResult = rebuildBudgetInternal_('refresh', ss);
+if (rebuildResult && rebuildResult.error) {
+  console.error('updateWorkbook: Budget rebuild failed:', rebuildResult.error);
+}
+```
+
+Also removed the old `buildBudgetDashboard_` + header-refresh blocks that ran before the per-row loop — `rebuildBudgetInternal_` does dashboard + header + all data rows as part of its rebuild.
+
+### Note on blast radius
+This bug was present in every Update Script run since v11.8 (approximately 4 separate user-visible runs). Until now it went unnoticed because:
+- The Budget dashboard (which worked) was the most visible thing in the tab
+- The per-row Available/Spent columns showed `#REF!` only in cells the user hadn't recently edited
+- The Saving tab was newly added, so its Currently Saved = 0 looked like "new empty goal" rather than "the Budget formula it depends on is broken"
+
+The user's report of the Europe tracking issue was actually TWO bugs:
+1. User mis-filed $222.22 in period Apr 1-14 (row 77) instead of Apr 15-28 (row 87) — user error, not a code bug
+2. Budget per-row formulas stuck on #REF! — actual code bug
+
+Fixing (2) via rebuildBudgetInternal_ in v11.12. Telling user about (1) so they can move the budget to the right period.
+
+### Lessons
+- **When an in-place refresh doesn't match a known-working rebuild path, stop debugging the in-place version and use the rebuild path.** Hours of investigation vs minutes of swapping in a proven code path.
+- **`dumpSheet` with `includeFormulas=true` on MULTIPLE representative rows is the verification tool of choice.** Values alone hide the #REF! cascade because IFERROR swallows errors downstream. Always diff formula text post-update.
+- **Document blast radius for regression bugs.** Knowing this Budget #REF! was present across 4 updates helps the user understand why things seemed off.
+
+### Status
+- v11.12 deployed @32 (commit `612f5e4`)
+- User needs to run Update Script once more — Budget tab will be fully rebuilt
+- User should ALSO move the $222.22 from Apr 1-14 (row 77) to Apr 15-28 (row 87) if that was the intended period

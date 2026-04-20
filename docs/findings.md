@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.11 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab with adaptive per-period formula). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.12 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab with adaptive per-period formula). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -585,6 +585,40 @@ Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
   `buildWorkbook` was unaffected because there `setNamedRanges_` runs first and Saving builds after.
 - **Fix (v11.9):** moved the Saving-tab block in `updateWorkbook` to immediately after `setNamedRanges_`. Added a defensive comment block at the moved section. Subsequent Update Script runs invoke `refreshSavingTab_` which overwrites the broken formulas with correctly-resolved ones.
 - **Lesson:** **Named-range deletion is destructive to referencing formulas — even if the same name is recreated milliseconds later.** Any new code that writes formulas referencing named ranges in `updateWorkbook` MUST come after `setNamedRanges_`. This is now an ordering invariant. Added to CLAUDE.md trip-up list so future-Claude doesn't repeat this.
+
+### Budget #REF! After updateWorkbook (v11.12) — CRITICAL
+
+- **Symptom:** After the user ran Update Script to pull v11.11, `dumpSheet` revealed that EVERY Budget per-row formula (rows 8-267, across all categories) stored as `#REF!`:
+  ```
+  Row 8 (Groceries, Dec 25 - Jan 20):
+    Col E (Spent)     = =-SUMIFS(#REF!,#REF!,A8,#REF!,C8)
+    Col F (Available) = =IF(MATCH(A8,#REF!,0)>1,IFERROR(SUMIFS(#REF!,#REF!,...)))+D8-E8
+  Row 77 (Europe, Apr 1 - 14):   [same #REF! pattern]
+  ...
+  ```
+  But the Budget DASHBOARD formulas in the SAME tab were fine:
+  ```
+  Row 1 F1: =IFERROR(LET(s,INDEX(PayPeriods_Start,MATCH($B$1,PayPeriods_Label,0)),...
+  Row 4 A4: =IFERROR(SUMIFS(Transactions_Amount,Transactions_Period,$B$1,...),0)
+  ```
+  — resolving named ranges correctly. So the named ranges DO exist; the per-row refresh was simply not updating the broken formulas.
+
+- **Diagnosis:** The in-place per-row refresh loop in `updateWorkbook`:
+  ```js
+  for (var i = 0; i < budgetData.length; i++) {
+    // ... filter to valid data rows ...
+    budget.getRange(row, 2).setFormula(...);
+    budget.getRange(row, 5).setFormula(...);
+    budget.getRange(row, 6).setFormula(buildAvailableFormula_(row));
+  }
+  ```
+  …was apparently executing but not committing changes. The identical code path in `rebuildBudgetInternal_` (used by `handleAddCategoryInner_` and `initializeBudget`) works correctly. Unknown root cause — suspected Apps Script state-commit quirk between `setNamedRanges_` (which deletes-then-recreates named ranges, breaking every referencing formula to `#REF!`) and the subsequent per-row `setFormula` calls in the same execution. Individual `setFormula` calls in a tight loop may not be flushing state before the next iteration, possibly leaving the cell in a state where the formula text is "accepted" but the parse/resolve step loses the reference.
+
+- **Fix (v11.12):** replaced the in-place per-row refresh loop with a call to `rebuildBudgetInternal_('refresh', ss)`. This is the same code path that `handleAddCategoryInner_` uses — and that definitely works because `addCategory` via PWA produces correctly-resolved formulas. `rebuildBudgetInternal_` preserves user-entered Budgeted amounts via `existingBudgetedMap` before wiping and rebuilding the Budget tab. Added `SpreadsheetApp.flush()` before the call to guarantee `setNamedRanges_` state is committed. Removed the now-redundant `buildBudgetDashboard_` and header-refresh blocks from `updateWorkbook` since `rebuildBudgetInternal_` does both.
+
+- **Blast radius:** the bug affected every Saving-tab Update Script run since v11.8 (approximately 4 user-visible runs). The user reported it when the Saving tab's "Currently Saved" column showed $0 for the Europe goal even though they had budgeted $222.22 — the Saving formula looks up Budget_Available via SUMIFS, and Budget_Available referenced broken `#REF!` formulas so returned 0. User had also mis-filed the $222.22 in period "Apr 1-14" instead of "Apr 15-28" (the current period), which explained why the dashboard showed $0 for the current period regardless.
+
+- **Lesson:** **when an in-place refresh doesn't match a known-working rebuild path, stop debugging the in-place version and use the rebuild path.** I spent significant time trying to understand why the per-row refresh loop didn't commit its setFormula calls; the answer was "we don't know, but `rebuildBudgetInternal_` works, so use that." Don't debug bugs that have available workarounds. Also: `dumpSheet` with `includeFormulas=true` on multiple representative rows is the verification tool for this bug class — values alone can look deceptively OK (zeros, errors swallowed by IFERROR).
 
 ### Saving Tab Per-Period Drift + Schema Refactor (v11.11)
 
