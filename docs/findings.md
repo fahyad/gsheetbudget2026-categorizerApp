@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.8 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab for one-time goals). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.10 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab for one-time goals). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -560,6 +560,53 @@ Drive MCP server disconnected. gcloud OAuth blocked for personal Gmail accounts 
 **Ongoing updates:**
 Use `cd apps-script && ./deploy.sh "description"` (see "Daily loop" below).
 **Never** use plain `clasp deploy` — it creates a new deployment with a new URL and breaks the PWA.
+
+### Saving Tab #REF! After Update Script (v11.9)
+
+- **Symptom:** User ran Update Script to create the Saving tab from v11.8 deploy. Tab appeared with correct dimensions (105 rows × 9 cols, light blue) and the right header text, but every formula stored as `#REF!`. The dashboard cell B3 (Current Period) showed `(out of range)` and dashboard sums all showed `$0.00 / 0` even though the tab structure was visually correct.
+- **Verification:** `dumpSheet?tab=Saving&range=A1:I7&includeFormulas=true` showed row 3 B3 as:
+  ```
+  =IFERROR(XLOOKUP(1,(#REF!<=TODAY())*(#REF!>=TODAY()),#REF!),"(out of range)")
+  ```
+  and row 6 col E as:
+  ```
+  =IF(B6="","",IFERROR(SUMIFS(#REF!,#REF!,B6,#REF!,$B$3),0))
+  ```
+  — all named-range references (PayPeriods_Start, PayPeriods_End, PayPeriods_Label, Budget_Available, Budget_Category, Budget_Period) replaced with literal `#REF!` tokens.
+- **Root cause:** order-of-operations in `updateWorkbook`. The Saving-tab block was calling `setFormula(...)` with formulas referencing named ranges, and it ran BEFORE `setNamedRanges_`. `setNamedRanges_` deletes-then-recreates every owned-prefix named range. **When Google Sheets deletes a named range, it silently rewrites every formula referencing that name to a `#REF!` literal. That conversion is one-way — recreating the same name with the same definition does NOT heal the broken formulas.**
+  ```
+  updateWorkbook execution order (v11.8 — BUG):
+    1. ... other refreshes ...
+    2. Saving tab build/refresh (setFormula PayPeriods_*, Budget_*)  ← names exist here
+    3. ... more refreshes ...
+    4. setNamedRanges_                                                ← deletes the names
+    5. (recreates names — too late, formulas already broken)
+  ```
+  `buildWorkbook` was unaffected because there `setNamedRanges_` runs first and Saving builds after.
+- **Fix (v11.9):** moved the Saving-tab block in `updateWorkbook` to immediately after `setNamedRanges_`. Added a defensive comment block at the moved section. Subsequent Update Script runs invoke `refreshSavingTab_` which overwrites the broken formulas with correctly-resolved ones.
+- **Lesson:** **Named-range deletion is destructive to referencing formulas — even if the same name is recreated milliseconds later.** Any new code that writes formulas referencing named ranges in `updateWorkbook` MUST come after `setNamedRanges_`. This is now an ordering invariant. Added to CLAUDE.md trip-up list so future-Claude doesn't repeat this.
+
+### Saving B3 XLOOKUP Out-of-Range (v11.10)
+
+- **Symptom:** After v11.9 fixed the `#REF!` issue, Update Script was re-run. Formulas now had correct named-range references, but B3 (Current Period dashboard cell) still displayed `(out of range)` even though today (2026-04-20) was clearly inside period 7 (Apr 15 - 28). This cascaded:
+  - B3 = `(out of range)` (string, not a valid period label)
+  - F6 (Periods Remaining) formula: `MATCH($B$3, PayPeriods_Label, 0) - MATCH(D6, ...)` → `#N/A - N` → `#N/A` → IFERROR caught → returned `""`
+  - G6 (Per-Period Need): `IF(F6<=0, 0, MAX(0, (C6-E6)/F6))` → `(C6-E6)/""` → **`#DIV/0!`** ← user-visible bug
+  - H6 (On Track?): `MATCH($B$3, PayPeriods_Label, 0)` → `#N/A` → IFERROR returned 0 → 0 ≤ 0.04 matched `JUST STARTING` (misleadingly green for a goal with $0 saved)
+- **Root cause:** the B3 formula was:
+  ```
+  =IFERROR(XLOOKUP(1, (PayPeriods_Start<=TODAY())*(PayPeriods_End>=TODAY()), PayPeriods_Label), "(out of range)")
+  ```
+  This relies on Google Sheets to auto-broadcast the element-wise multiplication of two boolean arrays (`{TRUE,FALSE,...} * {FALSE,TRUE,...}` → `{0,0,...,1,0,...}`) into XLOOKUP's lookup vector. In practice Google Sheets does not reliably broadcast that expression as a usable lookup vector for XLOOKUP — the function returned "no match" even when a match objectively existed in the array.
+- **Fix (v11.10):** replaced with INDEX+MATCH(match_type=1). Since `PayPeriods_Start` is ascending-sorted by design, `MATCH(TODAY(), PayPeriods_Start, 1)` returns the position of the largest start date ≤ today — which is exactly the current period's row:
+  ```
+  =IFERROR(
+    IF(TODAY()>INDEX(PayPeriods_End, ROWS(PayPeriods_End)), "(out of range)",
+       INDEX(PayPeriods_Label, MATCH(TODAY(), PayPeriods_Start, 1))),
+    "(out of range)")
+  ```
+  IFERROR catches "today earlier than all periods"; the inner IF catches "today later than period 25's end". Also added defense-in-depth on G (Per-Period Need): wrapped the division in `IFERROR(..., "")` so any future malformed F never produces `#DIV/0!`.
+- **Lesson:** **XLOOKUP in Google Sheets is unreliable when the lookup vector is produced by array-multiplication of boolean expressions.** Prefer `INDEX(labelRange, MATCH(target, sortedStartRange, 1))` when the start range is ascending-sorted — it's more portable, doesn't rely on array-broadcast behavior, and a single MATCH call covers the typical "find the row whose range contains the target" case. Added to CLAUDE.md trip-up list.
 
 ### Slicer.setColumnPosition API Change Bug (v11.7) — CRITICAL UX
 

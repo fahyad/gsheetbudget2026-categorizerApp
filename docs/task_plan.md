@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.8 — Single-ledger + 4 phases of integrated-review work + Slicer crash fix + new Saving tab for one-time goals. Saving tab has dashboard + 9 columns; pulls "currently saved" from Budget Available; computes pace and shows DONE / ON PACE / CLOSE / BEHIND / OVERDUE color-coded status. See `docs/progress.md` for detailed breakdowns.
+- **Apps Script:** v11.10 — Saving tab for one-time goals shipped in v11.8 with two follow-up fixes during bring-up: v11.9 fixed a `#REF!` cascade caused by `updateWorkbook` running the Saving tab build before `setNamedRanges_` (Sheets converts formulas to `#REF!` when their named range is deleted — even if immediately recreated); v11.10 replaced a flaky XLOOKUP-with-array-multiplication in the Current Period dashboard cell with INDEX+MATCH, plus IFERROR defense on per-period-need. Full postmortems in `docs/findings.md`.
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
@@ -123,7 +123,15 @@ Three independent reviews (mine + 2 external) merged into a single 26-item plan,
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
 - **Status:** complete
 
-### Phase 17: Saving Tab — One-Time Goals (v11.8)
+### Phase 17: Saving Tab — One-Time Goals (v11.8 → v11.10)
+Shipped in v11.8. Two bugs found and fixed during bring-up as the user first ran Update Script:
+- **v11.9 (#REF! cascade):** `updateWorkbook` built the Saving tab BEFORE `setNamedRanges_` ran. `setNamedRanges_` deletes-then-recreates each owned-prefix named range; Sheets converts any formula referencing a deleted named range to a `#REF!` literal, and the recreated same-name-same-definition does NOT heal the broken formulas. Fix: move Saving block to AFTER `setNamedRanges_` in `updateWorkbook`. buildWorkbook unaffected (already correct order there).
+- **v11.10 (B3 XLOOKUP unreliable):** Dashboard cell B3 (Current Period) used `XLOOKUP(1, (start<=today)*(end>=today), label)` which relied on Sheets to auto-broadcast multiplied boolean arrays as the lookup vector. In practice Sheets failed to match even when a match clearly existed → B3 returned the "(out of range)" fallback → cascaded into `#DIV/0!` in Per-Period Need. Fix: replaced with `INDEX(PayPeriods_Label, MATCH(TODAY(), PayPeriods_Start, 1))` plus outer IF for "today past the last period". Also added defense-in-depth IFERROR around the per-period division.
+
+Both patterns added to CLAUDE.md trip-up list (items #10 and #11).
+
+Original implementation:
+  
 User wanted to track one-time savings goals like "Europe trip $5,000 by Oct 2026" and see what to budget per period to hit them. Implemented as a new tab on the existing Budget infrastructure — no new data model needed. The Available column on Budget already accumulates over time when nothing is spent against a category; that IS savings progress. The new Saving tab adds a goal-tracking layer with computed pace.
 
 Design decisions (per user input):

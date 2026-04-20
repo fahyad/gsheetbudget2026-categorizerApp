@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.8 (single-ledger + 4 phases of review-driven work + Slicer crash fix + new Saving tab for one-time goals; see `docs/progress.md` 2026-04-19 entries)
+- **Apps Script:** v11.10 (Saving tab for one-time goals + two shakedown fixes: v11.9 corrected updateWorkbook ordering so Saving formulas don't break to #REF! when setNamedRanges_ recreates names; v11.10 replaced a flaky XLOOKUP-with-array-multiplication with INDEX+MATCH, plus IFERROR defense on the per-period formula)
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
@@ -172,6 +172,10 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 8. **The user already manually pasted v9 to Apps Script** before clasp migration. The remote and local are in sync as of clasp clone.
 
 9. **`Slicer.setColumnPosition()` throws TypeError in web-app context** (Google API change discovered Apr 2026). Slicer manipulation in `rebuildBudgetInternal_` is now wrapped in try/catch with a typeof guard, and prefers `setRange()` on the existing slicer instead of destroying-and-recreating. Don't reintroduce the destroy-then-recreate pattern. See `docs/findings.md` "Slicer.setColumnPosition API Change Bug (v11.7)".
+
+10. **`setNamedRanges_` deletes-and-recreates ranges — any formula referencing them at deletion time is permanently broken to `#REF!`**. Recreating the same name with the same definition does NOT heal existing formulas. Therefore any code that writes formulas referencing named ranges (Saving tab builder is the current example) MUST run AFTER `setNamedRanges_` in `updateWorkbook`. See `docs/findings.md` "Saving Tab #REF! After Update Script (v11.9)".
+
+11. **XLOOKUP with multiplied-boolean lookup arrays is unreliable in Sheets.** A formula like `XLOOKUP(1, (startCol<=today)*(endCol>=today), labelCol)` may return no-match even when a match clearly exists. Prefer `INDEX(labelCol, MATCH(today, startCol, 1))` when the start column is ascending-sorted — it's more portable and doesn't rely on array-broadcast behavior. See `docs/findings.md` "Saving B3 XLOOKUP Out-of-Range (v11.10)".
 
 ## When in doubt
 - Check `docs/task_plan.md` for current state

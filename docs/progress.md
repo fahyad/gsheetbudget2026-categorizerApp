@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.8 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.10 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
 > **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
@@ -941,3 +941,89 @@ The B3 cell holds the "current period" XLOOKUP that all per-row formulas referen
 - v11.8 deployed @28 (commit `5b00dc0`)
 - User needs to run Update Script to create the Saving tab in their existing sheet
 - No PWA changes; no API contract changes
+
+## Session: 2026-04-20 — Saving Tab Bring-Up Bugs (v11.9 + v11.10)
+
+### Setup
+User ran Budget Tools → Update Script to create the Saving tab from v11.8 deploy. Tab was created successfully (dimensions correct, light-blue color, title bar present, headers right). But **every formula on the tab was broken**. This session covers both bugs found during bring-up and their fixes.
+
+### Bug 1: `#REF!` everywhere (v11.8 → v11.9)
+
+- **Symptom:** `dumpSheet(Saving, A1:I7, includeFormulas=true)` showed literal `#REF!` replacing every named-range reference:
+  ```
+  Row 3 B3: =IFERROR(XLOOKUP(1,(#REF!<=TODAY())*(#REF!>=TODAY()),#REF!),"(out of range)")
+  Row 6 E6: =IF(B6="","",IFERROR(SUMIFS(#REF!,#REF!,B6,#REF!,$B$3),0))
+  ```
+  `PayPeriods_Start`, `PayPeriods_End`, `PayPeriods_Label`, `Budget_Available`, `Budget_Category`, `Budget_Period` — all replaced with `#REF!`.
+
+- **Diagnosis:** the Saving tab block in `updateWorkbook` ran BEFORE `setNamedRanges_`:
+  ```
+  updateWorkbook (v11.8 order — BUG):
+    1. cleanup whitespace
+    2. add Timestamp col if missing
+    3. build/refresh Saving tab   ← setFormula with PayPeriods_*, Budget_*
+    4. update Instructions
+    5. update Transactions formulas
+    6. update data validation
+    7. setNamedRanges_             ← deletes-and-recreates owned ranges
+    8. refresh Budget dashboard
+  ```
+  At step 3, the named ranges existed (from prior runs) so `setFormula` stored the formulas with valid refs. At step 7, `setNamedRanges_` removed each owned-prefix named range and immediately recreated it. **Sheets converts every formula referencing a being-deleted named range to a `#REF!` literal — and that conversion is one-way.** Recreating the same name with the same definition does not heal those broken formulas.
+
+  `buildWorkbook` was unaffected because there `setNamedRanges_` runs first and Saving builds last.
+
+- **Fix (v11.9):** moved the Saving tab block in `updateWorkbook` to immediately AFTER `setNamedRanges_`. Added a defensive comment at the moved location:
+  ```js
+  // ⚠️ MUST come AFTER setNamedRanges_. The Saving tab's formulas reference
+  // PayPeriods_*, Budget_*, etc. setNamedRanges_ deletes-and-recreates those
+  // names; Sheets converts any formula referencing a being-deleted named range
+  // to #REF! and DOES NOT heal it when the same name is recreated. Bug found
+  // in v11.8 first deploy; fix landed in v11.9.
+  ```
+
+### Bug 2: B3 returns "(out of range)" even when today is inside a period (v11.9 → v11.10)
+
+- **Symptom:** user ran Update Script again (to pick up v11.9 fix). Formulas now had correct named-range references. But B3 (Current Period dashboard cell) still showed `(out of range)` even though today was Apr 20, 2026 — clearly inside period 7 ("Apr 15 - 28"). User reported "per period need has an error":
+  ```
+  Row 3: ['Apr 20, 2026', '(out of range)', '1', '#DIV/0!', '$0.00', '$4,000.00', ...]
+  Row 6 (Europe trip goal, $4000 target, Dec 23 - Jan 5):
+         [..., 'Dec 23 - Jan 5', '$0.00', '', '#DIV/0!', 'JUST STARTING', ...]
+  ```
+
+- **Diagnosis (cascade from a single broken cell):**
+  - B3 returned `(out of range)` string
+  - F6 `=MATCH($B$3, PayPeriods_Label, 0) - MATCH(D6, PayPeriods_Label, 0)` → `#N/A - N` → `#N/A` → IFERROR caught → `""`
+  - G6 `=IF(F6<=0, 0, MAX(0, (C6-E6)/F6))` → `(4000-0)/""` → **`#DIV/0!`** (user-visible)
+  - H6 evaluated `MATCH($B$3, ...)` → `#N/A` → IFERROR caught in IFS branch → 0 → 0 ≤ 0.04 → returned `JUST STARTING` (misleadingly green for $0 saved)
+
+- **Root cause:** B3's original formula used
+  ```
+  XLOOKUP(1, (PayPeriods_Start<=TODAY())*(PayPeriods_End>=TODAY()), PayPeriods_Label)
+  ```
+  Relies on Google Sheets to auto-broadcast the element-wise multiplication of two boolean arrays as XLOOKUP's lookup vector. In practice Sheets does NOT reliably treat that multiplied expression as a lookup vector — XLOOKUP returned no-match and IFERROR returned the fallback string.
+
+- **Fix (v11.10):** swapped to INDEX+MATCH with `match_type=1`:
+  ```
+  =IFERROR(
+    IF(TODAY()>INDEX(PayPeriods_End, ROWS(PayPeriods_End)), "(out of range)",
+       INDEX(PayPeriods_Label, MATCH(TODAY(), PayPeriods_Start, 1))),
+    "(out of range)")
+  ```
+  Since `PayPeriods_Start` is ascending-sorted by design, `MATCH(TODAY(), PayPeriods_Start, 1)` finds the largest start date ≤ today — that's exactly the current period's row. IFERROR catches "today is earlier than all periods". The outer IF catches "today is later than period 25's end". Reliable and portable.
+
+  Also added defense-in-depth IFERROR on the G (Per-Period Need) formula, so any future malformed F never produces `#DIV/0!`:
+  ```
+  =IF(OR(B="",C="",D=""), "", IFERROR(IF(F<=0, 0, MAX(0, (C-E)/F)), ""))
+  ```
+
+### Lessons
+- **Named-range deletion is destructive to referencing formulas — even if the same name is recreated immediately after.** New code that sets formulas referencing named ranges MUST run AFTER `setNamedRanges_` in `updateWorkbook`. Now an ordering invariant. Added to CLAUDE.md trip-up #10.
+- **XLOOKUP in Sheets is unreliable with multiplied-boolean lookup vectors.** Not an obvious failure mode — the formula parses and executes without throwing, just returns no-match. Prefer `INDEX(labelRange, MATCH(target, sortedKeyRange, 1))` for the "find the row whose range contains the target" pattern when the key range is ascending-sorted. Added to CLAUDE.md trip-up #11.
+- **`dumpSheet?...&includeFormulas=true` is the verification tool of choice for sheet-building changes.** Values can look fine when formulas are broken (here: `$0.00` from IFERROR swallowing errors). Always diff the formula cells against intended syntax right after a Build/Update Script run.
+- **One broken cell can cascade into many user-visible errors.** B3 is the shared helper cell for the entire Saving tab. When it returned an invalid string, F/G/H all produced downstream errors. Defense-in-depth IFERROR on leaf formulas limits the blast radius.
+
+### Status
+- v11.9 deployed @29 (commit `58d3312`) — #REF! ordering fix
+- v11.10 deployed @30 (commit `dbb010d`) — B3 XLOOKUP replacement + G IFERROR defense
+- User needs to run Update Script ONE MORE TIME to overwrite broken formulas in their existing Saving tab with v11.10 versions
+- Budget model formulas unchanged (still brittle — user explicitly deferred redesign)
