@@ -1179,7 +1179,19 @@ Fixing (2) via rebuildBudgetInternal_ in v11.12. Telling user about (1) so they 
 - **`dumpSheet` with `includeFormulas=true` on MULTIPLE representative rows is the verification tool of choice.** Values alone hide the #REF! cascade because IFERROR swallows errors downstream. Always diff formula text post-update.
 - **Document blast radius for regression bugs.** Knowing this Budget #REF! was present across 4 updates helps the user understand why things seemed off.
 
-### Status
-- v11.12 deployed @32 (commit `612f5e4`)
-- User needs to run Update Script once more — Budget tab will be fully rebuilt
-- User should ALSO move the $222.22 from Apr 1-14 (row 77) to Apr 15-28 (row 87) if that was the intended period
+### Status — VERIFIED WORKING
+- v11.12 deployed @32 (commit `612f5e4`) + docs `8bf653b`
+- User ran Update Script. Post-run `dumpSheet` verification:
+  - **Zero `#REF!` cells across the entire Budget tab** (267 rows scanned)
+  - Budget row 8 (Groceries control) formulas resolve to `Transactions_Amount`, `Budget_Available`, `PayPeriods_Label` — all clean
+  - Budget row 77 (Europe / Apr 1-14) = $0 — user correctly moved their budget out
+  - Budget row 87 (Europe / Apr 15-28 current) = Budgeted $222.00, Available $222.00 — user moved the allocation here
+  - Saving tab row 6 (Europe goal): Currently Saved $222.00 · Allocated This Period $222.00 · Periods Remaining 18 · Needed Future Periods $222.24
+  - Saving dashboard: Currently Saved total $222.00, Needed Future total $222.24
+
+### Validation of the adaptive formula
+User budgeted $222.00 (rounded from the exact $222.22 initial suggestion). The Needed Future Periods formula correctly detected the $0.22 shortfall and shifted the future-period target to $222.24: `(4000 - 222) / (18 - 1) = $222.24`. If the user had budgeted the exact $222.22, the formula would have stayed at $222.22. This is the "stays constant when correct, adjusts when over/under" behavior we designed for — working exactly as intended with real user data.
+
+The two-bug situation that started this session is now fully resolved:
+- User error (budget in wrong period) — user fixed manually
+- Code bug (#REF! cascade across Budget tab) — fixed in v11.12 via rebuildBudgetInternal_

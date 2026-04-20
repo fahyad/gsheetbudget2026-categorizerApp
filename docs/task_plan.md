@@ -123,31 +123,27 @@ Three independent reviews (mine + 2 external) merged into a single 26-item plan,
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
 - **Status:** complete
 
-### Phase 17: Saving Tab — One-Time Goals (v11.8 → v11.10)
-Shipped in v11.8. Two bugs found and fixed during bring-up as the user first ran Update Script:
-- **v11.9 (#REF! cascade):** `updateWorkbook` built the Saving tab BEFORE `setNamedRanges_` ran. `setNamedRanges_` deletes-then-recreates each owned-prefix named range; Sheets converts any formula referencing a deleted named range to a `#REF!` literal, and the recreated same-name-same-definition does NOT heal the broken formulas. Fix: move Saving block to AFTER `setNamedRanges_` in `updateWorkbook`. buildWorkbook unaffected (already correct order there).
-- **v11.10 (B3 XLOOKUP unreliable):** Dashboard cell B3 (Current Period) used `XLOOKUP(1, (start<=today)*(end>=today), label)` which relied on Sheets to auto-broadcast multiplied boolean arrays as the lookup vector. In practice Sheets failed to match even when a match clearly existed → B3 returned the "(out of range)" fallback → cascaded into `#DIV/0!` in Per-Period Need. Fix: replaced with `INDEX(PayPeriods_Label, MATCH(TODAY(), PayPeriods_Start, 1))` plus outer IF for "today past the last period". Also added defense-in-depth IFERROR around the per-period division.
-
-Both patterns added to CLAUDE.md trip-up list (items #10 and #11).
-
-Original implementation:
-  
+### Phase 17: Saving Tab — One-Time Goals (v11.8 → v11.12)
 User wanted to track one-time savings goals like "Europe trip $5,000 by Oct 2026" and see what to budget per period to hit them. Implemented as a new tab on the existing Budget infrastructure — no new data model needed. The Available column on Budget already accumulates over time when nothing is spent against a category; that IS savings progress. The new Saving tab adds a goal-tracking layer with computed pace.
 
-Design decisions (per user input):
+Initial design decisions (per user input):
 - 1:1 goal:category mapping (one Setup category per goal).
 - Manual archive (just stop budgeting; row stays in Saving for record-keeping).
-- "Currently Saved" pulls from Budget Available for the period containing today (TODAY()-driven via XLOOKUP).
-- Pace formula: `expected = target × (current_idx / target_idx)`; status thresholds at 100% and 80%.
+- "Currently Saved" pulls from Budget Available for the period containing today.
 - Includes 6-metric dashboard at top.
-
-Layout: rows 1-3 dashboard (title + labels + values), row 4 separator, row 5 header (frozen), rows 6-105 goals. Cols A-D + I are user-entered, E-H are formulas, H has conditional formatting.
 
 Implementation: two new helpers (`buildSavingTab_` for full build, `refreshSavingTab_` for non-destructive refresh). Wired into both `buildWorkbook` and `updateWorkbook` — Update Script auto-creates the tab if it's missing, refreshes structure if it exists. No PWA changes, no API changes.
 
-User next steps: run Update Script (creates the tab), add a savings sub-category via PWA, fill row 6 of the Saving tab.
+**Four bring-up bugs found and fixed as the user first used the feature:**
+- **v11.9 (#REF! cascade):** `updateWorkbook` built the Saving tab BEFORE `setNamedRanges_` ran. `setNamedRanges_` deletes-then-recreates each owned-prefix named range; Sheets converts any formula referencing a deleted named range to a `#REF!` literal, and the recreated same-name-same-definition does NOT heal the broken formulas. Fix: move Saving block to AFTER `setNamedRanges_`. (buildWorkbook unaffected — already correct order there.)
+- **v11.10 (B3 XLOOKUP unreliable):** Dashboard cell B3 (Current Period) used `XLOOKUP(1, (start<=today)*(end>=today), label)` relying on Sheets to auto-broadcast multiplied boolean arrays as the lookup vector. Unreliable — XLOOKUP returned "no match" → B3 returned "(out of range)" → cascaded into `#DIV/0!` in Per-Period Need. Fix: replaced with `INDEX(PayPeriods_Label, MATCH(TODAY(), PayPeriods_Start, 1))` plus outer IF for "today past the last period". Also added defense-in-depth IFERROR around the per-period division.
+- **v11.11 (schema refactor):** initial Per-Period Need column drifted from $222 → $209 after user budgeted the suggested $222, confusingly, because the formula divided the remaining gap by all 18 remaining periods while Currently Saved already included the current-period allocation. Dropped "On Track?" column (text status with CF — redundant with the numeric columns, can return as dashboard feature later). Added "Allocated This Period" column showing Budget_Budgeted for current period. Rewrote "Needed Future Periods" as adaptive: when F>0 (current period allocated), divides by G-1 (future periods only); when F=0, divides by G (full remaining). Result: value stays constant when user budgets the previously-suggested amount, correctly adjusts up/down on over/under-budget.
+- **v11.12 (Budget #REF! across entire tab):** after v11.11 Update Script run, `dumpSheet` revealed every Budget per-row Spent and Available formula stored as `#REF!` — but dashboard formulas in the same tab resolved correctly. The in-place per-row refresh loop in `updateWorkbook` was silently failing to overwrite the broken formulas. Root cause unknown (suspected Apps Script state-commit quirk between `setNamedRanges_` and per-row `setFormula`). Fix: replace the in-place refresh loop with a call to `rebuildBudgetInternal_('refresh', ss)` — same code path `addCategory` uses and that works. Budgeted amounts preserved via existing `existingBudgetedMap`. **Bug was present in every Update Script run since v11.8 (~4 user-visible runs).**
 
-- **Status:** complete
+Verification after v11.12 Update Script: 0 `#REF!` cells across all 267 Budget rows; Saving tab showing correct values for the user's real Europe trip goal ($4,000 by Dec 23 - Jan 5, $222 budgeted current period → Needed Future Periods $222.24). The $0.22 shift from exact $222.22 reflects user-rounding and demonstrates the adaptive formula working as designed — validated on real user data.
+
+Patterns added to CLAUDE.md trip-up list (items #10, #11, #12).
+- **Status:** complete + verified working
 
 ### Phase 16: Slicer Crash Fix (v11.7)
 PWA `addCategory` was crashing with `TypeError: newSlicer.setColumnPosition is not a function` at the slicer-recreation step in `rebuildBudgetInternal_`. Google appears to have changed the Slicer API; the method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The crash propagated up through the handler, leaving the user with: Setup tab updated (succeeded), Budget tab rebuilt (succeeded), slicer in a broken half-state (old removed, new inserted but no filter column), and PWA showing a generic crash error.
@@ -169,7 +165,7 @@ The user falls behind on categorization sometimes. When a new pay period starts,
 
 ## Phases — Future
 
-### Phase 16: Auto-Categorization (not started)
+### Phase 18: Auto-Categorization (not started)
 - [ ] Merchant → category mapping table in sheet
 - [ ] Known merchants auto-categorize during parseAndFetch (skip the uncategorized queue)
 - [ ] Only unknown merchants need manual review in PWA
@@ -194,7 +190,7 @@ The user falls behind on categorization sometimes. When a new pay period starts,
 - But fragile — re-editing Due Day will likely break things
 - **Cleanup:** select C2:C5 → Format → Number → Plain → re-enter values
 
-### Phase 17: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
+### Phase 19: Deferred Audit Items (low priority — see findings.md "Apps Script Audit")
 - [x] Hardcoded 2026 in fixed-expenses formula → `BUDGET_YEAR` constant (B9, v11.6). PayPeriods array still hardcoded — annual rollover touches 2 places.
 - [ ] 999-row pre-filled formulas overhead (cleanup)
 - [ ] Pagination for very large uncategorized-transaction lists (no longer "Pending" — single ledger)
@@ -203,7 +199,8 @@ The user falls behind on categorization sometimes. When a new pay period starts,
 - [x] `handleAddCategory_` off-by-one — fixed (A5, v11.5): now returns explicit capacity error
 - [x] `setNamedRanges_` deletes all named ranges every time — fixed (B3, v11.5): scoped to owned prefixes
 - [ ] `rebuildBudgetInternal_` silently clears budget rows in add mode
-- **Status:** ongoing — 3 of 8 items resolved by Phase 14 review work
+- [ ] updateWorkbook in-place per-row setFormula loop silently fails (root cause unknown; v11.12 worked around by delegating to rebuildBudgetInternal_). Investigation deferred.
+- **Status:** ongoing — 3 of 9 items resolved by Phase 14 review work
 
 ## Workflow Reference (CRITICAL)
 
