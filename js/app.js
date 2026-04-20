@@ -36,6 +36,13 @@ const pwaVersionDisplay = document.getElementById('pwa-version-display');
 const asVersionDisplay = document.getElementById('as-version-display');
 const updateStatusRow = document.getElementById('update-status-row');
 const updateStatusDisplay = document.getElementById('update-status-display');
+const headerVersion = document.getElementById('header-version');
+
+// B5: populate header version from APP_VERSION constant so we have one source
+// of truth (config.js) instead of three (config.js + hardcoded HTML + sw.js).
+// sw.js still has its own CACHE_VERSION — that's a separate concern (cache
+// invalidation marker, bumped per-release).
+if (headerVersion) headerVersion.textContent = APP_VERSION;
 
 let selectedTimestamp = null;
 
@@ -261,7 +268,8 @@ async function sync() {
     store.clearSyncedItems(succeeded);
 
     if (failed.length === 0) {
-      showError('\u2713 ' + succeeded.length + ' transactions synced');
+      // B7: actual success uses showSuccess (green) instead of red error styling
+      showSuccess('\u2713 ' + succeeded.length + ' transactions synced');
     } else {
       showError(failed.length + ' failed to sync. Tap Sync to retry.');
     }
@@ -524,6 +532,16 @@ function showLoading(show) {
 
 let errorTimeout;
 function showError(message) {
+  errorToast.classList.remove('success');
+  errorToast.textContent = message;
+  errorToast.hidden = false;
+  clearTimeout(errorTimeout);
+  errorTimeout = setTimeout(() => { errorToast.hidden = true; }, 5000);
+}
+
+// B7: success counterpart. Same toast element, green styling via .success class.
+function showSuccess(message) {
+  errorToast.classList.add('success');
   errorToast.textContent = message;
   errorToast.hidden = false;
   clearTimeout(errorTimeout);

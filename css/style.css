@@ -455,7 +455,7 @@ header h1 {
   cursor: pointer;
 }
 
-/* Error toast */
+/* Error / success toast — same element, success state via .success class (B7) */
 #error-toast {
   position: fixed;
   top: 60px;
@@ -468,4 +468,7 @@ header h1 {
   font-size: 14px;
   z-index: 30;
   text-align: center;
+}
+#error-toast.success {
+  background: #2e7d32;
 }

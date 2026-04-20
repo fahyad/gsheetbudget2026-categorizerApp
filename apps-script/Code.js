@@ -34,8 +34,14 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.5';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:07 MDT';
+var APP_SCRIPT_VERSION = 'v11.6';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 19:16 MDT';
+
+// B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
+// month-by-month checks. PayPeriods data (lines ~1559-1566) is also
+// year-specific but kept hardcoded — annual rollover requires updating
+// BOTH this constant AND the PayPeriods array.
+var BUDGET_YEAR = 2026;
 var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
 
 // ================================================================
@@ -1116,8 +1122,18 @@ function showLogsTab() {
  *
  * Read/Write columns A (Date), B (Merchant), C (Amount), D (Category),
  * F (Tx#), and H (Timestamp) — skips E and G.
+ *
+ * ⚠️ DESTRUCTIVE RESCUE FUNCTION — DO NOT RUN WITHOUT A BACKUP.
+ * This rewrites every data row in-place. The "Rescue" suffix is to deter
+ * accidental triggering: NOT exposed via the Budget Tools menu. Run only
+ * from the Apps Script editor → function dropdown when explicitly fixing
+ * orphan rows.
+ *
+ * One-shot fix originally written for the v10 → v11 orphan-row cleanup
+ * (rows at 1001-1008 outside named ranges). Kept around in case the same
+ * class of bug ever recurs.
  */
-function consolidateTransactions() {
+function consolidateTransactionsRescue() {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var txn = ss.getSheetByName('Transactions');
@@ -1170,7 +1186,7 @@ function consolidateTransactions() {
   txn.getRange(2, 8, nonEmpty.length, 1).setValues(rowsH);
   SpreadsheetApp.flush();
 
-  logActivity_('consolidateTransactions', 0, 'success',
+  logActivity_('consolidateTransactionsRescue', 0, 'success',
     'Consolidated ' + nonEmpty.length + ' rows', '');
 
   ui.alert('Consolidation complete.\n\n' + nonEmpty.length + ' rows now at rows 2-' + (1 + nonEmpty.length) + '.');
@@ -1443,9 +1459,9 @@ function cleanupSetupWhitespace_(ss) {
  */
 function findNextEmptyRow_(sheet, maxRow) {
   // CRITICAL: cannot use getLastRow() alone — it counts formula-filled cells
-  // (even those returning "") as content. Transactions and Pending tabs have
-  // formulas pre-filled in rows 2-1000, so getLastRow() returns 1000 even when
-  // empty. We scan column A (always real data, never a formula column) instead.
+  // (even those returning "") as content. The Transactions tab has formulas
+  // pre-filled in rows 2-1000 (cols E, G), so getLastRow() returns 1000 even
+  // when empty. We scan column A (always real data, never a formula column).
   //
   // B1: throw if the next available row would land past the named-range
   // ceiling. Previously it would silently return 1001+, which produced
@@ -1790,21 +1806,17 @@ function updateWorkbook() {
       budget.getRange(row, 5).setFormula(
         '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + row + ',Transactions_Category,C' + row + ')'
       );
-      // Available formula: see v10.4 fix for IF(MATCH>1, ..., 0) rationale.
-      budget.getRange(row, 6).setFormula(
-        '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
-          'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
-          '0)+D' + row + '-E' + row
-      );
+      // Available formula: see buildAvailableFormula_ helper (v10.4 wrap fix).
+      budget.getRange(row, 6).setFormula(buildAvailableFormula_(row));
     }
   }
 
   ui.alert(
     'Script updated!\n\n' +
     'Formulas, named ranges, and data validation have been refreshed.\n' +
-    'Pending tab verified/created.\n' +
+    'Transactions tab Timestamp column verified/added.\n' +
     'Budget dashboard refreshed.\n' +
-    'Your data (transactions, budgeted amounts, pending) was NOT changed.\n' +
+    'Your data (transactions, budgeted amounts) was NOT changed.\n' +
     'Instructions tab has been updated.\n\n' +
     'NOTE: If your Budget tab still shows old _income rows, run\n' +
     '"Initialize Budget" to fully migrate to the new layout.'
@@ -1830,7 +1842,7 @@ function processInfoAlerts() {
   if (result.parsed === 0 && result.threads === 0) {
     report = 'No new infoalert emails found.\n\nAll Scotiabank alerts have already been processed.';
   }
-  report += '\n\nCheck the Pending tab to see them.';
+  report += '\n\nCheck the Transactions tab — newly-parsed rows have an empty Category column (PWA will pick them up).';
   ui.alert(report);
 }
 
@@ -2106,7 +2118,7 @@ function buildInstructionsTab_(sheet) {
     ['Fixed Monthly    — Recurring expenses (rent, phone, etc.)', 10, false, null, null],
     ['Budget           — Budgeted vs Spent per period', 10, false, null, null],
     ['Transactions     — All categorized transactions', 10, false, null, null],
-    ['Pending          — Email-parsed, waiting categorization', 10, false, null, null],
+    ['(v11.0+: Pending tab removed — Transactions is the single ledger)', 10, false, null, null],
     ['Logs             — API activity log (debugging)', 10, false, null, null],
     ['Instructions     — This tab (with version info at top)', 10, false, null, null],
     ['', 10, false, null, null],
@@ -2116,7 +2128,7 @@ function buildInstructionsTab_(sheet) {
     ['Initialize Budget      ⚠ Resets Budget rows (keeps amounts).', 11, true, '#fff9c4', '#f57f17'],
     ['Update Script          ✓ Safe. Refresh formulas after deploy.', 11, true, '#c8e6c9', '#1b5e20'],
     ['Add Category           ✓ Adds Budget rows for new categories.', 11, true, '#c8e6c9', '#1b5e20'],
-    ['Parse Emails           ✓ Pulls bank emails into Pending tab.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Parse Emails           ✓ Pulls bank emails into Transactions (uncategorized).', 11, true, '#c8e6c9', '#1b5e20'],
     ['Set API Key            ✓ Required for PWA to authenticate.', 11, true, '#c8e6c9', '#1b5e20'],
     ['View Activity Log      ℹ Opens Logs tab.', 11, false, '#f5f5f5', '#424242'],
     ['Refresh Version Info   ℹ Re-checks GitHub for latest version.', 11, false, '#f5f5f5', '#424242'],
@@ -2131,7 +2143,7 @@ function buildInstructionsTab_(sheet) {
 
     ['DAILY USE', 13, true, '#e8eaf6', '#1a237e'],
     ['1. Open the PWA on your phone', 10, false, null, null],
-    ['2. Tap Refresh — pulls new transactions into Pending', 10, false, null, null],
+    ['2. Tap Refresh — pulls new uncategorized transactions', 10, false, null, null],
     ['3. Tap each transaction → tap a category', 10, false, null, null],
     ['4. Tap Sync — writes them to the Transactions tab', 10, false, null, null],
     ['5. Check Budget tab for updated Spent / Available', 10, false, null, null],
@@ -2333,15 +2345,35 @@ function buildPaycheckFormula_(periodCellRef) {
 }
 
 /**
+ * Returns the Budget tab "Available" formula for a given row.
+ * Format: `prevPeriodAvailable + Budgeted - Spent`.
+ * The IF(MATCH>1, ..., 0) wrapper avoids the period-1 INDEX-with-row-0
+ * circular-reference bug fixed in v10.4.
+ *
+ * B10: was duplicated in two places (rebuildBudgetInternal_ for full
+ * rebuild, processInfoAlerts-adjacent path for incremental). Centralized
+ * here so future formula edits land in one place.
+ */
+function buildAvailableFormula_(row) {
+  return '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
+    'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
+    '0)+D' + row + '-E' + row;
+}
+
+/**
  * Returns the formula for "Fixed expenses due in selected period" (positive).
- * Sums across 13 months (Jan 2026 - Jan 2027) any fixed expense whose
- * DATE(2026, M, dueDay) falls within the period's start/end range.
+ * Sums across 13 months (Jan BUDGET_YEAR - Jan BUDGET_YEAR+1) any fixed
+ * expense whose DATE(BUDGET_YEAR, M, dueDay) falls within the period's
+ * start/end range.
  * @param periodCellRef e.g. '$B$1' (the dashboard period dropdown cell)
+ *
+ * B9: year was hardcoded inline; now sourced from BUDGET_YEAR constant
+ * at the top of the file. Bump there once per year.
  */
 function buildFixedExpensesFormula_(periodCellRef) {
   var monthChecks = [];
   for (var m = 1; m <= 13; m++) {
-    monthChecks.push('((DATE(2026,' + m + ',dd)>=s)*(DATE(2026,' + m + ',dd)<=e))');
+    monthChecks.push('((DATE(' + BUDGET_YEAR + ',' + m + ',dd)>=s)*(DATE(' + BUDGET_YEAR + ',' + m + ',dd)<=e))');
   }
   return '=IFERROR(LET(' +
     's,INDEX(PayPeriods_Start,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
@@ -2483,17 +2515,14 @@ function rebuildBudgetInternal_(mode, ss) {
   }
   budget.getRange(DATA_START_ROW, 2, totalRows, 1).setFormulas(formulasB);
 
-  // Columns E (Spent) and F (Available) — formulas
-  // Available wraps in IF(MATCH>1, ..., 0) to avoid the period-1 INDEX-with-row-0
-  // circular-reference bug fixed in v10.4.
+  // Columns E (Spent) and F (Available) — formulas.
+  // Available formula centralized in buildAvailableFormula_ (B10).
   var formulasEF = [];
   for (var ef = 0; ef < totalRows; ef++) {
     var efRow = ef + DATA_START_ROW;
     formulasEF.push([
       '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
-      '=IF(MATCH(A' + efRow + ',PayPeriods_Label,0)>1,' +
-        'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + efRow + ',PayPeriods_Label,0)-1),Budget_Category,C' + efRow + '),0),' +
-        '0)+D' + efRow + '-E' + efRow
+      buildAvailableFormula_(efRow)
     ]);
   }
   budget.getRange(DATA_START_ROW, 5, totalRows, 2).setFormulas(formulasEF);

@@ -1,6 +1,6 @@
 // PWA version info — bumped manually on each meaningful release.
 // Displayed in the Setup screen so the user can confirm the running version.
-export const APP_VERSION = 'v0.9';
+export const APP_VERSION = 'v0.10';
 export const APP_LAST_EDITED = '2026-04-19';
 
 // Hardcoded production deployment URL. Safe to expose (public anyway — visible in

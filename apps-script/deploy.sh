@@ -26,9 +26,12 @@ fi
 
 cd "$(dirname "$0")"
 
-# Update the LAST_EDITED timestamp in Code.js to right now
+# Update the LAST_EDITED timestamp in Code.js to right now.
+# B8: use sed -i.bak (portable across BSD/macOS and GNU/Linux) and then
+# remove the .bak file. The previous `sed -i ''` form was BSD-only and
+# silently broke on Linux.
 TIMESTAMP=$(date "+%Y-%m-%d %H:%M %Z")
-sed -i '' "s|^var APP_SCRIPT_LAST_EDITED = .*|var APP_SCRIPT_LAST_EDITED = '$TIMESTAMP';|" Code.js
+sed -i.bak "s|^var APP_SCRIPT_LAST_EDITED = .*|var APP_SCRIPT_LAST_EDITED = '$TIMESTAMP';|" Code.js && rm -f Code.js.bak
 
 # Read the VERSION constant out of Code.js (single source of truth — bump manually)
 VERSION=$(grep "^var APP_SCRIPT_VERSION" Code.js | sed "s/.*'\(.*\)';/\1/")

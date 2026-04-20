@@ -156,7 +156,7 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 
 5. **Categories tab is named "Setup", not "Categories".** Categories live in Setup `D2:E100` (Main, Sub).
 
-6. **Pending tab uses `status='pending'` to gate inclusion.** Once status is "categorized", parseAndFetch ignores it.
+6. **PWA gating on Transactions tab is `Category="" AND Timestamp set`.** Empty Category = "uncategorized." Manual rows (blank Timestamp) are invisible to the PWA by design.
 
 7. **API key is in Apps Script Script Properties** (set via Budget Tools → Set API Key menu). Never hardcoded.
 
