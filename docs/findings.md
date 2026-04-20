@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.7 Apps Script + v0.11 PWA, single-ledger architecture). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.8 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab for one-time goals). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.

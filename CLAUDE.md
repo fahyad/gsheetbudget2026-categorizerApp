@@ -27,7 +27,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.7 (single-ledger + 4 phases of review-driven work + Slicer crash fix; see `docs/progress.md` 2026-04-19 entries)
+- **Apps Script:** v11.8 (single-ledger + 4 phases of review-driven work + Slicer crash fix + new Saving tab for one-time goals; see `docs/progress.md` 2026-04-19 entries)
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
 
 ## Common commands
@@ -76,7 +76,7 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 
 Caps at 10000 cells per request. Read-only (no writes). API-key gated.
 
-Tabs in this sheet (v11.0+): `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Transactions`.
+Tabs in this sheet (v11.8+): `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Transactions`, `Saving`.
 
 **Pending tab REMOVED in v11.0** — single-ledger architecture. The Transactions tab now holds:
 - All categorized transactions (manual + email-parsed + PWA-categorized)
@@ -90,6 +90,13 @@ PWA reads Transactions where Category="" AND Timestamp is set. Categorize action
 - H: Timestamp (NEW in v11.0 — precise datetime from email; blank for manual entries)
 
 **Categorization rule:** PWA only sees rows where `Category=""` AND `Timestamp` is set. Manual rows (Timestamp blank) are invisible to PWA — by design, they're already categorized.
+
+**Saving tab layout (v11.8+):** 9 columns A-I, dashboard at rows 1-3, header at row 5, goals at rows 6-105 (up to 100 goals).
+- A: Goal Name | B: Linked Category (dropdown) | C: Target | D: Target Period (dropdown)
+- E-H: computed (Currently Saved, Periods Left, Per-Period Need, On Track? with conditional formatting)
+- I: Notes
+- Dashboard B3 has the "current period" XLOOKUP that all per-row formulas reference. Don't move it.
+- Tab gets created automatically by Update Script if missing — no migration step needed.
 
 **Budget tab layout (v10.5+):**
 - **Rows 1-6:** Dashboard (display only). B1 = period dropdown. Row 4 shows Net Income / Fixed Expenses / Total Budgeted / Ready to Assign for the selected period. F1 shows period progress ("Day X of Y").

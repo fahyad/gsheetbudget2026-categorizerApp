@@ -5,7 +5,7 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.7 — Single-ledger + 4 phases of integrated-review work (v11.3 → v11.6) + Slicer crash fix (v11.7). The slicer fix addresses a Google API change where `Slicer.setColumnPosition()` started throwing TypeError in web-app context, breaking PWA `addCategory`. See `docs/progress.md` for detailed breakdowns.
+- **Apps Script:** v11.8 — Single-ledger + 4 phases of integrated-review work + Slicer crash fix + new Saving tab for one-time goals. Saving tab has dashboard + 9 columns; pulls "currently saved" from Budget Available; computes pace and shows DONE / ON PACE / CLOSE / BEHIND / OVERDUE color-coded status. See `docs/progress.md` for detailed breakdowns.
 - **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
@@ -121,6 +121,24 @@ Three independent reviews (mine + 2 external) merged into a single 26-item plan,
 - **Phase 2 (v11.4):** A3 res.ok HTTP status check (was masking 500s as JSON parse errors); A4 sync/undo race guard; A6 refresh button debounce; A8 handleUncategorize_ no-match returns error (was silent success); A9 localStorage quota guard with fallback recovery.
 - **Phase 3 (v11.5):** A2 batched verify-read in handleBatchCategorize_ (~30x fewer reads on a 30-item batch); A5 handleAddCategoryInner_ capacity error instead of silent overflow; A7 stricter setAllowInvalid validation; B1 findNextEmptyRow_ throws past row 1000 (was silently writing orphans); B3 setNamedRanges_ scoped to owned prefixes; B4 beforeunload prompt actually fires now.
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
+- **Status:** complete
+
+### Phase 17: Saving Tab — One-Time Goals (v11.8)
+User wanted to track one-time savings goals like "Europe trip $5,000 by Oct 2026" and see what to budget per period to hit them. Implemented as a new tab on the existing Budget infrastructure — no new data model needed. The Available column on Budget already accumulates over time when nothing is spent against a category; that IS savings progress. The new Saving tab adds a goal-tracking layer with computed pace.
+
+Design decisions (per user input):
+- 1:1 goal:category mapping (one Setup category per goal).
+- Manual archive (just stop budgeting; row stays in Saving for record-keeping).
+- "Currently Saved" pulls from Budget Available for the period containing today (TODAY()-driven via XLOOKUP).
+- Pace formula: `expected = target × (current_idx / target_idx)`; status thresholds at 100% and 80%.
+- Includes 6-metric dashboard at top.
+
+Layout: rows 1-3 dashboard (title + labels + values), row 4 separator, row 5 header (frozen), rows 6-105 goals. Cols A-D + I are user-entered, E-H are formulas, H has conditional formatting.
+
+Implementation: two new helpers (`buildSavingTab_` for full build, `refreshSavingTab_` for non-destructive refresh). Wired into both `buildWorkbook` and `updateWorkbook` — Update Script auto-creates the tab if it's missing, refreshes structure if it exists. No PWA changes, no API changes.
+
+User next steps: run Update Script (creates the tab), add a savings sub-category via PWA, fill row 6 of the Saving tab.
+
 - **Status:** complete
 
 ### Phase 16: Slicer Crash Fix (v11.7)

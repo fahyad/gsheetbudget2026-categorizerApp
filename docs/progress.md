@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.7 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.8 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
 > **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
 >
@@ -873,3 +873,71 @@ User impact: addCategory works again. The user's existing slicer is in the broke
 - v11.7 deployed @27 (commit `90d7bf0`)
 - Budget formula model unchanged (deferred per user)
 - Slicer crash fix landed; user needs one-time manual slicer column setup
+
+## Session: 2026-04-19 (later 3) — Saving Tab for One-Time Goals (v11.8)
+
+### Setup
+User wanted to track one-time savings goals (e.g., "Europe trip $5,000 by Oct 2026") with auto-computed per-period contribution targets. Originally surfaced earlier this same day but tabled when the Budget miscalculation/Slicer issues took priority. Resumed after those landed.
+
+### Design recap (questions + answers)
+1. **Goal/category mapping?** → 1:1 (one Setup category per goal).
+2. **After goal achieved?** → Manual archive (just stop budgeting; row stays).
+3. **"Currently Saved" period reference?** → Period containing today (TODAY()-driven).
+4. **On-track formula?** → Pace-based: `target × (current_idx / target_idx)`; thresholds at 100% (green) and 80% (yellow).
+5. **Dashboard?** → Yes — total per-period need, currently saved, target.
+
+### Key insight: no new data model needed
+The Available column on Budget already accumulates over time when nothing is spent against a category. That IS savings progress — same machinery, different temporal pattern (regular categories oscillate near zero, savings categories grow). Saving tab is purely a goal-tracking layer that pulls from existing Budget data.
+
+This avoids:
+- New named ranges
+- Changes to the categorize/sync pipeline
+- PWA changes
+- Apps Script handler changes (no new API endpoints)
+
+### Implementation
+Two helpers added in Code.js:
+- `buildSavingTab_(saving, ss)` — destructive full build. Sets column widths, calls applySavingStructure_, freezes 5 rows.
+- `refreshSavingTab_(saving, ss)` — non-destructive refresh. Preserves user data in cols A,B,C,D,I; rewrites only structural pieces. Used by Update Script.
+- `applySavingStructure_(saving, ss)` — shared. Rebuilds title bar, dashboard formulas, header row, computed-column formulas, validations, conditional formatting.
+
+Wired into:
+- `buildWorkbook` tabNames list (now 6 tabs: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Saving)
+- `buildWorkbook` calls `buildSavingTab_(sheets['Saving'], ss)` after other tab builds; alert message updated to mention "6 tabs created"
+- `updateWorkbook` checks `ss.getSheetByName('Saving')`; calls `buildSavingTab_` if missing, `refreshSavingTab_` if exists
+- Instructions tab: TABS list updated (added Saving line), new "SAVING GOALS (one-time purchases)" section explains the workflow
+
+### Tab structure
+```
+Row 1: SAVING GOALS — 2026 BUDGET YEAR  (merged title bar)
+Row 2: Today | Current Period | Total Goals | Per-Period Need | Currently Saved | Target Total
+Row 3: <date> | <XLOOKUP curr period> | =COUNTA | =SUM(G) | =SUM(E) | =SUM(C)
+Row 4: separator
+Row 5: Goal Name | Linked Category | Target | Target Period | Currently Saved | Periods Left | Per-Period Need | On Track? | Notes
+Row 6+: user-entered goals (up to 100)
+```
+
+The B3 cell holds the "current period" XLOOKUP that all per-row formulas reference — it's the linchpin.
+
+### Per-row formulas
+- E (Currently Saved): `=IF(B="","",IFERROR(SUMIFS(Budget_Available,Budget_Category,B,Budget_Period,$B$3),0))`
+- F (Periods Remaining): `=IF(D="","",MATCH(D,PayPeriods_Label,0)-MATCH($B$3,PayPeriods_Label,0))` — negative means overdue
+- G (Per-Period Need): `=IF(any-blank,"",IF(F<=0,0,MAX(0,(C-E)/F)))`
+- H (On Track?): IFS chain — DONE / OVERDUE / JUST STARTING / ON PACE / CLOSE / BEHIND, with conditional formatting on each text value
+
+### User next steps
+1. **Open the budget sheet → Budget Tools → 3. Update Script (safe).** This creates the Saving tab automatically since it doesn't exist yet.
+2. Add a savings sub-category via PWA: e.g., Add Category → Main: "Savings", Sub: "Europe trip". This makes "Europe trip" available in the Saving tab's Linked Category dropdown AND adds Budget rows for it.
+3. Open Saving tab, fill row 6: Goal Name="Europe trip", Linked Category="Europe trip", Target=5000, Target Period="Oct 14 - 27", Notes="Flights + hotel".
+4. Computed columns (E-H) auto-fill. Status color shows pace.
+5. Each pay period, set Budget tab Budgeted column for that category to the Per-Period Need shown. Available accumulates until you spend.
+
+### Lessons
+- **The cleanest features build on existing infrastructure.** Saving goals could've been a brand-new data model with its own pipeline; instead it reuses Budget's Available column. Result: ~290 lines of new code, all in the sheet-building path, zero changes to the data flow.
+- **Dashboard formulas via XLOOKUP elegantly handle "what's the current period?"** without needing to enumerate or hardcode anything. Single helper cell ($B$3) referenced by all per-row formulas keeps the chain auditable.
+- **Conditional formatting via Apps Script is verbose but worth it.** Six status values × six rules = 30 lines, but the user gets immediate visual feedback on goal pace without manual color-management.
+
+### Status
+- v11.8 deployed @28 (commit `5b00dc0`)
+- User needs to run Update Script to create the Saving tab in their existing sheet
+- No PWA changes; no API contract changes
