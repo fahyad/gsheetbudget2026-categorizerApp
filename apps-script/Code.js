@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.11';
-var APP_SCRIPT_LAST_EDITED = '2026-04-20 09:48 MDT';
+var APP_SCRIPT_VERSION = 'v11.12';
+var APP_SCRIPT_LAST_EDITED = '2026-04-20 10:01 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -1778,62 +1778,31 @@ function updateWorkbook() {
     refreshSavingTab_(saving, ss);
   }
 
-  // --- Refresh Budget tab dashboard (rows 1-6) and header (row 7) ---
-  // (rewriting these defensively in case a previous bad updateWorkbook
-  // clobbered them with stale formulas)
-  buildBudgetDashboard_(budget);
-  budget.getRange(7, 1, 1, 6)
-    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
-    .setFontWeight('bold').setBackground('#d9ead3');
-  // Clear any stray formulas in row 7 cols B/E/F (left over from the v11.0/11.1 bug)
-  budget.getRange(7, 2).clearContent();
-  budget.getRange(7, 5).clearContent();
-  budget.getRange(7, 6).clearContent();
-  budget.getRange(7, 1, 1, 6)
-    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']]);
-
   // --- Update Budget category formulas ---
-  // Only refresh rows where col A is a valid PayPeriods_Label (i.e., a real
-  // data row). This skips the dashboard rows (1-6 with labels like "Net
-  // Income" in A3) and the header row (7 with "Period" in A7).
-  // Pre-load PayPeriods_Label into a Set for O(1) membership check.
-  var validPeriods = {};
-  var labelData = setup.getRange('C2:C27').getValues();
-  for (var p = 0; p < labelData.length; p++) {
-    if (labelData[p][0]) validPeriods[labelData[p][0]] = true;
-  }
-
-  var lastRow = budget.getLastRow();
-  if (lastRow > 1) {
-    var budgetData = budget.getRange(2, 1, lastRow - 1, 4).getValues();
-
-    for (var i = 0; i < budgetData.length; i++) {
-      var row = i + 2;
-      var period = budgetData[i][0];
-      var category = budgetData[i][2];
-
-      // Skip if A is not a valid period label (dashboard rows, header row, blanks)
-      if (!period || !validPeriods[period]) continue;
-      // Skip _income rows (legacy — should be removed via Initialize Budget) and blanks
-      if (!category || category === '_income') continue;
-
-      budget.getRange(row, 2).setFormula(
-        '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + row + ',Setup!$E$2:$E$100,0)),"")'
-      );
-      budget.getRange(row, 5).setFormula(
-        '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + row + ',Transactions_Category,C' + row + ')'
-      );
-      // Available formula: see buildAvailableFormula_ helper (v10.4 wrap fix).
-      budget.getRange(row, 6).setFormula(buildAvailableFormula_(row));
-    }
+  // v11.12: replaced the in-place per-row refresh loop with a full rebuild
+  // via rebuildBudgetInternal_. The in-place loop was silently failing —
+  // the Budget dashboard formulas would be refreshed (working named-range
+  // refs) but the per-row formulas (rows 8+) would stay as `#REF!` even
+  // after their setFormula calls. Unknown root cause (suspected Apps Script
+  // state-commit quirk between setNamedRanges_ and per-row setFormula), but
+  // rebuildBudgetInternal_ has the same-session code path that addCategory
+  // uses — which does work — so we use that path here too.
+  //
+  // rebuildBudgetInternal_ preserves user-entered Budgeted amounts via
+  // existingBudgetedMap. In 'refresh' mode (no new categories), it does
+  // a full Budget rebuild without touching the Saving tab or other tabs.
+  SpreadsheetApp.flush(); // ensure setNamedRanges_ state is committed
+  var rebuildResult = rebuildBudgetInternal_('refresh', ss);
+  if (rebuildResult && rebuildResult.error) {
+    console.error('updateWorkbook: Budget rebuild failed:', rebuildResult.error);
   }
 
   ui.alert(
     'Script updated!\n\n' +
     'Formulas, named ranges, and data validation have been refreshed.\n' +
     'Transactions tab Timestamp column verified/added.\n' +
-    'Budget dashboard refreshed.\n' +
-    'Your data (transactions, budgeted amounts) was NOT changed.\n' +
+    'Budget rebuilt (dashboard + all category rows; preserved Budgeted amounts).\n' +
+    'Saving tab created/refreshed.\n' +
     'Instructions tab has been updated.\n\n' +
     'NOTE: If your Budget tab still shows old _income rows, run\n' +
     '"Initialize Budget" to fully migrate to the new layout.'
