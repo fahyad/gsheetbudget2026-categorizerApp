@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.7';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 20:13 MDT';
+var APP_SCRIPT_VERSION = 'v11.8';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 20:29 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -1544,7 +1544,7 @@ function buildWorkbook() {
   // --- Create / get tabs ---
   // (Pending tab removed in v11.0 — single-ledger architecture; Transactions
   // is now the source of truth, with empty Category = "needs categorization".)
-  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions'];
+  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions', 'Saving'];
   var sheets = {};
   for (var t = 0; t < tabNames.length; t++) {
     var name = tabNames[t];
@@ -1696,9 +1696,12 @@ function buildWorkbook() {
     if (cols > 0) allSheets[s].autoResizeColumns(1, cols);
   }
 
+  // Build Saving tab (one-time goal tracker)
+  buildSavingTab_(sheets['Saving'], ss);
+
   ui.alert(
     'Workbook built!\n\n' +
-    '5 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions\n' +
+    '6 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Saving\n' +
     'Logs tab will be created on first API call.\n' +
     '4 fixed expenses defined (add more anytime — no script needed)\n' +
     '16 named ranges defined\n\n' +
@@ -1739,6 +1742,15 @@ function updateWorkbook() {
     txn.getRange('H1').setValue('Timestamp')
       .setFontWeight('bold').setBackground('#d9ead3');
     txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  }
+
+  // --- Saving tab (v11.8): create if missing, refresh structure if exists ---
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) {
+    saving = ss.insertSheet('Saving');
+    buildSavingTab_(saving, ss);
+  } else {
+    refreshSavingTab_(saving, ss);
   }
 
   // --- Update Instructions tab ---
@@ -2091,6 +2103,264 @@ function setNamedRanges_(ss, setup, fixed, budget, txn) {
 }
 
 // ================================================================
+// SAVING TAB BUILDER (v11.8) — one-time goal tracker
+// ================================================================
+//
+// Layout:
+//   Row 1: merged title bar
+//   Row 2: dashboard labels (Today | Current Period | Total Goals |
+//          Per-Period Need | Currently Saved | Target Total)
+//   Row 3: dashboard formula values
+//   Row 4: blank separator
+//   Row 5: column headers (frozen)
+//   Row 6+: user-entered goals + computed columns
+//
+// Columns:
+//   A: Goal Name (text, user)
+//   B: Linked Category (dropdown from CategoryList, user)
+//   C: Target Amount (currency, user)
+//   D: Target Period (dropdown from PayPeriods_Label, user)
+//   E: Currently Saved (formula, currency)
+//   F: Periods Remaining (formula, integer)
+//   G: Per-Period Need (formula, currency)
+//   H: On Track? (formula, text + conditional formatting)
+//   I: Notes (text, user)
+//
+// "Currently Saved" pulls Budget Available for the linked category in the
+// period containing today (TODAY()-driven via XLOOKUP against PayPeriods).
+// Empty/incomplete goals show "" in computed columns — they don't pollute
+// dashboard sums (SUM ignores text).
+//
+// "On Track?" status:
+//   DONE          — current saved >= target (green)
+//   OVERDUE       — past target period, didn't reach (red)
+//   JUST STARTING — current period is start of budget year (green)
+//   ON PACE       — saved >= target × (elapsed/total) (green)
+//   CLOSE         — saved >= target × (elapsed/total) × 0.8 (yellow)
+//   BEHIND        — below 0.8× pace (red)
+// "" if goal isn't fully defined.
+
+var SAVING_TITLE_BG = '#1a237e';
+var SAVING_HDR_BG = '#d9ead3';
+var SAVING_DASHBOARD_LABEL_BG = '#e8eaf6';
+var SAVING_MAX_GOAL_ROW = 105; // 100 goals supported (rows 6-105)
+
+function buildSavingTab_(saving, ss) {
+  saving.clear();
+  saving.setTabColor('#a4c2f4'); // light blue
+
+  // Hide unused columns past I.
+  if (saving.getMaxColumns() > 9) {
+    saving.hideColumns(10, saving.getMaxColumns() - 9);
+  }
+
+  // Column widths.
+  saving.setColumnWidth(1, 200); // A: Goal Name
+  saving.setColumnWidth(2, 170); // B: Linked Category
+  saving.setColumnWidth(3, 110); // C: Target Amount
+  saving.setColumnWidth(4, 130); // D: Target Period
+  saving.setColumnWidth(5, 130); // E: Currently Saved
+  saving.setColumnWidth(6, 100); // F: Periods Remaining
+  saving.setColumnWidth(7, 130); // G: Per-Period Need
+  saving.setColumnWidth(8, 120); // H: On Track?
+  saving.setColumnWidth(9, 250); // I: Notes
+
+  applySavingStructure_(saving, ss);
+
+  saving.setFrozenRows(5);
+}
+
+/**
+ * Refreshes the Saving tab structure WITHOUT touching user-entered data
+ * (cols A, B, C, D, I in rows 6+). Computed columns E-H are formulas, so
+ * overwriting them is safe. Title, dashboard, header, validations, CF —
+ * all rebuilt to ensure they match the latest schema.
+ */
+function refreshSavingTab_(saving, ss) {
+  // Don't clear — we'd nuke user goals. Just re-apply structure.
+  // Existing formulas in E-H get overwritten, but they're identical to
+  // what they were, so net no effect.
+  applySavingStructure_(saving, ss);
+
+  // Ensure column widths (in case user resized).
+  saving.setColumnWidth(1, 200);
+  saving.setColumnWidth(2, 170);
+  saving.setColumnWidth(3, 110);
+  saving.setColumnWidth(4, 130);
+  saving.setColumnWidth(5, 130);
+  saving.setColumnWidth(6, 100);
+  saving.setColumnWidth(7, 130);
+  saving.setColumnWidth(8, 120);
+  saving.setColumnWidth(9, 250);
+
+  saving.setFrozenRows(5);
+
+  if (!saving.getTabColorObject() || saving.getTabColorObject().asRgbColor().asHexString() !== '#a4c2f4') {
+    saving.setTabColor('#a4c2f4');
+  }
+}
+
+/**
+ * Applies title bar + dashboard + header + formulas + validations + CF.
+ * Used by both buildSavingTab_ (after clear) and refreshSavingTab_ (preserve mode).
+ */
+function applySavingStructure_(saving, ss) {
+  // --- Row 1: title bar ---
+  var titleRange = saving.getRange('A1:I1');
+  saving.getRange('A1').setValue('SAVING GOALS — ' + BUDGET_YEAR + ' BUDGET YEAR');
+  titleRange.merge()
+    .setBackground(SAVING_TITLE_BG)
+    .setFontColor('#ffffff')
+    .setFontWeight('bold')
+    .setFontSize(14)
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+  saving.setRowHeight(1, 32);
+
+  // --- Row 2: dashboard labels ---
+  saving.getRange('A2:F2').setValues([[
+    'Today', 'Current Period', 'Total Goals',
+    'Per-Period Need', 'Currently Saved', 'Target Total'
+  ]])
+    .setBackground(SAVING_DASHBOARD_LABEL_BG)
+    .setFontWeight('bold')
+    .setFontColor('#1a237e')
+    .setHorizontalAlignment('center');
+  // Cols G-I in row 2 are blank — make them visually unobtrusive.
+  saving.getRange('G2:I2').setBackground('#fafafa');
+
+  // --- Row 3: dashboard values ---
+  // B3 (Current Period) is the helper cell referenced by all per-row
+  // formulas. XLOOKUP returns the period whose start <= today <= end.
+  // If today is outside any period, returns "(out of range)".
+  var lastGoalRow = SAVING_MAX_GOAL_ROW; // 105
+  saving.getRange('A3').setFormula('=TEXT(TODAY(),"MMM D, YYYY")');
+  saving.getRange('B3').setFormula(
+    '=IFERROR(XLOOKUP(1,(PayPeriods_Start<=TODAY())*(PayPeriods_End>=TODAY()),PayPeriods_Label),"(out of range)")'
+  );
+  saving.getRange('C3').setFormula('=COUNTA(A6:A' + lastGoalRow + ')');
+  saving.getRange('D3').setFormula('=SUM(G6:G' + lastGoalRow + ')');
+  saving.getRange('E3').setFormula('=SUM(E6:E' + lastGoalRow + ')');
+  saving.getRange('F3').setFormula('=SUM(C6:C' + lastGoalRow + ')');
+  saving.getRange('A3:F3').setHorizontalAlignment('center').setFontSize(11);
+  saving.getRange('D3').setNumberFormat('$#,##0.00');
+  saving.getRange('E3').setNumberFormat('$#,##0.00');
+  saving.getRange('F3').setNumberFormat('$#,##0.00');
+
+  // --- Row 4: separator (light gray bar) ---
+  saving.getRange('A4:I4').setBackground('#fafafa');
+  saving.setRowHeight(4, 8);
+
+  // --- Row 5: column headers ---
+  saving.getRange('A5:I5').setValues([[
+    'Goal Name', 'Linked Category', 'Target', 'Target Period',
+    'Currently Saved', 'Periods Left', 'Per-Period Need', 'On Track?', 'Notes'
+  ]])
+    .setBackground(SAVING_HDR_BG)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center');
+
+  // --- Cols E, F, G, H rows 6-lastGoalRow: computed formulas ---
+  // Reference $B$3 (current period helper). Each row's formula references
+  // its own A, B, C, D values. Empty rows produce empty strings — SUM in
+  // dashboard ignores them.
+  var formulaRows = [];
+  for (var r = 6; r <= lastGoalRow; r++) {
+    formulaRows.push([
+      // E: Currently Saved
+      '=IF(B' + r + '="","",IFERROR(SUMIFS(Budget_Available,Budget_Category,B' + r + ',Budget_Period,$B$3),0))',
+      // F: Periods Remaining (target idx - current idx). Negative = overdue.
+      '=IF(D' + r + '="","",IFERROR(MATCH(D' + r + ',PayPeriods_Label,0)-MATCH($B$3,PayPeriods_Label,0),""))',
+      // G: Per-Period Need. 0 if past target or already at/over goal.
+      '=IF(OR(B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
+        'IF(F' + r + '<=0,0,MAX(0,(C' + r + '-E' + r + ')/F' + r + ')))',
+      // H: On Track? — IFS chain in declared order of priority.
+      '=IFS(' +
+        'OR(A' + r + '="",B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
+        'E' + r + '>=C' + r + ',"DONE",' +
+        'F' + r + '<0,"OVERDUE",' +
+        'IFERROR(MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0),0)<=0.04,"JUST STARTING",' +
+        'E' + r + '>=C' + r + '*MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0),"ON PACE",' +
+        'E' + r + '>=C' + r + '*MATCH($B$3,PayPeriods_Label,0)/MATCH(D' + r + ',PayPeriods_Label,0)*0.8,"CLOSE",' +
+        'TRUE,"BEHIND"' +
+        ')'
+    ]);
+  }
+  saving.getRange(6, 5, formulaRows.length, 4).setFormulas(formulaRows);
+
+  // --- Number formats ---
+  // Cols C (Target), E (Currently Saved), G (Per-Period Need): currency.
+  saving.getRange('C6:C' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('E6:E' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('G6:G' + lastGoalRow).setNumberFormat('$#,##0.00');
+  // F (Periods Remaining): integer.
+  saving.getRange('F6:F' + lastGoalRow).setNumberFormat('0');
+
+  // --- Data validations ---
+  // Col B: Linked Category (from CategoryList).
+  var setup = ss.getSheetByName('Setup');
+  if (setup) {
+    var catRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('E2:E100'), true)
+      .setAllowInvalid(false)
+      .build();
+    saving.getRange('B6:B' + lastGoalRow).setDataValidation(catRule);
+
+    // Col D: Target Period (from PayPeriods_Label).
+    var periodRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('C2:C27'), true)
+      .setAllowInvalid(false)
+      .build();
+    saving.getRange('D6:D' + lastGoalRow).setDataValidation(periodRule);
+  }
+
+  // --- Conditional formatting on H (On Track?) ---
+  // Clear ONLY rules that target our H range. Other CF on the sheet
+  // (none expected here) is preserved.
+  var hRange = saving.getRange('H6:H' + lastGoalRow);
+  var allRules = saving.getConditionalFormatRules();
+  var keepRules = [];
+  for (var k = 0; k < allRules.length; k++) {
+    var ranges = allRules[k].getRanges();
+    var touchesH = false;
+    for (var rg = 0; rg < ranges.length; rg++) {
+      if (ranges[rg].getColumn() === 8) { touchesH = true; break; }
+    }
+    if (!touchesH) keepRules.push(allRules[k]);
+  }
+
+  // Build status -> {bg, fg, bold} map.
+  var statusStyles = [
+    ['DONE',          '#1b5e20', '#ffffff', true],   // dark green / white
+    ['ON PACE',       '#2e7d32', '#ffffff', false],  // green / white
+    ['CLOSE',         '#fff59d', '#5d4037', false],  // yellow / dark brown
+    ['BEHIND',        '#c62828', '#ffffff', false],  // red / white
+    ['OVERDUE',       '#b71c1c', '#ffffff', true],   // dark red / white / bold
+    ['JUST STARTING', '#90caf9', '#0d47a1', false]   // light blue / dark blue
+  ];
+  for (var s = 0; s < statusStyles.length; s++) {
+    var rule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo(statusStyles[s][0])
+      .setBackground(statusStyles[s][1])
+      .setFontColor(statusStyles[s][2])
+      .setRanges([hRange])
+      .build();
+    if (statusStyles[s][3]) rule = SpreadsheetApp.newConditionalFormatRule()
+      .whenTextEqualTo(statusStyles[s][0])
+      .setBackground(statusStyles[s][1])
+      .setFontColor(statusStyles[s][2])
+      .setBold(true)
+      .setRanges([hRange])
+      .build();
+    keepRules.push(rule);
+  }
+  saving.setConditionalFormatRules(keepRules);
+
+  // --- Center-align select columns for visual consistency ---
+  saving.getRange('C6:H' + lastGoalRow).setHorizontalAlignment('center');
+}
+
+// ================================================================
 // INSTRUCTIONS TAB BUILDER
 // ================================================================
 
@@ -2118,6 +2388,7 @@ function buildInstructionsTab_(sheet) {
     ['Fixed Monthly    — Recurring expenses (rent, phone, etc.)', 10, false, null, null],
     ['Budget           — Budgeted vs Spent per period', 10, false, null, null],
     ['Transactions     — All categorized transactions', 10, false, null, null],
+    ['Saving           — One-time goals (e.g. "Europe trip $5000 by Oct")', 10, false, null, null],
     ['(v11.0+: Pending tab removed — Transactions is the single ledger)', 10, false, null, null],
     ['Logs             — API activity log (debugging)', 10, false, null, null],
     ['Instructions     — This tab (with version info at top)', 10, false, null, null],
@@ -2162,6 +2433,22 @@ function buildInstructionsTab_(sheet) {
     ['Edit budgeted amounts:', 11, true, null, null],
     ['  Edit the Budgeted column directly in the Budget tab.', 10, false, null, null],
     ['  Spent and Available auto-calculate.', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['SAVING GOALS (one-time purchases)', 13, true, '#e8eaf6', '#1a237e'],
+    ['Track one-time goals like "Europe trip $5,000 by Oct".', 10, false, null, null],
+    ['Step 1: Add a savings category in Setup (e.g. Main="Savings", Sub="Europe trip").', 10, false, null, null],
+    ['        Easiest: PWA → "+ Add Category". Then Budget tab gets new rows for that category.', 10, false, null, null],
+    ['Step 2: Open the Saving tab → fill row 6+: Goal Name | Linked Category (dropdown) |', 10, false, null, null],
+    ['        Target Amount | Target Period (dropdown) | Notes.', 10, false, null, null],
+    ['Step 3: Computed columns auto-fill: Currently Saved (from Budget Available),', 10, false, null, null],
+    ['        Periods Left, Per-Period Need, On Track? (color-coded).', 10, false, null, null],
+    ['Step 4: Each pay period, set Budget Budgeted for that category to the Per-Period Need.', 10, false, null, null],
+    ['        Available accumulates across periods until you spend the goal money.', 10, false, null, null],
+    ['', 10, false, null, null],
+    ['When goal is achieved: just stop budgeting to that category. The row stays in Saving', 10, false, null, null],
+    ['for record-keeping. Booking the trip → categorize that transaction as the savings', 10, false, null, null],
+    ['sub-category; Spent goes up, Available drops to ~$0.', 10, false, null, null],
     ['', 10, false, null, null],
 
     ['TROUBLESHOOTING', 13, true, '#e8eaf6', '#1a237e'],
