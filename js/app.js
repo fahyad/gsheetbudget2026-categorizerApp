@@ -2,6 +2,7 @@ import * as config from './config.js';
 import { APP_VERSION, APP_LAST_EDITED } from './config.js';
 import * as api from './api.js';
 import { store } from './store.js';
+import { periodForTimestamp, currentPeriod } from './periods.js';
 
 // DOM elements
 const configSection = document.getElementById('config-section');
@@ -37,6 +38,8 @@ const asVersionDisplay = document.getElementById('as-version-display');
 const updateStatusRow = document.getElementById('update-status-row');
 const updateStatusDisplay = document.getElementById('update-status-display');
 const headerVersion = document.getElementById('header-version');
+const periodFilter = document.getElementById('period-filter');
+const periodEmptyState = document.getElementById('period-empty-state');
 
 // B5: populate header version from APP_VERSION constant so we have one source
 // of truth (config.js) instead of three (config.js + hardcoded HTML + sw.js).
@@ -45,6 +48,11 @@ const headerVersion = document.getElementById('header-version');
 if (headerVersion) headerVersion.textContent = APP_VERSION;
 
 let selectedTimestamp = null;
+
+// Phase 5 — period filter state. `null` means "no filter set yet" (use the
+// default-selection rule on next render); a number is a specific period
+// idx; the literal string 'all' is the "all periods" option.
+let selectedPeriodFilter = null;
 
 // In-flight flags so we can prevent UI races (A4 + A6):
 //   - refreshInFlight blocks duplicate refresh fetches (parseAndFetch is
@@ -131,6 +139,15 @@ function bindEvents() {
   });
 
   saveAddCat.addEventListener('click', () => saveNewCategory());
+
+  // Phase 5: period filter — re-render when user picks a different period.
+  // Selection is just a UI toggle; state is module-level so it survives
+  // re-renders triggered by categorize/undo/sync.
+  periodFilter.addEventListener('change', () => {
+    selectedPeriodFilter = periodFilter.value === 'all' ? 'all' : Number(periodFilter.value);
+    deselectTransaction();
+    renderTransactions();
+  });
 
   // Warn if closing with unsent categorizations.
   // B4: Chrome (and modern Firefox/Safari) require BOTH preventDefault()
@@ -292,16 +309,31 @@ async function sync() {
 function renderTransactions() {
   transactionList.innerHTML = '';
 
+  // Empty state — no txns at all (different from "no txns in selected period").
   if (store.transactions.length === 0) {
     appSection.hidden = true;
     emptyState.hidden = false;
+    periodEmptyState.hidden = true;
     return;
   }
 
   appSection.hidden = false;
   emptyState.hidden = true;
 
-  for (const txn of store.transactions) {
+  // Phase 5: rebuild the period dropdown options from the current txn set
+  // and apply the selected filter. populatePeriodFilter is responsible for
+  // setting `selectedPeriodFilter` to a sensible default if it's null.
+  populatePeriodFilter();
+  const visible = filterTxnsByPeriod(store.transactions);
+
+  // Empty-period state — txns exist but the selected period has none.
+  if (visible.length === 0) {
+    periodEmptyState.hidden = false;
+    return;
+  }
+  periodEmptyState.hidden = true;
+
+  for (const txn of visible) {
     const div = document.createElement('div');
     div.className = 'txn-item';
     div.dataset.timestamp = txn.timestamp;
@@ -326,6 +358,76 @@ function renderTransactions() {
     div.addEventListener('click', () => selectTransaction(txn));
     transactionList.appendChild(div);
   }
+}
+
+// Phase 5: rebuild dropdown options based on which periods have txns in the
+// current set. Periods with zero items don't appear — keeps the dropdown
+// honest and small. Default selection rule:
+//   1. If user has previously picked a value, keep it (if still present).
+//   2. Otherwise use the current period (if it has txns).
+//   3. Otherwise fall back to 'all'.
+function populatePeriodFilter() {
+  // Bucket txns by period idx.
+  const byPeriod = new Map(); // idx -> { period, count }
+  for (const txn of store.transactions) {
+    const p = periodForTimestamp(txn.timestamp);
+    if (!p) continue;
+    const existing = byPeriod.get(p.idx);
+    if (existing) {
+      existing.count++;
+    } else {
+      byPeriod.set(p.idx, { period: p, count: 1 });
+    }
+  }
+
+  const totalCount = store.transactions.length;
+  const cur = currentPeriod();
+  const curIdx = cur ? cur.idx : null;
+
+  // Sort periods newest first (largest idx first).
+  const sortedIdxs = Array.from(byPeriod.keys()).sort((a, b) => b - a);
+
+  // Build options.
+  periodFilter.innerHTML = '';
+
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = `All (${totalCount})`;
+  periodFilter.appendChild(allOpt);
+
+  for (const idx of sortedIdxs) {
+    const { period, count } = byPeriod.get(idx);
+    const opt = document.createElement('option');
+    opt.value = String(idx);
+    const isCurrent = (idx === curIdx);
+    opt.textContent = isCurrent
+      ? `${period.label} · current (${count})`
+      : `${period.label} (${count})`;
+    periodFilter.appendChild(opt);
+  }
+
+  // Pick the active selection.
+  let target;
+  if (selectedPeriodFilter === 'all') {
+    target = 'all';
+  } else if (typeof selectedPeriodFilter === 'number' && byPeriod.has(selectedPeriodFilter)) {
+    target = String(selectedPeriodFilter);
+  } else if (curIdx !== null && byPeriod.has(curIdx)) {
+    target = String(curIdx);
+    selectedPeriodFilter = curIdx;
+  } else {
+    target = 'all';
+    selectedPeriodFilter = 'all';
+  }
+  periodFilter.value = target;
+}
+
+function filterTxnsByPeriod(txns) {
+  if (selectedPeriodFilter === 'all' || selectedPeriodFilter === null) return txns;
+  return txns.filter(t => {
+    const p = periodForTimestamp(t.timestamp);
+    return p && p.idx === selectedPeriodFilter;
+  });
 }
 
 function renderCategories() {

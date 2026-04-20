@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v13';
+const CACHE_VERSION = 'v14';
 const CACHE_NAME = 'budget-categorizer-' + CACHE_VERSION;
 
 const APP_SHELL = [
@@ -9,6 +9,7 @@ const APP_SHELL = [
   './js/api.js',
   './js/config.js',
   './js/store.js',
+  './js/periods.js',
   './manifest.json'
 ];
 

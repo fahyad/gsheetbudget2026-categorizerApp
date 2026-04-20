@@ -56,7 +56,22 @@
 
     <!-- Main app -->
     <section id="app-section" hidden>
+      <!-- Period filter (Phase 5): scope the txn list to a pay period.
+           Dropdown options are derived from the current uncategorized set —
+           periods with zero items don't appear. Defaults to current period
+           if it has txns, otherwise "All". -->
+      <div id="period-filter-bar">
+        <label for="period-filter">Period:</label>
+        <select id="period-filter" aria-label="Filter transactions by pay period"></select>
+      </div>
+
       <div id="transaction-list"></div>
+
+      <!-- Shown when the selected period has 0 txns but other periods do. -->
+      <div id="period-empty-state" hidden>
+        <p>No uncategorized transactions in this period.</p>
+        <p class="hint">Pick a different period above, or choose "All".</p>
+      </div>
 
       <div id="category-picker" hidden>
         <div id="category-picker-header">

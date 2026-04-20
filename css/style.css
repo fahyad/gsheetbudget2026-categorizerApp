@@ -455,6 +455,48 @@ header h1 {
   cursor: pointer;
 }
 
+/* Period filter bar (Phase 5) */
+#period-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e0e0e0;
+  font-size: 14px;
+}
+#period-filter-bar label {
+  color: #555;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+#period-filter {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #222;
+  -webkit-appearance: menulist;
+  appearance: menulist;
+}
+
+/* Empty state for "this period has 0 txns but others do" — distinct from
+   the global #empty-state which means "no txns anywhere". */
+#period-empty-state {
+  padding: 32px 16px;
+  text-align: center;
+  color: #666;
+}
+#period-empty-state p {
+  margin: 4px 0;
+}
+#period-empty-state .hint {
+  font-size: 13px;
+  color: #999;
+}
+
 /* Error / success toast — same element, success state via .success class (B7) */
 #error-toast {
   position: fixed;
