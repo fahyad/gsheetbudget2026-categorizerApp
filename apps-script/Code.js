@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.8';
-var APP_SCRIPT_LAST_EDITED = '2026-04-19 20:29 MDT';
+var APP_SCRIPT_VERSION = 'v11.9';
+var APP_SCRIPT_LAST_EDITED = '2026-04-19 22:36 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -1744,15 +1744,6 @@ function updateWorkbook() {
     txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
   }
 
-  // --- Saving tab (v11.8): create if missing, refresh structure if exists ---
-  var saving = ss.getSheetByName('Saving');
-  if (!saving) {
-    saving = ss.insertSheet('Saving');
-    buildSavingTab_(saving, ss);
-  } else {
-    refreshSavingTab_(saving, ss);
-  }
-
   // --- Update Instructions tab ---
   var instructions = ss.getSheetByName('Instructions') || ss.insertSheet('Instructions');
   buildInstructionsTab_(instructions);
@@ -1772,6 +1763,20 @@ function updateWorkbook() {
   // --- Update named ranges ---
   if (!fixed) fixed = ss.getSheetByName('Fixed Monthly Expenses');
   setNamedRanges_(ss, setup, fixed, budget, txn);
+
+  // --- Saving tab (v11.8): create if missing, refresh structure if exists ---
+  // ⚠️ MUST come AFTER setNamedRanges_. The Saving tab's formulas reference
+  // PayPeriods_*, Budget_*, etc. setNamedRanges_ deletes-and-recreates those
+  // names; Sheets converts any formula referencing a being-deleted named range
+  // to #REF! and DOES NOT heal it when the same name is recreated. Bug found
+  // in v11.8 first deploy; fix landed in v11.9.
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) {
+    saving = ss.insertSheet('Saving');
+    buildSavingTab_(saving, ss);
+  } else {
+    refreshSavingTab_(saving, ss);
+  }
 
   // --- Refresh Budget tab dashboard (rows 1-6) and header (row 7) ---
   // (rewriting these defensively in case a previous bad updateWorkbook
