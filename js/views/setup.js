@@ -4,7 +4,6 @@
 import * as config from '../config.js';
 import { APP_VERSION, APP_LAST_EDITED } from '../config.js';
 import * as api from '../api.js';
-import { setHeaderActions } from '../ui.js';
 import { navigate } from '../router.js';
 
 const TEMPLATE = `
@@ -42,12 +41,6 @@ const TEMPLATE = `
 
 export default {
   mount(root) {
-    // Keep Settings button visible on setup — relabel it "Done" so it acts
-    // as the exit. Shell's click handler detects #/setup and routes back.
-    setHeaderActions({ refresh: false, sync: false, settings: true });
-    const settingsBtn = document.getElementById('settings-btn');
-    if (settingsBtn) settingsBtn.textContent = 'Done';
-
     root.innerHTML = TEMPLATE;
 
     const form = root.querySelector('#config-form');
@@ -66,11 +59,7 @@ export default {
     populateVersionInfo(root);
   },
 
-  unmount() {
-    setHeaderActions({ settings: true });
-    const settingsBtn = document.getElementById('settings-btn');
-    if (settingsBtn) settingsBtn.textContent = 'Settings';
-  },
+  unmount() {},
 };
 
 async function populateVersionInfo(root) {

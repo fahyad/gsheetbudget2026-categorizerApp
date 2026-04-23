@@ -27,15 +27,9 @@ window.addEventListener('beforeunload', (e) => {
   }
 });
 
-// Settings button — goes to setup from anywhere else, or back to
-// categorize when already on setup (acts as the "Done" affordance).
-// Setup view renames the button to "Done" on mount so the label matches.
+// Settings button: always goes to setup. Return via the tab-bar.
 document.getElementById('settings-btn').addEventListener('click', () => {
-  if (window.location.hash === '#/setup') {
-    navigate('#/categorize');
-  } else {
-    navigate('#/setup');
-  }
+  navigate('#/setup');
 });
 
 // Initial route: force setup if not yet configured and no explicit route.

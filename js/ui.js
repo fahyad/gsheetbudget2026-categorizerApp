@@ -23,14 +23,3 @@ export function showSuccess(message) {
   clearTimeout(errorTimeout);
   errorTimeout = setTimeout(() => { t.hidden = true; }, 5000);
 }
-
-// Visibility control for the three header action buttons. Views call this
-// on mount so the shell doesn't need to know which buttons each view uses.
-export function setHeaderActions({ refresh = false, sync = false, settings = true } = {}) {
-  const r = document.getElementById('refresh-btn');
-  const s = document.getElementById('sync-btn');
-  const g = document.getElementById('settings-btn');
-  if (r) r.hidden = !refresh;
-  if (s) s.hidden = !sync;
-  if (g) g.hidden = !settings;
-}

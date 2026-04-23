@@ -1,7 +1,5 @@
 // Dashboard view — placeholder stub. Real content ships in v0.13 (Deploy 2).
 
-import { setHeaderActions } from '../ui.js';
-
 const TEMPLATE = `
   <section id="dashboard-section">
     <div class="coming-soon">
@@ -13,7 +11,6 @@ const TEMPLATE = `
 
 export default {
   mount(root) {
-    setHeaderActions({ refresh: false, sync: false, settings: true });
     root.innerHTML = TEMPLATE;
   },
 

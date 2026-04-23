@@ -1,17 +1,20 @@
 // Categorize view — the existing manual-categorize flow.
-// Extracted verbatim from the pre-v0.12 app.js app-section code. Behaviour
-// unchanged; only the DOM is now lifecycle-owned by this module.
+// Refresh and Sync are in-view controls (inline refresh icon in the period
+// row; sticky sync bar above the tab-bar when syncQueue > 0). The shell
+// header only holds Settings.
 
 import * as api from '../api.js';
 import { store } from '../store.js';
 import { periodForTimestamp, currentPeriod } from '../periods.js';
-import { showError, showSuccess, setHeaderActions } from '../ui.js';
+import { showError, showSuccess } from '../ui.js';
+import { updateCategorizeBadge } from '../router.js';
 
 const TEMPLATE = `
   <section id="app-section">
     <div id="period-filter-bar">
       <label for="period-filter">Period:</label>
       <select id="period-filter" aria-label="Filter transactions by pay period"></select>
+      <button id="refresh-inline" title="Refresh" aria-label="Refresh">⟳</button>
     </div>
 
     <div id="transaction-list"></div>
@@ -66,6 +69,11 @@ const TEMPLATE = `
     <span id="undo-text"></span>
     <button id="undo-btn">UNDO</button>
   </div>
+
+  <div id="sync-bar" hidden>
+    <span id="sync-bar-text"></span>
+    <button id="sync-btn-inline">Sync</button>
+  </div>
 `;
 
 // Module-level state (view is a singleton; re-mounting on re-navigation is OK
@@ -75,23 +83,19 @@ let selectedPeriodFilter = null;
 let refreshInFlight = false;
 let syncInFlight = false;
 
-// DOM refs — set in mount().
+// DOM refs — set in mount(). All live inside the view's own DOM subtree,
+// so they're garbage-collected when the router clears root.innerHTML.
 let appSection, transactionList, categoryPicker, categoryButtons,
     selectedMerchantEl, cancelPick, loadingEl, emptyState,
     emptyRefreshBtn, undoBar, undoText, undoBtn, addCatBtn, addCatModal,
     mainCatSelect, newMainGroup, newMainInput, subCatInput,
-    cancelAddCat, saveAddCat, periodFilter, periodEmptyState;
-
-// Header buttons — shell-owned, we bind/unbind handlers on mount/unmount.
-let refreshBtn, syncBtn;
-let onRefreshClick, onSyncClick;
+    cancelAddCat, saveAddCat, periodFilter, periodEmptyState,
+    refreshBtn, syncBar, syncBarText, syncBtn;
 
 export default {
   async mount(root) {
-    setHeaderActions({ refresh: true, sync: true, settings: true });
     root.innerHTML = TEMPLATE;
 
-    // View DOM refs.
     appSection = root.querySelector('#app-section');
     transactionList = root.querySelector('#transaction-list');
     categoryPicker = root.querySelector('#category-picker');
@@ -114,17 +118,13 @@ export default {
     saveAddCat = root.querySelector('#save-add-cat');
     periodFilter = root.querySelector('#period-filter');
     periodEmptyState = root.querySelector('#period-empty-state');
+    refreshBtn = root.querySelector('#refresh-inline');
+    syncBar = root.querySelector('#sync-bar');
+    syncBarText = root.querySelector('#sync-bar-text');
+    syncBtn = root.querySelector('#sync-btn-inline');
 
-    // Shell-owned refs — track handlers so unmount() can clean up.
-    refreshBtn = document.getElementById('refresh-btn');
-    syncBtn = document.getElementById('sync-btn');
-    onRefreshClick = () => refresh();
-    onSyncClick = () => sync();
-    refreshBtn.addEventListener('click', onRefreshClick);
-    syncBtn.addEventListener('click', onSyncClick);
-
-    // In-view listeners — these die with the DOM on next innerHTML = '',
-    // no explicit removeEventListener needed.
+    refreshBtn.addEventListener('click', () => refresh());
+    syncBtn.addEventListener('click', () => sync());
     emptyRefreshBtn.addEventListener('click', () => refresh());
     cancelPick.addEventListener('click', () => deselectTransaction());
     undoBtn.addEventListener('click', () => undo());
@@ -144,13 +144,11 @@ export default {
       renderTransactions();
     });
 
-    // Initial render from existing in-memory state.
     renderCategories();
-    renderSyncButton();
+    renderSyncBar();
     renderUndo();
     renderTransactions();
 
-    // Fetch fresh categories in background.
     api.fetchCategories()
       .then(data => {
         store.setCategories(data.categories);
@@ -167,11 +165,6 @@ export default {
   },
 
   unmount() {
-    if (refreshBtn && onRefreshClick) refreshBtn.removeEventListener('click', onRefreshClick);
-    if (syncBtn && onSyncClick) syncBtn.removeEventListener('click', onSyncClick);
-    onRefreshClick = null;
-    onSyncClick = null;
-    // Reset selection state so re-mounting starts clean.
     selectedTimestamp = null;
   },
 };
@@ -232,7 +225,7 @@ function categorize(timestamp, category) {
   deselectTransaction();
   renderTransactions();
   renderUndo();
-  renderSyncButton();
+  renderSyncBar();
 }
 
 function undo() {
@@ -258,7 +251,7 @@ function undo() {
 
   renderTransactions();
   renderUndo();
-  renderSyncButton();
+  renderSyncBar();
 }
 
 async function sync() {
@@ -267,7 +260,7 @@ async function sync() {
   syncInFlight = true;
 
   syncBtn.disabled = true;
-  syncBtn.textContent = 'Syncing...';
+  syncBtn.textContent = 'Syncing…';
   undoBtn.disabled = true;
 
   try {
@@ -290,7 +283,7 @@ async function sync() {
   } finally {
     syncInFlight = false;
     undoBtn.disabled = false;
-    renderSyncButton();
+    renderSyncBar();
   }
 }
 
@@ -446,19 +439,30 @@ function renderCategories() {
 }
 
 function renderUndo() {
-  if (store.lastCategorized) {
+  const visible = !!store.lastCategorized;
+  if (visible) {
     undoText.textContent = `${store.lastCategorized.merchant} → ${store.lastCategorized.category}`;
     undoBar.hidden = false;
   } else {
     undoBar.hidden = true;
   }
+  // Keep the sync bar clear of the undo bar when both are visible.
+  if (syncBar) syncBar.classList.toggle('above-undo', visible);
 }
 
-function renderSyncButton() {
+function renderSyncBar() {
   const count = store.syncQueue.length;
-  syncBtn.textContent = count > 0 ? `Sync (${count})` : 'Sync';
-  syncBtn.disabled = count === 0;
-  syncBtn.classList.toggle('has-pending', count > 0);
+  if (count === 0) {
+    syncBar.hidden = true;
+    syncBtn.disabled = true;
+    syncBtn.textContent = 'Sync';
+  } else {
+    syncBar.hidden = false;
+    syncBarText.textContent = count === 1 ? '1 to sync' : `${count} to sync`;
+    syncBtn.disabled = syncInFlight;
+    syncBtn.textContent = syncInFlight ? 'Syncing…' : 'Sync';
+  }
+  updateCategorizeBadge();
 }
 
 function selectTransaction(txn) {

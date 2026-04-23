@@ -3,7 +3,10 @@
 // (#/foo) — zero click handlers, browser back/forward just works.
 //
 // The shell passes a root element; the router clears it and hands it to
-// the active view. Views own their DOM subtree.
+// the active view. Views own their DOM subtree. The router also owns
+// tab-bar chrome (active class + pending-count badge on Categorize).
+
+import { store } from './store.js';
 
 const routes = {
   '#/categorize': () => import('./views/categorize.js'),
@@ -31,6 +34,16 @@ export function navigate(hash) {
   window.location.hash = hash;
 }
 
+// Reflects store.syncQueue.length onto the Categorize tab label so the
+// pending count is visible from any view. Called on every route change and
+// by categorize.js after it mutates the queue.
+export function updateCategorizeBadge() {
+  const link = document.querySelector('#tab-bar a[href="#/categorize"]');
+  if (!link) return;
+  const count = store.syncQueue.length;
+  link.textContent = count > 0 ? `Categorize (${count})` : 'Categorize';
+}
+
 async function mountFromHash() {
   let hash = window.location.hash;
   if (!routes[hash]) {
@@ -46,6 +59,7 @@ async function mountFromHash() {
 
   rootEl.innerHTML = '';
   updateTabBar(hash);
+  updateCategorizeBadge();
 
   const mod = await routes[hash]();
   currentView = mod.default;
@@ -60,8 +74,6 @@ async function mountFromHash() {
 function updateTabBar(hash) {
   const bar = document.getElementById('tab-bar');
   if (!bar) return;
-  // Tab-bar is hidden on the setup route (it's a modal-like screen).
-  bar.hidden = (hash === '#/setup');
   bar.querySelectorAll('a').forEach(a => {
     a.classList.toggle('active', a.getAttribute('href') === hash);
   });
