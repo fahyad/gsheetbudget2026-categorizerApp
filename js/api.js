@@ -51,3 +51,9 @@ export async function addCategory(mainCategory, subCategory) {
 export async function fetchVersion() {
   return request(buildUrl('version'));
 }
+
+export async function dumpSheet(tab, range) {
+  const params = { tab };
+  if (range) params.range = range;
+  return request(buildUrl('dumpSheet', params));
+}

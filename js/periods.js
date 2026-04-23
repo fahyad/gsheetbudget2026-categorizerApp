@@ -87,6 +87,26 @@ export function currentPeriod() {
 }
 
 /**
+ * Enumerates every period (0..25). Used by the dashboard dropdown so we
+ * can list all 26 periods without a round-trip to the sheet.
+ */
+export function allPeriods() {
+  const out = [];
+  // Period 0 — special long lead-in.
+  const p0Start = new Date(PERIOD_0.startMs);
+  const p0End = new Date(PERIOD_0.endMs);
+  out.push({ idx: 0, start: p0Start, end: p0End, label: formatLabel(p0Start, p0End) });
+  for (let i = 1; i < NUM_PERIODS; i++) {
+    const startMs = PERIOD_REGULAR_ANCHOR_MS + (i - 1) * PERIOD_LENGTH_MS;
+    const endMs = startMs + PERIOD_LENGTH_MS - 86400000;
+    const start = new Date(startMs);
+    const end = new Date(endMs);
+    out.push({ idx: i, start, end, label: formatLabel(start, end) });
+  }
+  return out;
+}
+
+/**
  * Returns the period containing a transaction, derived from its `timestamp`
  * field (format "YYYY-MM-DD HH:MM:SS#hex"). Uses the date portion only —
  * locale-independent, never ambiguous.

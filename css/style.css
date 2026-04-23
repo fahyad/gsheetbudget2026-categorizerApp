@@ -651,17 +651,299 @@ header h1 {
 }
 
 /* ============================== DASHBOARD ============================ */
-/* Stub — full dashboard ships in v0.13. */
 
 #dashboard-section {
-  padding: 48px 16px;
+  padding: 0 0 16px;
 }
-#dashboard-section .coming-soon {
+
+/* Header row: period dropdown + inline refresh. Mirrors the categorize
+   view's #period-filter-bar structure. */
+#dashboard-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #e0e0e0;
+  font-size: 14px;
+}
+#dashboard-header label {
+  color: #555;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+#period-select {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #222;
+  -webkit-appearance: menulist;
+  appearance: menulist;
+}
+#dashboard-refresh {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #1a237e;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+#dashboard-refresh:active {
+  background: #e8eaf6;
+}
+#dashboard-refresh:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#dashboard-body {
+  padding: 12px 16px 24px;
+}
+
+.dashboard-placeholder {
   text-align: center;
   color: #666;
+  padding: 32px 8px;
 }
-#dashboard-section .coming-soon h2 {
-  margin-bottom: 8px;
-  color: #333;
+.dashboard-placeholder .spinner {
+  margin: 0 auto 12px;
+}
+.dashboard-placeholder .hint {
+  font-size: 12px;
+  color: #999;
+  margin-top: 8px;
+}
+.dashboard-error {
+  color: #c62828;
+}
+
+/* Cards — shared card shell */
+.dashboard-card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+/* Ready-to-Assign hero card */
+.ready-card {
+  padding: 20px 16px;
+  text-align: center;
+  background: linear-gradient(135deg, #1a237e, #3949ab);
+  color: #fff;
+  border: none;
+}
+.ready-amount {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+.ready-amount.negative {
+  color: #ffccbc;
+}
+.ready-label {
+  font-size: 13px;
+  opacity: 0.85;
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.ready-hint {
+  font-size: 11px;
+  opacity: 0.8;
+  margin-top: 10px;
+}
+.ready-progress {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 6px;
+}
+
+/* Summary strip — income / fixed / budgeted */
+.summary-strip {
+  padding: 4px 0;
+}
+.summary-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 16px;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 14px;
+}
+.summary-row:last-child {
+  border-bottom: none;
+}
+.summary-row .neg {
+  color: #c62828;
+}
+
+/* Section headings between card groups */
+.dashboard-section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin: 20px 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+}
+.dashboard-section-heading .section-totals {
+  letter-spacing: 0.3px;
+  font-weight: 500;
+  color: #999;
+  text-transform: none;
+  font-size: 12px;
+}
+
+/* Category group + card */
+.cat-group {
+  margin-bottom: 12px;
+}
+.cat-group-header {
+  font-size: 12px;
+  color: #555;
+  font-weight: 600;
+  margin: 8px 4px 4px;
+  letter-spacing: 0.3px;
+}
+.cat-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+}
+.cat-card-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+}
+.cat-name {
+  font-weight: 500;
+  color: #222;
+}
+.cat-amounts {
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+.cat-avail {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #777;
+}
+.cat-avail .neg {
+  color: #c62828;
+  font-weight: 600;
+}
+.cat-bar {
+  height: 6px;
+  background: #eeeeee;
+  border-radius: 3px;
+  margin: 8px 0;
+  overflow: hidden;
+}
+.cat-bar-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.cat-bar-fill.ok { background: #2e7d32; }
+.cat-bar-fill.near { background: #f9a825; }
+.cat-bar-fill.over { background: #c62828; }
+
+/* Saving goal card — expandable */
+.goal-card {
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.goal-card:active {
+  background: #f5f5f5;
+}
+.goal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  font-weight: 500;
+  color: #222;
+}
+.goal-reached {
+  color: #2e7d32;
+  margin-left: 6px;
+}
+.goal-caret {
+  color: #999;
+  font-size: 12px;
+  transition: transform 0.2s ease;
+}
+.goal-card.expanded .goal-caret {
+  transform: rotate(90deg);
+}
+.goal-bar {
+  height: 6px;
+  background: #eeeeee;
+  border-radius: 3px;
+  margin: 8px 0 6px;
+  overflow: hidden;
+}
+.goal-bar-fill {
+  height: 100%;
+  background: #1a237e;
+  transition: width 0.3s ease;
+}
+.goal-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #555;
+  font-variant-numeric: tabular-nums;
+}
+.goal-target-period {
+  color: #888;
+  font-size: 12px;
+}
+.goal-details {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease;
+  font-size: 13px;
+}
+.goal-card.expanded .goal-details {
+  max-height: 260px;
+  padding-top: 8px;
+  margin-top: 6px;
+  border-top: 1px solid #f0f0f0;
+}
+.goal-detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  color: #555;
+}
+.goal-detail-row span:last-child {
+  color: #222;
+  font-variant-numeric: tabular-nums;
+}
+.goal-notes span:last-child {
+  font-style: italic;
+  color: #666;
+  text-align: right;
+  max-width: 60%;
 }
 

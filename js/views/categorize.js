@@ -8,6 +8,7 @@ import { store } from '../store.js';
 import { periodForTimestamp, currentPeriod } from '../periods.js';
 import { showError, showSuccess } from '../ui.js';
 import { updateCategorizeBadge } from '../router.js';
+import { invalidateDashboardCache } from '../lib/budget.js';
 
 const TEMPLATE = `
   <section id="app-section">
@@ -269,6 +270,11 @@ async function sync() {
     const failed = data.results.filter(r => !r.success);
 
     store.clearSyncedItems(succeeded);
+
+    if (succeeded.length > 0) {
+      // Spent / Available changed in the sheet — dashboard cache is stale.
+      invalidateDashboardCache();
+    }
 
     if (failed.length === 0) {
       showSuccess('✓ ' + succeeded.length + ' transactions synced');
