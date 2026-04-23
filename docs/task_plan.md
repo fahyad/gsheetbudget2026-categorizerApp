@@ -6,7 +6,7 @@
 
 ## Current State (April 2026)
 - **Apps Script:** v11.12 — `updateWorkbook` now delegates Budget refresh to `rebuildBudgetInternal_`. The previous in-place per-row setFormula loop was silently failing — Budget dashboard formulas worked but per-row formulas stayed `#REF!`. v11.11 was the Saving tab schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods). v11.9 + v11.10 were earlier Saving shakedown fixes. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.12.1 (cache v16) — **scaffolding restructure, Deploy 1 of 3.** Shell shrunk 657 → ~40 LOC; hash router + lazy-loaded view modules + bottom tab-bar. No user-visible feature change from v0.11 (categorize flow identical). Dashboard tab is a placeholder. Deploy 2 (dashboard content) and Deploy 3 (auto-suggest swipe deck) planned. **Currently on experimental branch `claude/read-markdown-context-v1c5T`, NOT merged to `main`** — production at the Pages URL is still v0.11 until this lands. See Phase 18 below.
+- **PWA:** v0.14 (cache v19) — **all 3 restructure deploys shipped.** v0.12 scaffolding (hash router + lazy views + tab-bar); v0.12.1 Setup exit; v0.12.2 moved Refresh/Sync out of the shell header into the categorize view (inline `⟳` icon + sticky sync bar, shown only when queue non-empty); v0.13 Dashboard content (period-switchable, cached 10 min, invalidated on sync); v0.14 Auto-suggest sub-tab in Categorize with per-row swipe (right = accept, left = skip for this session). Local-only frequency index, ≥70% confidence threshold. Still on branch `claude/read-markdown-context-v1c5T`; `main` not yet merged. GitHub Pages currently serving from the feature branch for preview (Settings → Pages → Source). See Phase 18 below.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -181,20 +181,18 @@ Design choices (scaffolding-level):
 
 **Branch state:**
 - Working on `claude/read-markdown-context-v1c5T` (branched from `pwa/experiments`).
-- Pushed to origin; **NOT merged to `main`**. GitHub Pages deploys from `main`, so until merged the production URL shows v0.11.
-- Preview by pointing Pages source at the branch (Settings → Pages → Source) or local `python3 -m http.server` + DevTools mobile emulation.
+- Pushed to origin; **NOT merged to `main`**. `main` still at v0.11 + v11.12 Apps Script.
+- GitHub Pages currently deploys from the feature branch (Settings → Pages → Source switched for preview). When merging to main, flip the source back.
 
-**Deploy sequence:**
-- ✅ **Deploy 1 — v0.12 / v0.12.1 (shipped).** Scaffolding only. Behaviour identical to v0.11. v0.12.1 fixed a UX regression where Setup hid all header buttons leaving no exit. Files: `js/router.js` (new), `js/ui.js` (new), `js/views/categorize.js` + `setup.js` + `dashboard.js` (new, extracted/stubbed), `js/app.js` (rewritten as thin shell), `index.html` + `css/style.css` + `sw.js` updated. Cache `v14 → v16`.
-- ⏳ **Deploy 2 — v0.13 (planned).** Implement `views/dashboard.js` against `api.dumpSheet('Budget', ...)`. Read-only view of the selected pay period: Budgeted / Spent / Available per category, maybe period dropdown mirroring the sheet's B1. Row layout + formatting decided at the time of implementation.
-- ⏳ **Deploy 3 — v0.14 (planned).** Auto-categorization swipe deck. Adds `js/lib/swipe.js` + `js/lib/suggest.js` + a swipe view (or sub-route under categorize). Suggestion source TBD — candidates: merchant→category history table in the sheet, or pure client-side by scanning existing categorized transactions. The Phase 18 goals below fold into this.
+**Deploy sequence — all shipped:**
+- ✅ **Deploy 1 — v0.12 / v0.12.1 / v0.12.2.** Scaffolding + UX polish. v0.12 introduced the router + lazy views + tab-bar (behaviour identical to v0.11). v0.12.1 fixed a Setup exit regression. v0.12.2 deleted the `setHeaderActions` helper entirely — Refresh and Sync moved from the shell header into the categorize view (inline `⟳` in the period row; sticky sync bar above the tab-bar visible only when `syncQueue.length > 0`); tab-bar no longer hidden on Setup; Categorize tab-bar label shows pending count `Categorize (N)`. Cache `v14 → v17`.
+- ✅ **Deploy 2 — v0.13.** Real dashboard content. `js/lib/budget.js` owns two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:I105), parses currency strings → numbers on ingest (`parseCurrency`), formats via `Intl.NumberFormat`, persists with a 10-min TTL, invalidates on successful `batchCategorize`. View: Ready-to-Assign hero + Income/Fixed/Budgeted summary strip + per-period category cards with green/amber/red progress bars + saving-goal tap-to-expand cards. Period switching is client-side — one fetch, 26 periods filter in-memory. Known scope limit (documented in the plan): summary block reflects sheet `Budget!B1`, not the PWA's selected period, because Net Income / Fixed Expenses formulas depend on Transactions + FixedMonthlyExpenses tabs that v0.13 intentionally doesn't fetch. Cache `v17 → v18`.
+- ✅ **Deploy 3 — v0.14.** Manual | Auto segmented control inside the categorize view (not a sub-route — shares period filter + refresh + sync bar + picker). `js/lib/suggest.js` fetches Transactions once per hour, builds `{normalizedMerchant: {category: count}}`, exposes `suggest(merchant)` returning the top category if confidence ≥ 0.70, else null. Normalizer strips payment-processor prefixes (`SQ*`, `TST*`, `PAYPAL*`, `SP*`), `*alnum` tokens, `#alnum` IDs, `\S*\d+\S*` tokens, trailing state codes — 17-case unit-test suite run before commit. `js/lib/swipe.js` is a vanilla touch factory: right = accept (reuses existing categorize path + queues for sync), left = hide this session only (txn remains in Manual). `rejectedThisSession` is in-memory only so a richer index next session gets another shot. Cache `v18 → v19`.
 
-**Planned Deploy 3 goals (from the original "Auto-Categorization" Phase 18):**
-- [ ] Merchant → category mapping (source TBD)
-- [ ] Known merchants auto-suggest the category; user confirms/corrects with a swipe
-- [ ] Unknown merchants fall through to the current manual picker
+**Pages build failure + fix (Apr 23 2026):**
+First attempt to deploy the feature branch timed out at `updating_pages` even though the build step "succeeded" — root cause was GitHub Pages running Jekyll by default with no `.nojekyll` marker. Added empty `.nojekyll` at repo root + empty-commit retrigger cleared it. The file must stay on every branch Pages deploys from.
 
-- **Status:** Deploy 1 shipped on branch; Deploys 2-3 not started; not yet merged to `main`
+- **Status:** all 3 deploys shipped, verified end-to-end, Pages serving the branch successfully. Not yet merged to `main`.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
@@ -272,6 +270,9 @@ clasp deployments     # should still show 7 deployments (HEAD + 6 versions)
 | knownTimestamps stale cache hiding txns | In-memory only, removed entirely in v8 |
 | **Transaction writes going to row 1001+** | Rewrote `findNextEmptyRow_` to scan column A (formula-filled cells confuse `getLastRow`) (v9) |
 | Categories not showing on tap | `selectTransaction()` now calls `renderCategories()` (v0.6) |
+| Dashboard showing stale Spent totals after sync (v0.13) | `categorize.js sync()` calls `invalidateDashboardCache()` after `batchCategorize` success; dashboard refetches on next mount |
+| Auto-tab bucketizing Amazon variants separately (v0.14 design-time) | Normalizer changed from trailing-only `*alnum$` + `\b\d{4,}\b` to global `*alnum` + `\S*\d+\S*` + `#alnum`, plus 17-case Node test gate before commit |
+| GitHub Pages deploy timeout at `updating_pages` (Apr 23 2026) | Added `.nojekyll` at repo root + empty-commit retrigger. Root cause was Pages running Jekyll by default on a non-Jekyll static PWA |
 
 ## Notes
 - **Source of truth:** this git repo. Old Google Drive Code.gs and .md files are stale backups (still synced as a safety copy after each session).

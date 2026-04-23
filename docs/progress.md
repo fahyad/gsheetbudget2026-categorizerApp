@@ -4,7 +4,7 @@
 >
 > **Apps Script:** v11.12 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
 >
-> **PWA:** v0.11 (cache v14) — at `index.html`, `js/`, `css/`, `sw.js`. Auto-deployed via GitHub Pages on `git push`. New `js/periods.js` powers the period filter dropdown (Phase 5).
+> **PWA:** v0.14 (cache v19) — at `index.html`, `js/`, `css/`, `sw.js`. All 3 restructure deploys shipped on branch `claude/read-markdown-context-v1c5T` (not yet merged to `main`). GitHub Pages currently deploying from the feature branch for preview. `.nojekyll` at repo root is required — don't delete.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -1195,3 +1195,90 @@ User budgeted $222.00 (rounded from the exact $222.22 initial suggestion). The N
 The two-bug situation that started this session is now fully resolved:
 - User error (budget in wrong period) — user fixed manually
 - Code bug (#REF! cascade across Budget tab) — fixed in v11.12 via rebuildBudgetInternal_
+
+---
+
+## Session: 2026-04-23 — PWA v0.12.2 + v0.13 + v0.14 shipped
+
+Completed all three deploys of the PWA restructure (Phase 18 in `docs/task_plan.md`) in one session, plus diagnosed a GitHub Pages deployment timeout. All work on branch `claude/read-markdown-context-v1c5T`; `main` still at v0.11.
+
+### v0.12.2 — scope chrome to the view that owns it (commit `0fecc70`)
+
+v0.12.1 left Refresh + Sync in the shell header with a `setHeaderActions({refresh, sync, settings})` helper each view called on mount. The helper required per-view bookkeeping plus a "Done" relabel on Setup because the entire header/tab-bar was hidden on `#/setup`. User observed this was overcomplicated for chrome that's only meaningful in one view.
+
+Deleted `setHeaderActions` entirely. Header is now title + version + Settings only. Refresh is an inline `⟳` icon inside `#period-filter-bar` (next to the period dropdown). Sync is a sticky bar (`#sync-bar`) above the tab-bar, hidden when `store.syncQueue.length === 0`. When the undo-bar is also visible, `.above-undo` on the sync-bar bumps it up 48px to stack.
+
+The Categorize tab-bar label gained a pending-count badge: `Categorize (N)` when a queue exists, maintained by `router.updateCategorizeBadge()` — called on every route change and from `categorize.js` after any mutation. No pub/sub needed.
+
+Tab-bar no longer hidden on `#/setup` — the Done-button hack goes away entirely; the tab-bar is the exit.
+
+Files: `index.html` (header stripped), `js/ui.js` (helper deleted), `js/router.js` (badge helper added, setup-hide removed), `js/views/setup.js` + `dashboard.js` + `categorize.js` (setHeaderActions calls removed), CSS restructured.
+
+### v0.13 — real dashboard content (commit `c19c836`)
+
+Key design decision: **no new Apps Script endpoint.** The spreadsheet already computes every value we need via SUMIFS. Two parallel `dumpSheet` calls — Budget `A1:F215` (1,290 cells) and Saving `A1:I105` (945 cells) — pull all 26 periods × 8 categories + all 100 goals in one round-trip. Period switching is pure client-side filtering of the cached array, zero network cost.
+
+New `js/lib/budget.js` (~180 LOC) owns fetch + parse + cache:
+
+- `getDashboardData({ forceRefresh })` — 10-min TTL in localStorage; returns cached with a `stale` flag if fetch fails but cache exists.
+- `parseCurrency(raw)` — tolerant of `$`, commas, whitespace, paren-negatives, blanks, null. 11 edge cases unit-tested via `node --input-type=module` before commit.
+- `formatCurrency(n)` — uses `Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })`. All display runs through this; future locale changes happen once.
+- `invalidateDashboardCache()` — called from `categorize.js sync()` after successful `batchCategorize`. One direct call, two callers total; no pub/sub.
+
+View layout: Ready-to-Assign hero card (purple gradient, large number, sheet-period hint if the dropdown diverges from sheet `Budget!B1`) + Income / Fixed / Budgeted summary strip + per-period category cards with green/amber/red progress bars (80% and 100% thresholds) + saving-goal cards with tap-to-expand details (allocated-this-period, periods remaining, needed-future, notes).
+
+Known scope limit (documented in plan non-goals): summary block reflects sheet `Budget!B1`, not the PWA's selected period. Replicating Net Income / Fixed Expenses client-side would need three more `dumpSheet` calls (Transactions for Paycheck SUMIFS, FixedMonthlyExpenses, Setup). Deferred.
+
+New `api.dumpSheet(tab, range)` wrapper (6 LOC). New `periods.allPeriods()` enumerator (15 LOC) for the full 26-period dropdown.
+
+### v0.14 — auto-suggest sub-tab with per-row swipe (commit `4af0227`)
+
+User direction shaped the UX: split the Categorize view into Manual | Auto sub-tabs (not a sub-route — they share period filter + refresh + sync bar + picker), and make the Auto tab a **list-with-per-row-swipe** rather than a one-card-at-a-time deck. Two-line rows: merchant + amount on top, `↗ suggested category` below. Swipe right = accept (queue for sync), swipe left = hide this session only (txn stays in Manual). Tap without swipe still opens the picker.
+
+New `js/lib/suggest.js` (~160 LOC): `ensureIndexReady` does one `dumpSheet('Transactions', 'A2:H1000')`, parses into `{normalizedMerchant: {category: count}}`, caches 1 hour. `suggest(merchant, {threshold = 0.70})` returns `{category, confidence, count}` or null. `invalidateSuggestIndex()` wired into `categorize.js sync()` alongside `invalidateDashboardCache()`.
+
+**Normalizer iteration:** initial rules failed the core test (`AMAZON.COM*MT12345 SEATTLE WA` vs `AMAZON.COM*XY98765 SEATTLE WA` produced different keys because `\b\d{4,}\b` stripped digits but left `*mt` / `*xy` behind). Tightened to `\s*\*[a-z0-9]+` global (strip card/txn tokens anywhere), then `\b\w*\d+\w*\b` (strip words with digits). Next failure: `Starbucks #4321` left stray `#`. Added `\s*#\w+` (strip store IDs). Next failure: `TARGET T-0384` because `\b` breaks on hyphens. Changed to `\S*\d+\S*` (strip any whitespace-bounded token with a digit). Final suite: 17 cases, all pass.
+
+New `js/lib/swipe.js` (~95 LOC): `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold = 0.40 })`. The `translateEl` / `revealEl` split is critical — pseudo-elements transform with their parent, so the action-background `::before` / `::after` must live on an outer static shell while only the inner content translates. Auto-row DOM: `.auto-row` outer + `.auto-row-inner` inner.
+
+Vertical-scroll preservation: on first meaningful move, if `|dy| > |dx| * 1.5` the swipe aborts and the browser gets scroll control. Short taps (dx < 5 px, t < 300 ms) fall through to the click handler.
+
+`rejectedThisSession` is an in-memory module Set in `categorize.js`. Intentionally not persisted — next session's richer index deserves another shot at suggestions that were below threshold today.
+
+### GitHub Pages failure + fix (`ef80142` + `211d764`)
+
+After pushing v0.14, user reported "last deployment failed." Log:
+
+```
+Current status: updating_pages
+...
+Error: Timeout reached, aborting!
+Canceling Pages deployment...
+Canceled deployment with ID 4af022731feaa2cb5e75878edace71ee3f27a024
+```
+
+Critical clue: **build step succeeded, deploy step hung at `updating_pages`.** Not a content problem — an orchestration problem. Root cause: GitHub Pages runs Jekyll by default when no `.nojekyll` marker exists. The static PWA shouldn't be Jekyll-processed; the marker was missing.
+
+Fix: empty `.nojekyll` at repo root (commit `ef80142`). Follow-up empty-commit retrigger (commit `211d764`: `git commit --allow-empty -m "Retrigger Pages deploy"`). The next Pages run succeeded and the branch is now live.
+
+Rules captured in `CLAUDE.md` (trip-up #16) and `docs/findings.md` ("GitHub Pages `.nojekyll` failure mode"):
+
+- Keep `.nojekyll` on every branch Pages deploys from.
+- Pages build "success" doesn't imply deploy success — check the deploy step specifically.
+- Empty-commit retrigger is a safe diagnostic for transient failures.
+
+### Design decisions worth preserving
+
+- **Prefer client-side aggregation over new endpoints** when the sheet has already done the math. v0.13's dashboard would have cost a `dashboardData` Apps Script endpoint + deploy cycle for strictly no user-visible benefit; two `dumpSheet` calls cover it.
+- **Avoid pub/sub until two direct calls feel like three.** `categorize.js sync()` → `invalidateDashboardCache()` + `invalidateSuggestIndex()` is fine. Revisit when a fourth caller appears.
+- **Normalizer consistency is more important than normalizer cleverness.** Two variants of the same merchant producing the same key matters more than the key being humanly elegant. Unit-test coverage on the normalizer is non-negotiable.
+- **Outer/inner DOM split for swipe-reveal.** Whenever a fixed-background element needs to stay put while a sibling translates, they can't share a pseudo-element parent. Document this pattern (in `lib/swipe.js` header) so the next swipe UI doesn't relearn it.
+- **Keep `.nojekyll` committed.** Zero downside, avoids a failure mode that presents as "deployment flakiness."
+
+### Status — VERIFIED WORKING
+- All 14 JS modules pass `node --check`.
+- `parseCurrency` 11/11 cases pass.
+- `normalizeMerchant` 17/17 cases pass.
+- `http.server` asset check — every new file serves 200.
+- GitHub Pages deployment succeeded after `.nojekyll` + retrigger; user confirmed "everything works."
+- Branch `claude/read-markdown-context-v1c5T` at commit `211d764`, 9 commits ahead of `main`.

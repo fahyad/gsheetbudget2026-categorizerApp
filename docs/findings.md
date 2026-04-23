@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.12 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab with adaptive per-period formula). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists (v11.12 Apps Script + v0.14 PWA on branch `claude/read-markdown-context-v1c5T`; `main` still at v0.11). Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.14 PWA restructure + dashboard + auto-suggest is documented below in "PWA Restructure (v0.12 → v0.14)".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1029,3 +1029,82 @@ Stored in `apps-script/.clasp.json`. Public (embedded in deployment URLs anyway)
 
 ### MCP integration (optional)
 `~/Library/Application Support/Claude/claude_desktop_config.json` has a `mcpServers.clasp` entry that lets Claude call clasp directly as tools after restarting Claude Desktop. The CLI works fine either way.
+
+---
+
+## PWA Restructure (v0.12 → v0.14)
+
+Shipped on branch `claude/read-markdown-context-v1c5T` in three deploys. `main` still serves v0.11 until this is merged. Full plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.
+
+### Shell + hash router (v0.12)
+
+Chose hash routing (`#/categorize`, `#/dashboard`, `#/setup`) over History API because: no server-side rewrite rules, `<a href="#/..">` links give native accessibility and free back/forward, and GitHub Pages doesn't support per-route 404-to-index rewrites cleanly.
+
+`js/router.js` is ~80 LOC: one `hashchange` listener, lazy `import('./views/...')` on first activation, wipes `#view-root`'s innerHTML before the next mount. View contract: every module default-exports `{ mount(root), unmount() }`. `unmount` is usually empty because in-view DOM is garbage-collected when innerHTML is cleared — only shell-level listeners need explicit cleanup.
+
+`js/app.js` is ~40 LOC: version label, `#settings-btn` → `navigate('#/setup')`, `beforeunload` warning when `syncQueue.length > 0`, `store.loadCache()` once before `router.start()`.
+
+**Lazy loading gain:** users who only categorize never download `dashboard.js`, `budget.js`, `suggest.js`, `swipe.js`. Verified via DevTools Network tab — `/js/views/dashboard.js` only appears when the Dashboard tab is tapped the first time. Subsequent loads come from the service worker's stale-while-revalidate rule for `/js/views/` and `/js/lib/`.
+
+### v0.12.2 — moving chrome into the view that owns it
+
+v0.12.1 shipped with Refresh + Sync in the shell header and a `setHeaderActions({refresh, sync, settings})` helper that each view called on mount. Fine mechanism, wrong location:
+
+- Refresh and Sync are **categorize-flow tools** — they're meaningless on Dashboard or Setup.
+- The helper required bookkeeping at every view, plus a "Done" relabel on Setup's Settings button because the whole header/tab-bar was hidden on `#/setup`.
+
+v0.12.2 deleted `setHeaderActions` entirely. Header is now just title + version + Settings. Refresh is an inline `⟳` icon in `#period-filter-bar` (next to the period dropdown). Sync is a sticky bar (`#sync-bar`) above the tab-bar, hidden when `store.syncQueue.length === 0`. When the undo-bar is also visible, `.above-undo` on the sync-bar bumps it up 48px to stack.
+
+The Categorize tab-bar label gained a pending-count badge: `Categorize (N)` when a queue exists, maintained by `router.updateCategorizeBadge()` — called on every route change and from `categorize.js` after any mutation (categorize, undo, sync complete). No pub/sub needed; explicit calls at the mutation sites.
+
+Explicit non-goals (documented in the v0.12.2 plan): no pull-to-refresh gesture (~60 LOC of touch handling the icon covers functionally), no FAB, no pub/sub.
+
+### v0.13 — dashboard data layer
+
+The key design decision was **not** to add a new Apps Script endpoint. The spreadsheet has already computed every value we need: Budget rows 8+ contain pre-computed Spent + Available per period/category via SUMIFS, and Saving rows 6+ contain pre-computed per-goal rollups. `lib/budget.js` makes two parallel `dumpSheet` calls (Budget `A1:F215` = 1,290 cells; Saving `A1:I105` = 945 cells — both under the 10K cap), parses display-strings like `"$1,234.56"` into numbers on ingest, and caches the normalized shape for 10 minutes in localStorage.
+
+Period switching is **zero-network**. One fetch pulls all 26 periods × 8 categories; the dropdown `onchange` filters the cached JS array. This was the biggest design win — naively fetching per-period would have been 26× worse.
+
+Currency round-trip goes through two helpers. `parseCurrency` is tolerant of `$`, commas, whitespace, paren-negatives, blanks, null — 11 edge cases unit-tested via `node --input-type=module` before commit. `formatCurrency` uses `new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })` — all display runs through it so future locale changes happen in one place.
+
+Cache invalidation is one explicit call from `views/categorize.js sync()`: after `batchCategorize` success, call `invalidateDashboardCache()` alongside `invalidateSuggestIndex()`. Two callers total, so no pub/sub yet.
+
+**Known scope limit (documented in the plan's non-goals):** the per-period Net Income / Fixed Expenses / Ready-to-Assign numbers live in `Budget!A4:F4`, pre-computed against whatever `$B$1` (the sheet's period dropdown) is set to. Replicating them client-side for arbitrary periods would require three more `dumpSheet` calls (Transactions for Paycheck SUMIFS, FixedMonthlyExpenses for the LET monthly-day-check, Setup for PayPeriod dates). For v0.13 we read the summary row as-is; if `Budget!B1` ≠ the PWA's selected period, the hero card shows a small "sheet period: X" hint. Full replication is a v0.14+ stretch.
+
+### v0.14 — auto-suggest engine + per-row swipe
+
+Local-only by design. No LLM, no new endpoint. One `dumpSheet('Transactions', 'A2:H1000')` call builds `{normalizedMerchant: {category: count}}` — cached 1 hour, invalidated after `batchCategorize` just like the dashboard cache.
+
+**Merchant normalizer** (`lib/suggest.js`): 6 regex rules applied in order. Goal is **deterministic variant collapse** — if `AMAZON.COM*MT12345 SEATTLE WA` and `AMAZON.COM*XY98765 SEATTLE WA` produce different keys, the index bucketizes them separately and confidence never rises above threshold. Initial draft of the rules failed that test; tightened to:
+
+1. lowercase + trim
+2. `^(sq|tst|sp|paypal)\s*\*\s*` — payment-processor prefixes
+3. `\s*\*[a-z0-9]+` global — strip card/txn ID suffixes **anywhere**, not just at end
+4. `\s*#\w+` — strip store IDs (`#4321`, `#10211`)
+5. `\S*\d+\S*` — strip any token with a digit (catches `T-0384`, `123abc`, `12345`)
+6. `\s+[a-z]{2}$` — strip trailing 2-letter state code
+7. collapse whitespace
+
+17 unit-test cases run before commit (`Starbucks #4321` → `starbucks`, `AMAZON.COM*MT12345 SEATTLE WA` and `AMAZON.COM*XY98765 SEATTLE WA` → same key, `TARGET T-0384` and `TARGET 00026452` → `target`, etc.). If you edit the rules, re-run the suite — the `node --input-type=module` block in the session log makes it easy.
+
+**Confidence threshold:** `topCount / totalSeen >= 0.70` else no suggestion. PayPal-style ambiguous merchants don't get suggested; users handle them in Manual. Cold start with < 20 historical categorizations suggests almost nothing — by design, coverage grows as the user categorizes.
+
+**Swipe gesture** (`lib/swipe.js`, ~95 LOC): `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold = 0.40 })`. The `translateEl`/`revealEl` split is critical — pseudo-elements transform with their parent, so if the row itself translates, the action-background `::before`/`::after` go off-screen with it. The Auto tab uses a two-element DOM: outer `.auto-row` stays static and holds the Accept/Skip backgrounds; inner `.auto-row-inner` has the visible content and translates. `attachSwipe(inner, { revealEl: outer, ... })` wires both.
+
+Vertical-scroll preservation: on the first meaningful move (`|dx|` or `|dy|` > 4 px), if `|dy| > |dx| * 1.5` the swipe aborts and the browser takes scroll control. Short static taps (dx < 5 px and t < 300 ms) fall through to the normal click handler — that's how tap-to-open-picker still works on the same row. Commit (>= 40% of row width) animates the row off-screen over 180 ms, then fires the callback.
+
+**`rejectedThisSession`** is a module-level Set in `categorize.js`, intentionally in-memory only. Next session — after more categorizations have expanded the index — a suggestion that was below threshold today might hit threshold, and the user deserves another look.
+
+### GitHub Pages `.nojekyll` failure mode (Apr 23 2026)
+
+First deploy of the feature branch to Pages timed out at `updating_pages` with `Error: Timeout reached, aborting!`. The build step "succeeded" — an artifact was created — but the deploy-to-live step hung and eventually cancelled. Misleading symptom: the failure log looks unrelated to content.
+
+Root cause: GitHub Pages runs Jekyll by default when no `.nojekyll` marker exists. The build produced some artifact that the deploy step couldn't apply (likely a path or content that Jekyll munged). The static PWA shouldn't be Jekyll-processed at all.
+
+Fix: empty `.nojekyll` at repo root + empty-commit retrigger. After landing the marker and pushing a no-op commit, the next deploy succeeded.
+
+Rules:
+
+- **Keep `.nojekyll` on every branch Pages deploys from.** When merging the feature branch into `main`, the marker goes with the merge.
+- **Pages build "success" doesn't imply deploy success.** If the live site doesn't update, check Actions → pages build and deployment → the DEPLOY step specifically.
+- **Empty-commit retrigger is a valid diagnostic.** `git commit --allow-empty -m "Retrigger Pages deploy" && git push` is safe and often clears transient GitHub infrastructure hiccups.
