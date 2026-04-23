@@ -1,3 +1,21 @@
+/*
+ * style.css — Budget Categorizer PWA
+ *
+ * TOC
+ *   RESET / BODY
+ *   HEADER
+ *   TAB-BAR (bottom navigation, v0.12+)
+ *   SETUP (config form + version info)
+ *   TRANSACTIONS (list + period filter)
+ *   CATEGORY PICKER + ADD MODAL
+ *   UNDO BAR
+ *   LOADING / EMPTY STATES
+ *   TOAST (error + success)
+ *   DASHBOARD (stub, v0.12)
+ */
+
+/* ============================ RESET / BODY =========================== */
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -8,13 +26,22 @@
   display: none !important;
 }
 
+/* Tab-bar height + iOS safe area — reused by fixed-bottom elements
+   (undo-bar, category-picker) to stack above it. */
+:root {
+  --tab-bar-height: 56px;
+  --tab-bar-total: calc(var(--tab-bar-height) + env(safe-area-inset-bottom, 0px));
+}
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   background: #f5f5f5;
   color: #333;
   min-height: 100vh;
-  padding-bottom: 60px;
+  padding-bottom: var(--tab-bar-total);
 }
+
+/* ================================ HEADER ============================= */
 
 header {
   display: flex;
@@ -64,7 +91,46 @@ header h1 {
   opacity: 0.4;
 }
 
-/* Config form */
+/* ============================== TAB-BAR ============================== */
+
+#tab-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--tab-bar-total);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  display: flex;
+  background: #fff;
+  border-top: 1px solid #e0e0e0;
+  z-index: 15;
+}
+
+#tab-bar .tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  color: #666;
+  font-size: 13px;
+  font-weight: 500;
+  height: var(--tab-bar-height);
+  -webkit-tap-highlight-color: transparent;
+}
+
+#tab-bar .tab.active {
+  color: #1a237e;
+  font-weight: 600;
+  box-shadow: inset 0 2px 0 #1a237e;
+}
+
+#tab-bar .tab:active {
+  background: #f0f0f0;
+}
+
+/* =============================== SETUP =============================== */
+
 #config-section {
   padding: 24px 16px;
 }
@@ -127,7 +193,8 @@ header h1 {
   margin-top: 4px;
 }
 
-/* Transaction list */
+/* ============================ TRANSACTIONS =========================== */
+
 #transaction-list {
   padding: 8px 0;
 }
@@ -169,15 +236,16 @@ header h1 {
   color: #999;
 }
 
-/* Category picker */
+/* ==================== CATEGORY PICKER + ADD MODAL ==================== */
+
 #category-picker {
   position: fixed;
-  bottom: 0;
+  bottom: var(--tab-bar-total);
   left: 0;
   right: 0;
   background: #fff;
   border-top: 2px solid #1a237e;
-  padding: 12px 16px 60px;
+  padding: 12px 16px 16px;
   max-height: 60vh;
   overflow-y: auto;
   z-index: 10;
@@ -377,10 +445,11 @@ header h1 {
   background: #999;
 }
 
-/* Undo bar */
+/* ============================== UNDO BAR ============================= */
+
 #undo-bar {
   position: fixed;
-  bottom: 0;
+  bottom: var(--tab-bar-total);
   left: 0;
   right: 0;
   background: #333;
@@ -413,7 +482,8 @@ header h1 {
   background: rgba(255, 255, 255, 0.2);
 }
 
-/* Loading */
+/* ======================= LOADING / EMPTY STATES ====================== */
+
 #loading {
   display: flex;
   flex-direction: column;
@@ -497,6 +567,7 @@ header h1 {
   color: #999;
 }
 
+/* ================================ TOAST ============================== */
 /* Error / success toast — same element, success state via .success class (B7) */
 #error-toast {
   position: fixed;
@@ -514,3 +585,19 @@ header h1 {
 #error-toast.success {
   background: #2e7d32;
 }
+
+/* ============================== DASHBOARD ============================ */
+/* Stub — full dashboard ships in v0.13. */
+
+#dashboard-section {
+  padding: 48px 16px;
+}
+#dashboard-section .coming-soon {
+  text-align: center;
+  color: #666;
+}
+#dashboard-section .coming-soon h2 {
+  margin-bottom: 8px;
+  color: #333;
+}
+
