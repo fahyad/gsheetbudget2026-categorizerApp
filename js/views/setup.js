@@ -42,14 +42,18 @@ const TEMPLATE = `
 
 export default {
   mount(root) {
-    setHeaderActions({ refresh: false, sync: false, settings: false });
+    // Keep Settings button visible on setup — relabel it "Done" so it acts
+    // as the exit. Shell's click handler detects #/setup and routes back.
+    setHeaderActions({ refresh: false, sync: false, settings: true });
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) settingsBtn.textContent = 'Done';
+
     root.innerHTML = TEMPLATE;
 
     const form = root.querySelector('#config-form');
     const urlInput = root.querySelector('#config-url');
     const keyInput = root.querySelector('#config-key');
 
-    // Pre-fill with existing values so re-opening Settings shows current config.
     urlInput.value = localStorage.getItem('budget_api_url') || '';
     keyInput.value = config.getApiKey() || '';
 
@@ -63,8 +67,9 @@ export default {
   },
 
   unmount() {
-    // Re-show header actions so subsequent views start from a known state.
     setHeaderActions({ settings: true });
+    const settingsBtn = document.getElementById('settings-btn');
+    if (settingsBtn) settingsBtn.textContent = 'Settings';
   },
 };
 
