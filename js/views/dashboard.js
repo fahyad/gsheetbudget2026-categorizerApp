@@ -223,8 +223,17 @@ function renderBody() {
   const data = cachedData;
   const selected = pickPeriod();
   const summary = data.summaryCurrent;
-  const cats = (selected && data.categoriesByPeriod[selected.label]) || [];
+  const allCats = (selected && data.categoriesByPeriod[selected.label]) || [];
   const goals = data.savingGoals || [];
+
+  // Hide categories that belong to a saving goal — they render below in
+  // the Goals section with richer info (target, periods remaining, needed
+  // per period). The match is on sub-category name, which is what the
+  // Saving tab's goal.linkedCategory field stores; "Savings" main is the
+  // common case but we don't hardcode it — any goal-linked category is
+  // suppressed from the Budget section.
+  const linkedSubs = new Set(goals.map(g => g.linkedCategory).filter(Boolean));
+  const cats = allCats.filter(c => !linkedSubs.has(c.sub));
 
   body.innerHTML = '';
 
