@@ -46,21 +46,22 @@ body {
   min-height: 100vh;
   padding-bottom: var(--tab-bar-total);
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;     /* prevent iOS elastic bounce exposing backdrop */
 }
 
 /* ================================ SHELL ============================== */
 
-/* Status-bar spacer — takes the role of the old <header>. The PWA runs
-   with `apple-mobile-web-app-capable` so we sit under the notch. */
-header {
-  height: 54px;
-  background: var(--bg);
-  position: sticky;
-  top: 0;
-  z-index: 5;
+/* The old fixed-height status-bar spacer is gone. Views that need the
+   notch covered (Categorize, Dashboard) extend the period bar's background
+   into the safe area via padding-top: env(safe-area-inset-top). Setup
+   has no period bar and pads its own section top. */
+header,
+.header-actions,
+header h1,
+#settings-btn {
+  display: none;
 }
-header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
-#settings-btn { display: none; }
 
 #view-root { padding-bottom: 8px; }
 
@@ -117,6 +118,10 @@ header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
   background: var(--bg-period);
   border-bottom: 2px solid var(--ink);
   padding: 10px 16px 12px;
+  /* Fill the iOS safe area (Dynamic Island / notch) with the period-bar's
+     tan background so there's no white seam above it. Works on all iPhones:
+     env(safe-area-inset-top) is 0 on non-notch displays. */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
 }
 
 .period-bar-top {
@@ -481,7 +486,9 @@ header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
   left: 0;
   right: 0;
   bottom: var(--tab-bar-total);
-  top: 100px;
+  /* Anchor below the period bar + sub-tab bar. Grows with the safe area
+     so it never overlaps chrome on Dynamic Island iPhones. */
+  top: calc(env(safe-area-inset-top, 0px) + 120px);
   background: var(--bg);
   border-top: 1px solid var(--ink);
   padding: 16px 20px;
@@ -683,7 +690,7 @@ header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
 
 #error-toast {
   position: fixed;
-  top: 64px;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
   left: 20px;
   right: 20px;
   background: var(--red);
@@ -917,6 +924,8 @@ header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
 
 #config-section {
   padding: 24px 20px;
+  /* Setup has no period bar, so it pads for the safe area itself. */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 24px);
 }
 
 #config-section h2 {
