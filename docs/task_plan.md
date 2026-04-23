@@ -6,7 +6,7 @@
 
 ## Current State (April 2026)
 - **Apps Script:** v11.12 — `updateWorkbook` now delegates Budget refresh to `rebuildBudgetInternal_`. The previous in-place per-row setFormula loop was silently failing — Budget dashboard formulas worked but per-row formulas stayed `#REF!`. v11.11 was the Saving tab schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods). v11.9 + v11.10 were earlier Saving shakedown fixes. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
+- **PWA:** v0.12.1 (cache v16) — **scaffolding restructure, Deploy 1 of 3.** Shell shrunk 657 → ~40 LOC; hash router + lazy-loaded view modules + bottom tab-bar. No user-visible feature change from v0.11 (categorize flow identical). Dashboard tab is a placeholder. Deploy 2 (dashboard content) and Deploy 3 (auto-suggest swipe deck) planned. **Currently on experimental branch `claude/read-markdown-context-v1c5T`, NOT merged to `main`** — production at the Pages URL is still v0.11 until this lands. See Phase 18 below.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -163,13 +163,38 @@ Investigation also covered Budget row 72 (Apr 15-28 Gas showing -$280). Turned o
 The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
 - **Status:** complete
 
-## Phases — Future
+## Phases — In Progress / Future
 
-### Phase 18: Auto-Categorization (not started)
-- [ ] Merchant → category mapping table in sheet
-- [ ] Known merchants auto-categorize during parseAndFetch (skip the uncategorized queue)
-- [ ] Only unknown merchants need manual review in PWA
-- **Status:** future
+### Phase 18: PWA Experimental Restructure (v0.12+)
+User wanted the PWA to feel snappier ("like Wikipedia Mobile / Twitter Lite / Pinterest") and had two new features queued: a Dashboard tab (read-only Budget-sheet view) and an auto-categorization swipe deck. Scaling the existing 657-line single-file `app.js` to absorb both was going to regress first-paint time and make the file unmaintainable. Chose to restructure the shell first, then build features on the clean foundation.
+
+**3-deploy plan. Detailed architecture doc: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.**
+
+Design choices (scaffolding-level):
+- **Hash routing** (`#/categorize`, `#/dashboard`, `#/setup`) via `<a>` hrefs in a bottom tab-bar. ~60-line router, zero click handlers for nav, browser back works.
+- **View module contract:** `export default { mount(root), unmount() }`. Router lazy-imports on first navigation, wipes root innerHTML on transition.
+- **Lazy loading:** dashboard and future auto-suggest chunks aren't downloaded until the user navigates there. Users who only categorize never pay for the rest.
+- **Service worker stale-while-revalidate** for `/js/views/` and `/js/lib/` so dynamic imports work offline after first successful fetch.
+- **State management unchanged** — `store.js` stays as a singleton. No pub/sub (deferred per user direction; revisit if view-to-view coupling becomes painful in Deploy 2 or 3).
+- **Keep single `style.css`** with section-header TOC. Splitting deferred until it crosses ~1200 LOC.
+- **Header buttons** (`refresh`, `sync`) hidden by default; each view declares what it needs via `setHeaderActions(...)` on mount. Settings button is always visible; shell handler routes based on current hash (to `#/setup` from elsewhere, back to `#/categorize` when already there). Setup view relabels the button to "Done" so the affordance reads correctly.
+
+**Branch state:**
+- Working on `claude/read-markdown-context-v1c5T` (branched from `pwa/experiments`).
+- Pushed to origin; **NOT merged to `main`**. GitHub Pages deploys from `main`, so until merged the production URL shows v0.11.
+- Preview by pointing Pages source at the branch (Settings → Pages → Source) or local `python3 -m http.server` + DevTools mobile emulation.
+
+**Deploy sequence:**
+- ✅ **Deploy 1 — v0.12 / v0.12.1 (shipped).** Scaffolding only. Behaviour identical to v0.11. v0.12.1 fixed a UX regression where Setup hid all header buttons leaving no exit. Files: `js/router.js` (new), `js/ui.js` (new), `js/views/categorize.js` + `setup.js` + `dashboard.js` (new, extracted/stubbed), `js/app.js` (rewritten as thin shell), `index.html` + `css/style.css` + `sw.js` updated. Cache `v14 → v16`.
+- ⏳ **Deploy 2 — v0.13 (planned).** Implement `views/dashboard.js` against `api.dumpSheet('Budget', ...)`. Read-only view of the selected pay period: Budgeted / Spent / Available per category, maybe period dropdown mirroring the sheet's B1. Row layout + formatting decided at the time of implementation.
+- ⏳ **Deploy 3 — v0.14 (planned).** Auto-categorization swipe deck. Adds `js/lib/swipe.js` + `js/lib/suggest.js` + a swipe view (or sub-route under categorize). Suggestion source TBD — candidates: merchant→category history table in the sheet, or pure client-side by scanning existing categorized transactions. The Phase 18 goals below fold into this.
+
+**Planned Deploy 3 goals (from the original "Auto-Categorization" Phase 18):**
+- [ ] Merchant → category mapping (source TBD)
+- [ ] Known merchants auto-suggest the category; user confirms/corrects with a swipe
+- [ ] Unknown merchants fall through to the current manual picker
+
+- **Status:** Deploy 1 shipped on branch; Deploys 2-3 not started; not yet merged to `main`
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
@@ -218,10 +243,12 @@ cd ~/gsheetbudget2026-categorizerApp/apps-script
 ```bash
 cd ~/gsheetbudget2026-categorizerApp
 # edit js/, index.html, css/, sw.js
-# bump version in index.html (header span) AND CACHE_VERSION in sw.js
+# bump APP_VERSION in js/config.js AND CACHE_VERSION in sw.js
+# (header label is populated at runtime from APP_VERSION — no HTML edit needed)
 git add . && git commit -m "..." && git push
 # GitHub Pages auto-deploys from main branch
 ```
+Bumping CACHE_VERSION is how the service worker knows to activate and purge the old cache. Skip it and installed PWAs will keep serving stale code.
 
 ### After Apps Script changes, check the Logs tab
 Open the budget sheet → Budget Tools → View Activity Log. Every API call from the PWA appears with duration, status, and details.

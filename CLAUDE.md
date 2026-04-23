@@ -28,7 +28,7 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 
 ## Current versions
 - **Apps Script:** v11.12 (updateWorkbook now delegates Budget refresh to `rebuildBudgetInternal_` because the in-place per-row refresh loop was silently failing — dashboard formulas worked but per-row formulas (rows 8+) stayed `#REF!` indefinitely). Earlier shakedown: v11.9 updateWorkbook ordering so Saving formulas don't break to `#REF!`; v11.10 replaced XLOOKUP-with-array-multiplication with INDEX+MATCH; v11.11 Saving schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods).
-- **PWA:** v0.11 (cache v14) — adds period filter dropdown (Phase 5). Plus all phase 1-4 fixes from v0.10.
+- **PWA:** v0.12.1 (cache v16) — **scaffolding restructure** (Deploy 1 of 3). App shell reduced to ~35 LOC; hash router + lazy-loaded view modules + bottom tab-bar. No user-visible feature change from v0.11 (same manual-categorize flow). Dashboard tab is a placeholder stub. Auto-suggest swipe deck ships in Deploy 3. Currently on the experimental branch `claude/read-markdown-context-v1c5T` — NOT yet merged to `main`. See "PWA architecture" section below.
 
 ## Common commands
 
@@ -125,13 +125,70 @@ PWA is plain static files at the repo root. GitHub Pages auto-deploys from `main
 ```bash
 git add . && git commit -m "..." && git push
 ```
-Bump `<span class="version">vX.Y</span>` in `index.html` AND `CACHE_VERSION` in `sw.js` when shipping a real change (otherwise users get cached old code).
+Bump `APP_VERSION` in `js/config.js` AND `CACHE_VERSION` in `sw.js` when shipping a real change (otherwise installed PWAs keep serving cached old code via the service worker).
+
+The header version label in `index.html` is populated at runtime from `APP_VERSION` — no need to touch HTML.
+
+## PWA architecture (v0.12+)
+
+Restructured in v0.12 from a 657-line single-file app into a thin shell + lazy-loaded view modules. The shell is ~35 LOC and loads instantly; each view is fetched on first navigation.
+
+**Module layout:**
+```
+js/
+  app.js           ~40   shell: version label, settings-btn handler, initial-route gate, beforeunload
+  router.js        ~60   hashchange -> lazy import(view) -> mount(root) / unmount()
+  ui.js            ~40   shared showError/showSuccess + setHeaderActions({refresh, sync, settings})
+  config.js, api.js, store.js, periods.js   unchanged from v0.11
+  views/
+    categorize.js  ~400  the manual-categorize flow (period filter, picker, add-cat modal, sync, undo)
+    setup.js       ~130  config form + version info panel
+    dashboard.js   ~20   placeholder stub; real content lands in Deploy 2 (v0.13)
+```
+
+**Routes:** `#/categorize` (default), `#/dashboard`, `#/setup`. Navigation via `<a href="#/...">` in the bottom tab-bar — zero JS click handlers for nav, browser back/forward works.
+
+**View contract:** every view module default-exports `{ mount(root), unmount() }`. `mount` renders its DOM into `#view-root` and attaches listeners. `unmount` removes shell-level listeners (header buttons) — in-view DOM is wiped by the router's `root.innerHTML = ''` before the next mount.
+
+**Header buttons:** `sync-btn` and `refresh-btn` are hidden by default in HTML. Views declare what they need via `setHeaderActions({refresh, sync, settings})` on mount. `settings-btn` is always visible (except where a view hides it); the shell handler routes based on current hash — `#/setup` from elsewhere, or back to `#/categorize` when already on setup. Setup view relabels the button to "Done" on mount so the affordance reads correctly.
+
+**Tab-bar:** bottom-fixed, hidden on `#/setup`. Stacks at `var(--tab-bar-total)` = 56px + `env(safe-area-inset-bottom)`. Undo-bar and category-picker position themselves above it via the same CSS var.
+
+**Service worker (v15+):** precaches the shell (app.js, router.js, ui.js, config.js, api.js, store.js, periods.js, index.html, style.css, manifest.json). Lazy view modules under `/js/views/` and `/js/lib/` are served via stale-while-revalidate — dynamic imports work offline after first successful fetch. Bump `CACHE_VERSION` on every PWA release so the new SW activates and purges old caches.
+
+**State:** `store.js` is still a singleton loaded once in the shell (`store.loadCache()` before `router.start()`). No pub/sub — views call renders explicitly, same as v0.11. Deferred to a future deploy if view-to-view coupling becomes painful.
+
+### Deploy sequence (3 deploys total)
+- ✅ **Deploy 1 (v0.12 / v0.12.1) — shipped** on branch `claude/read-markdown-context-v1c5T`. Scaffolding only; behaviour identical to v0.11. v0.12.1 fixed a UX regression where Setup had no exit button.
+- ⏳ **Deploy 2 (v0.13)** — implement `views/dashboard.js` against `api.dumpSheet('Budget', ...)`. Row layout TBD when we get there.
+- ⏳ **Deploy 3 (v0.14)** — auto-suggest swipe deck. Add `lib/swipe.js` + `lib/suggest.js` + swipe view or sub-route under categorize. Suggestion source TBD.
+
+Detailed plan: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.
+
+### Current branch state
+- **Branch with v0.12.1 restructure:** `claude/read-markdown-context-v1c5T` (pushed to origin)
+- **Branched from:** `pwa/experiments`
+- **`main` still carries v0.11.** GitHub Pages auto-deploys from `main` — until this is merged, users on the production URL see v0.11.
+- **Preview options:** point Pages source at the branch (Settings → Pages → Source), or test locally via `python3 -m http.server`.
+- **PR:** not opened (user manages PRs manually).
 
 ## File map
 
 | Path | Purpose |
 |------|---------|
-| `index.html`, `js/`, `css/`, `sw.js`, `manifest.json` | PWA (GitHub Pages). `js/periods.js` derives pay-period info client-side from a single anchor — no backend roundtrip needed for the period filter. |
+| `index.html` | PWA entry. Shell DOM: header + `<main id="view-root">` + `<nav id="tab-bar">` + `#error-toast`. Views render into `#view-root`. |
+| `sw.js`, `manifest.json` | Service worker + PWA manifest |
+| `css/style.css` | Single stylesheet with section-header TOC. `--tab-bar-total` CSS var drives bottom-fixed stacking. |
+| `js/app.js` | Shell (~40 LOC). Version label, settings-btn routing, beforeunload, store.loadCache(), hands off to router. |
+| `js/router.js` | Minimal hashchange router with lazy view imports + mount/unmount lifecycle. |
+| `js/ui.js` | Shared UI helpers: `showError`, `showSuccess`, `setHeaderActions`. |
+| `js/config.js` | `APP_VERSION`, hardcoded `DEFAULT_API_URL`, localStorage config getters/setters. |
+| `js/api.js` | Thin fetch wrapper around the Apps Script endpoints. |
+| `js/store.js` | In-memory + localStorage-backed state: transactions, categories, syncQueue. |
+| `js/periods.js` | Client-side pay-period math from a single anchor date — no backend roundtrip. |
+| `js/views/categorize.js` | Manual-categorize flow (period filter, picker, add-cat modal, sync, undo). |
+| `js/views/setup.js` | Config form + version info panel. |
+| `js/views/dashboard.js` | Placeholder stub. Real content ships in v0.13. |
 | `apps-script/Code.js` | Apps Script source (~2400 lines) |
 | `apps-script/deploy.sh` | One-command production deploy |
 | `apps-script/.clasp.json` | Apps Script project link (scriptId + rootDir) |
@@ -179,6 +236,10 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 11. **XLOOKUP with multiplied-boolean lookup arrays is unreliable in Sheets.** A formula like `XLOOKUP(1, (startCol<=today)*(endCol>=today), labelCol)` may return no-match even when a match clearly exists. Prefer `INDEX(labelCol, MATCH(today, startCol, 1))` when the start column is ascending-sorted — it's more portable and doesn't rely on array-broadcast behavior. See `docs/findings.md` "Saving B3 XLOOKUP Out-of-Range (v11.10)".
 
 12. **updateWorkbook's in-place per-row setFormula refresh silently fails (v11.12).** The same setFormula text that works from `rebuildBudgetInternal_` stored `#REF!` when called from the in-place loop inside `updateWorkbook` — even when the named ranges existed (dashboard formulas in the same tab resolved correctly). Root cause unknown; suspected Apps Script state-commit quirk. Fix: `updateWorkbook` now calls `rebuildBudgetInternal_('refresh', ss)` instead of the per-row loop. Don't reintroduce per-row refresh in `updateWorkbook`. See `docs/findings.md` "Budget #REF! After updateWorkbook (v11.12)".
+
+13. **PWA views must declare `setHeaderActions` on mount (v0.12+).** The shell hides `refresh-btn` and `sync-btn` by default. Each view calls `setHeaderActions({refresh, sync, settings})` in `mount()` to declare what it needs. Forgetting this leaves the view with no Refresh/Sync affordance. Setup view intentionally uses `settings: true` + relabels the button to "Done" so it acts as the exit — without this, users get stranded on setup with no way back (the tab-bar is also hidden on `#/setup`). See `v0.12.1` commit for the regression fix.
+
+14. **In-view event listeners die with the DOM; shell-level listeners must be removed explicitly.** The router does `root.innerHTML = ''` before mounting the next view, so any listener on an element inside `#view-root` is garbage-collected. But listeners attached to `#refresh-btn`, `#sync-btn`, `#settings-btn`, or `window` persist — views must `removeEventListener` those in `unmount()`. See `categorize.js` for the pattern (tracks handler refs at module scope, removes in `unmount`).
 
 ## When in doubt
 - Check `docs/task_plan.md` for current state
