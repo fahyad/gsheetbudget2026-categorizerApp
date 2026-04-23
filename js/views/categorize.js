@@ -9,9 +9,18 @@ import { periodForTimestamp, currentPeriod } from '../periods.js';
 import { showError, showSuccess } from '../ui.js';
 import { updateCategorizeBadge } from '../router.js';
 import { invalidateDashboardCache } from '../lib/budget.js';
+import { ensureIndexReady, suggest, invalidateSuggestIndex } from '../lib/suggest.js';
+import { attachSwipe } from '../lib/swipe.js';
+
+const SUBTAB_KEY = 'budget_categorize_subtab';
 
 const TEMPLATE = `
   <section id="app-section">
+    <div id="subtab-bar" role="tablist">
+      <button id="subtab-manual" class="subtab active" role="tab" aria-selected="true">Manual</button>
+      <button id="subtab-auto"   class="subtab"        role="tab" aria-selected="false">Auto</button>
+    </div>
+
     <div id="period-filter-bar">
       <label for="period-filter">Period:</label>
       <select id="period-filter" aria-label="Filter transactions by pay period"></select>
@@ -23,6 +32,11 @@ const TEMPLATE = `
     <div id="period-empty-state" hidden>
       <p>No uncategorized transactions in this period.</p>
       <p class="hint">Pick a different period above, or choose "All".</p>
+    </div>
+
+    <div id="auto-empty-state" hidden>
+      <p>No high-confidence suggestions for this period.</p>
+      <p class="hint">Categorize a few manually, then check back — suggestions need history.</p>
     </div>
 
     <div id="category-picker" hidden>
@@ -83,6 +97,10 @@ let selectedTimestamp = null;
 let selectedPeriodFilter = null;
 let refreshInFlight = false;
 let syncInFlight = false;
+let activeSubtab = 'manual'; // 'manual' | 'auto'
+// Timestamps swiped-left this session. Intentionally in-memory only — a
+// next-session re-examination gives the index another chance.
+const rejectedThisSession = new Set();
 
 // DOM refs — set in mount(). All live inside the view's own DOM subtree,
 // so they're garbage-collected when the router clears root.innerHTML.
@@ -91,6 +109,7 @@ let appSection, transactionList, categoryPicker, categoryButtons,
     emptyRefreshBtn, undoBar, undoText, undoBtn, addCatBtn, addCatModal,
     mainCatSelect, newMainGroup, newMainInput, subCatInput,
     cancelAddCat, saveAddCat, periodFilter, periodEmptyState,
+    autoEmptyState, subtabManual, subtabAuto,
     refreshBtn, syncBar, syncBarText, syncBtn;
 
 export default {
@@ -119,6 +138,9 @@ export default {
     saveAddCat = root.querySelector('#save-add-cat');
     periodFilter = root.querySelector('#period-filter');
     periodEmptyState = root.querySelector('#period-empty-state');
+    autoEmptyState = root.querySelector('#auto-empty-state');
+    subtabManual = root.querySelector('#subtab-manual');
+    subtabAuto = root.querySelector('#subtab-auto');
     refreshBtn = root.querySelector('#refresh-inline');
     syncBar = root.querySelector('#sync-bar');
     syncBarText = root.querySelector('#sync-bar-text');
@@ -145,6 +167,15 @@ export default {
       renderTransactions();
     });
 
+    subtabManual.addEventListener('click', () => setSubtab('manual'));
+    subtabAuto.addEventListener('click', () => setSubtab('auto'));
+
+    // Restore last sub-tab (default 'manual'). Apply class state; the first
+    // renderTransactions() call below uses activeSubtab to pick a branch.
+    const saved = localStorage.getItem(SUBTAB_KEY);
+    activeSubtab = saved === 'auto' ? 'auto' : 'manual';
+    applySubtabState();
+
     renderCategories();
     renderSyncBar();
     renderUndo();
@@ -162,6 +193,12 @@ export default {
         }
       });
 
+    // Warm the suggestion index in the background so Auto-tab toggles are
+    // instant. Failures are silent — Auto tab will just show its empty state.
+    ensureIndexReady()
+      .then(() => { if (activeSubtab === 'auto') renderTransactions(); })
+      .catch(err => console.error('Suggest index warm-up failed:', err));
+
     await refresh();
   },
 
@@ -169,6 +206,23 @@ export default {
     selectedTimestamp = null;
   },
 };
+
+function setSubtab(which) {
+  if (which !== 'manual' && which !== 'auto') return;
+  if (activeSubtab === which) return;
+  activeSubtab = which;
+  localStorage.setItem(SUBTAB_KEY, which);
+  applySubtabState();
+  deselectTransaction();
+  renderTransactions();
+}
+
+function applySubtabState() {
+  subtabManual.classList.toggle('active', activeSubtab === 'manual');
+  subtabAuto.classList.toggle('active', activeSubtab === 'auto');
+  subtabManual.setAttribute('aria-selected', String(activeSubtab === 'manual'));
+  subtabAuto.setAttribute('aria-selected', String(activeSubtab === 'auto'));
+}
 
 // ================================================================
 // REFRESH
@@ -274,6 +328,8 @@ async function sync() {
     if (succeeded.length > 0) {
       // Spent / Available changed in the sheet — dashboard cache is stale.
       invalidateDashboardCache();
+      // New categorized rows in Transactions → suggestion index is stale too.
+      invalidateSuggestIndex();
     }
 
     if (failed.length === 0) {
@@ -304,6 +360,7 @@ function renderTransactions() {
     appSection.hidden = true;
     emptyState.hidden = false;
     periodEmptyState.hidden = true;
+    autoEmptyState.hidden = true;
     return;
   }
 
@@ -312,6 +369,16 @@ function renderTransactions() {
 
   populatePeriodFilter();
   const visible = filterTxnsByPeriod(store.transactions);
+
+  if (activeSubtab === 'auto') {
+    renderAutoList(visible);
+  } else {
+    renderManualList(visible);
+  }
+}
+
+function renderManualList(visible) {
+  autoEmptyState.hidden = true;
 
   if (visible.length === 0) {
     periodEmptyState.hidden = false;
@@ -343,6 +410,84 @@ function renderTransactions() {
 
     div.addEventListener('click', () => selectTransaction(txn));
     transactionList.appendChild(div);
+  }
+}
+
+function renderAutoList(visible) {
+  periodEmptyState.hidden = true;
+
+  // Only rows with a high-confidence suggestion AND not swiped-away-this-session.
+  const withSuggestions = [];
+  for (const txn of visible) {
+    if (rejectedThisSession.has(txn.timestamp)) continue;
+    const s = suggest(txn.merchant);
+    if (!s) continue;
+    withSuggestions.push({ txn, suggestion: s });
+  }
+
+  if (withSuggestions.length === 0) {
+    autoEmptyState.hidden = false;
+    return;
+  }
+  autoEmptyState.hidden = true;
+
+  for (const { txn, suggestion } of withSuggestions) {
+    // Outer: static shell that holds swipe-action backgrounds (::before
+    // accept, ::after skip). Inner: the visible content that translates.
+    const row = document.createElement('div');
+    row.className = 'auto-row';
+    row.dataset.timestamp = txn.timestamp;
+
+    const inner = document.createElement('div');
+    inner.className = 'auto-row-inner';
+
+    const line1 = document.createElement('div');
+    line1.className = 'auto-row-line1';
+    const merchantSpan = document.createElement('span');
+    merchantSpan.className = 'txn-merchant';
+    merchantSpan.textContent = txn.merchant;
+    const amountSpan = document.createElement('span');
+    amountSpan.className = 'txn-amount';
+    amountSpan.textContent = '$' + Math.abs(txn.amount).toFixed(2);
+    line1.appendChild(merchantSpan);
+    line1.appendChild(amountSpan);
+
+    const line2 = document.createElement('div');
+    line2.className = 'auto-row-line2';
+    const indicator = document.createElement('span');
+    indicator.className = 'auto-suggest-indicator';
+    indicator.textContent = '↗';
+    const catSpan = document.createElement('span');
+    catSpan.className = 'auto-suggest-category';
+    catSpan.textContent = suggestion.category;
+    line2.appendChild(indicator);
+    line2.appendChild(catSpan);
+
+    inner.appendChild(line1);
+    inner.appendChild(line2);
+    row.appendChild(inner);
+
+    // Tap opens the picker (same as Manual). Swipe intercepts via touch events.
+    inner.addEventListener('click', () => selectTransaction(txn));
+
+    attachSwipe(inner, {
+      revealEl: row,
+      onRight: () => {
+        // Accept: apply suggested category and remove the row.
+        categorize(txn.timestamp, suggestion.category);
+      },
+      onLeft: () => {
+        // Reject for this session — txn stays in Manual tab.
+        rejectedThisSession.add(txn.timestamp);
+        row.remove();
+        // If this was the last row, show the empty state.
+        if (!transactionList.querySelector('.auto-row')) {
+          autoEmptyState.hidden = false;
+        }
+      },
+    });
+
+    transactionList.appendChild(row);
   }
 }
 
