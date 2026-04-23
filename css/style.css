@@ -1,89 +1,68 @@
 /*
- * style.css — Budget Categorizer PWA
+ * style.css — Budget Categorizer PWA (v0.15 redesign)
+ *
+ * Minimal Monochrome direction per the Claude Design handoff. Near-black on
+ * warm off-white, thin rules, no gradients, period bar is a collapsible
+ * calendar. Left/over amounts are color-coded: black = positive, amber =
+ * zero, red = overspent. Green only for goal-reached.
+ *
+ * Design tokens are in :root below. Change them in one place to retheme.
  *
  * TOC
- *   RESET / BODY
- *   HEADER
- *   TAB-BAR (bottom navigation, v0.12+)
- *   SETUP (config form + version info)
- *   TRANSACTIONS (list + period filter + inline refresh)
- *   CATEGORY PICKER + ADD MODAL
- *   UNDO BAR
- *   SYNC BAR (bottom-sticky, v0.12.2+)
- *   LOADING / EMPTY STATES
- *   TOAST (error + success)
- *   DASHBOARD (stub, v0.12)
+ *   TOKENS + RESET
+ *   SHELL (header spacer + tab-bar)
+ *   PERIOD BAR (calendar dropdown)
+ *   CATEGORIZE — sub-tab control, manual row, auto row, empty states
+ *   CATEGORIZE — picker + add-category modal
+ *   UNDO BAR + TOAST
+ *   DASHBOARD — summary strip, category groups, goals
+ *   SETUP — form + version list
  */
 
-/* ============================ RESET / BODY =========================== */
-
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-[hidden] {
-  display: none !important;
-}
-
-/* Tab-bar height + iOS safe area — reused by fixed-bottom elements
-   (undo-bar, category-picker) to stack above it. */
 :root {
-  --tab-bar-height: 56px;
-  --tab-bar-total: calc(var(--tab-bar-height) + env(safe-area-inset-bottom, 0px));
+  --bg:           #FAFAF9;
+  --bg-period:    #EFEDE8;
+  --bg-selected:  #F5F5F4;
+  --bg-active-tab:#F0EFEC;
+  --ink:          #0A0A0A;
+  --muted:        #737373;
+  --muted-2:      #A3A3A3;
+  --rule:         #E5E5E3;
+  --rule-2:       #EDEDEB;
+  --amber:        #B45309;   /* zero balance */
+  --red:          #B91C1C;   /* overspent / error */
+  --green:        #15803D;   /* goal complete */
+  --tab-bar-h:    72px;
+  --tab-bar-total:calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px));
 }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f5f5f5;
-  color: #333;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
   min-height: 100vh;
   padding-bottom: var(--tab-bar-total);
+  -webkit-font-smoothing: antialiased;
 }
 
-/* ================================ HEADER ============================= */
+/* ================================ SHELL ============================== */
 
+/* Status-bar spacer — takes the role of the old <header>. The PWA runs
+   with `apple-mobile-web-app-capable` so we sit under the notch. */
 header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #1a237e;
-  color: #fff;
+  height: 54px;
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 5;
 }
+header h1, .header-actions { display: none; }   /* kept in HTML but invisible */
+#settings-btn { display: none; }
 
-header h1 {
-  font-size: 18px;
-  font-weight: 600;
-}
-
-.version {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.6;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.header-actions button {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-  border: none;
-  padding: 6px 12px;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.header-actions button:active {
-  background: rgba(255, 255, 255, 0.35);
-}
-
-/* ============================== TAB-BAR ============================== */
+#view-root { padding-bottom: 8px; }
 
 #tab-bar {
   position: fixed;
@@ -92,9 +71,9 @@ header h1 {
   right: 0;
   height: var(--tab-bar-total);
   padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--bg);
+  border-top: 1px solid var(--rule);
   display: flex;
-  background: #fff;
-  border-top: 1px solid #e0e0e0;
   z-index: 15;
 }
 
@@ -104,175 +83,279 @@ header h1 {
   align-items: center;
   justify-content: center;
   text-decoration: none;
-  color: #666;
-  font-size: 13px;
+  position: relative;
+  height: var(--tab-bar-h);
+  font-size: 11px;
   font-weight: 500;
-  height: var(--tab-bar-height);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  background: transparent;
   -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 #tab-bar .tab.active {
-  color: #1a237e;
-  font-weight: 600;
-  box-shadow: inset 0 2px 0 #1a237e;
+  color: var(--ink);
+  font-weight: 700;
+  background: var(--bg-active-tab);
 }
 
-#tab-bar .tab:active {
-  background: #f0f0f0;
+#tab-bar .tab.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--ink);
 }
 
-/* =============================== SETUP =============================== */
+/* ============================= PERIOD BAR ============================ */
 
-#config-section {
-  padding: 24px 16px;
+.period-bar {
+  background: var(--bg-period);
+  border-bottom: 2px solid var(--ink);
+  padding: 10px 16px 12px;
 }
 
-#config-section h2 {
-  margin-bottom: 8px;
-}
-
-#config-section p {
-  margin-bottom: 16px;
-  color: #666;
-  font-size: 14px;
-}
-
-#config-form label {
-  display: block;
-  font-size: 14px;
-  font-weight: 500;
-  margin-bottom: 4px;
-  margin-top: 12px;
-}
-
-#config-form input {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 16px;
-}
-
-#config-form button {
-  margin-top: 16px;
-  width: 100%;
-  padding: 12px;
-  background: #1a237e;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  font-size: 16px;
-  cursor: pointer;
-}
-
-.advanced-config {
-  margin-top: 16px;
-  font-size: 13px;
-  color: #666;
-}
-
-.advanced-config summary {
-  cursor: pointer;
-  padding: 4px 0;
-  user-select: none;
-}
-
-.advanced-config summary:hover {
-  color: #1a237e;
-}
-
-.advanced-config input {
-  margin-top: 4px;
-}
-
-/* =========================== SUBTAB CONTROL ========================== */
-/* Manual | Auto segmented control at the top of the categorize view. */
-
-#subtab-bar {
-  display: flex;
-  background: #1a237e;
-  padding: 6px;
-  gap: 4px;
-}
-
-.subtab {
-  flex: 1;
-  padding: 8px 10px;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.7);
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
-.subtab.active {
-  background: rgba(255, 255, 255, 0.18);
-  color: #fff;
-  font-weight: 600;
-}
-
-.subtab:active {
-  background: rgba(255, 255, 255, 0.10);
-}
-
-/* ============================ TRANSACTIONS =========================== */
-
-#transaction-list {
-  padding: 8px 0;
-}
-
-.txn-item {
+.period-bar-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  background: #fff;
-  border-bottom: 1px solid #eee;
+  gap: 8px;
+}
+
+.period-nav-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.period-chev {
+  border: none;
+  background: transparent;
   cursor: pointer;
-  min-height: 48px;
+  font-size: 14px;
+  color: var(--muted);
+  padding: 2px 6px;
+  line-height: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+.period-chev:disabled { opacity: 0.3; cursor: default; }
+
+.period-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+  min-width: 0;
 }
 
-.txn-item:active {
-  background: #e8eaf6;
+.period-eyebrow {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
 }
 
-.txn-item.selected {
-  background: #c5cae9;
+.period-label {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+
+.period-caret {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.18s ease;
+  display: inline-block;
+  margin-top: 10px;
+}
+.period-bar.open .period-caret { transform: rotate(180deg); }
+
+.period-right {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* "↻ Parse" and "Sync N" pill buttons living in the period bar's right slot. */
+.pill-btn {
+  font-size: 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--ink);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-weight: 600;
+  background: var(--bg);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+  font-family: inherit;
+  line-height: 1;
+}
+.pill-btn:active { background: var(--bg-selected); }
+.pill-btn.primary { background: var(--ink); color: var(--bg); }
+.pill-btn.primary:active { background: #222; }
+.pill-btn:disabled { opacity: 0.4; cursor: default; }
+.pill-btn .pill-glyph { font-size: 12px; line-height: 1; }
+
+/* Dashboard progress "Day 7 of 14" label in the right slot. */
+.period-progress {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.calendar-cell {
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--muted-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.calendar-cell.has-txn {
+  background: var(--rule-2);
+  color: var(--ink);
+}
+.calendar-cell.today {
+  border: 1.5px solid var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 600;
+}
+.calendar-cell .cell-dot {
+  width: 3px; height: 3px; border-radius: 2px;
+  background: var(--ink);
+  margin-top: 2px;
+}
+.calendar-cell.today .cell-dot { background: var(--bg); }
+
+/* ============================= CATEGORIZE ============================ */
+/* Manual | Auto segmented control */
+
+#subtab-bar {
+  display: flex;
+  padding: 14px 20px 8px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  gap: 0;
+}
+
+.subtab {
+  padding-right: 16px;
+  padding-bottom: 10px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted-2);
+  cursor: pointer;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.subtab.active {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.subtab.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 16px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--ink);
+}
+
+/* Manual list — single row per txn */
+
+#transaction-list { padding: 0; }
+
+.txn-item {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 56px;
+  -webkit-tap-highlight-color: transparent;
+}
+.txn-item:active { background: var(--bg-selected); }
+.txn-item.selected { background: var(--bg-selected); }
 
 .txn-merchant {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
   flex: 1;
   margin-right: 12px;
 }
 
+.txn-date {
+  font-size: 11px;
+  color: var(--muted-2);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .txn-amount {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink);
   white-space: nowrap;
 }
 
-.txn-date {
-  font-size: 11px;
-  color: #999;
-}
-
-/* ================== AUTO-TAB ROW + SWIPE REVEAL ====================== */
-/* Auto sub-tab row. Outer .auto-row is a static shell with action
-   backgrounds (::before accept / ::after skip). Inner .auto-row-inner
-   carries the visible content and translates during swipe — covering the
-   backgrounds at rest, revealing one side as it slides. */
+/* Auto row — outer shell + inner content (swipe.js translates the inner) */
 
 .auto-row {
   position: relative;
   overflow: hidden;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--rule);
   background: transparent;
-  min-height: 56px;
 }
 
 .auto-row::before,
@@ -282,800 +365,673 @@ header h1 {
   inset: 0;
   display: flex;
   align-items: center;
-  color: #fff;
-  font-size: 15px;
-  font-weight: 600;
   padding: 0 20px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--bg);
   opacity: 0;
   transition: opacity 0.1s ease;
   pointer-events: none;
-  letter-spacing: 0.3px;
 }
-
 .auto-row::before {
-  content: '✓  Accept';
-  background: #2e7d32;
+  content: 'Accept →';
+  background: var(--ink);
   justify-content: flex-start;
 }
-
 .auto-row::after {
-  content: 'Skip  ↩';
-  background: #ef6c00;
+  content: '← Skip';
+  background: var(--muted);
   justify-content: flex-end;
 }
-
 .auto-row.reveal-right::before { opacity: 1; }
 .auto-row.reveal-left::after   { opacity: 1; }
 
 .auto-row-inner {
   position: relative;
-  padding: 10px 16px;
-  background: #fff;
-  min-height: 56px;
+  padding: 14px 20px;
+  background: var(--bg);
   transform: translateX(0);
-  touch-action: pan-y;         /* allow vertical scroll; horizontal handled in JS */
+  touch-action: pan-y;
   cursor: pointer;
   z-index: 1;
+  -webkit-tap-highlight-color: transparent;
 }
+.auto-row.swiping .auto-row-inner { background: var(--bg-selected); }
 
-.auto-row.swiping .auto-row-inner {
-  background: #fafafa;
-}
-
-.auto-row-inner .auto-row-line1 {
+.auto-row-line1 {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
 }
 
-.auto-row-inner .auto-row-line2 {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.auto-row-line2 {
   margin-top: 4px;
-  font-size: 12px;
-  color: #3949ab;
-}
-
-.auto-row-inner .auto-suggest-indicator {
   font-size: 11px;
-  color: #3949ab;
-  opacity: 0.7;
+  color: var(--muted);
+  letter-spacing: 0.02em;
 }
 
-.auto-row-inner .auto-suggest-category {
+.auto-suggest-indicator {
+  text-transform: uppercase;
+  margin-right: 4px;
+}
+
+.auto-suggest-category {
+  color: var(--ink);
   font-weight: 500;
 }
 
-#auto-empty-state {
-  padding: 32px 16px;
+/* Empty states (both Manual and Auto). Reused layout. */
+
+.empty-state {
+  padding: 40px 20px;
   text-align: center;
-  color: #666;
-}
-#auto-empty-state p {
-  margin: 4px 0;
-}
-#auto-empty-state .hint {
+  color: var(--muted);
   font-size: 13px;
-  color: #999;
+}
+.empty-state .glyph {
+  font-size: 32px;
+  margin-bottom: 8px;
+  color: var(--muted-2);
+}
+.empty-state .hint {
+  font-size: 12px;
+  color: var(--muted-2);
+  margin-top: 6px;
+}
+.empty-state button {
+  margin-top: 14px;
+  padding: 8px 16px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: inherit;
 }
 
-/* ==================== CATEGORY PICKER + ADD MODAL ==================== */
+#loading {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 13px;
+}
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--rule);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ====================== CATEGORIZE — PICKER + MODAL ================== */
 
 #category-picker {
   position: fixed;
-  bottom: var(--tab-bar-total);
   left: 0;
   right: 0;
-  background: #fff;
-  border-top: 2px solid #1a237e;
-  padding: 12px 16px 16px;
-  max-height: 60vh;
+  bottom: var(--tab-bar-total);
+  top: 100px;
+  background: var(--bg);
+  border-top: 1px solid var(--ink);
+  padding: 16px 20px;
   overflow-y: auto;
-  z-index: 10;
+  z-index: 20;
 }
 
 #category-picker-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: baseline;
+  margin-bottom: 16px;
+}
+
+#selected-merchant-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 #selected-merchant {
+  font-size: 16px;
   font-weight: 600;
-  font-size: 14px;
+  margin-top: 2px;
 }
 
 #cancel-pick {
-  background: none;
   border: none;
-  color: #1a237e;
-  font-size: 14px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: inherit;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .cat-group-label {
-  font-size: 12px;
-  color: #666;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-top: 8px;
-  margin-bottom: 4px;
+  color: var(--muted-2);
+  margin-bottom: 6px;
+  margin-top: 14px;
 }
+.cat-group-label:first-child { margin-top: 0; }
 
 #category-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.cat-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .cat-btn {
-  padding: 10px 8px;
-  background: #e8eaf6;
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--rule);
+  background: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  border-radius: 0;
+}
+.cat-btn:active { background: var(--bg-selected); }
+
+.add-cat-trigger {
+  display: block;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--muted);
   cursor: pointer;
   text-align: center;
-  min-height: 44px;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
 }
-
-.cat-btn:active {
-  background: #c5cae9;
-}
+.add-cat-trigger:active { background: var(--bg-selected); }
 
 .empty-cats-msg {
-  grid-column: 1 / -1;
-  text-align: center;
-  color: #888;
+  color: var(--muted-2);
   padding: 16px;
-  font-size: 14px;
-}
-
-/* Version info block (Setup screen) */
-#version-info {
-  margin-top: 24px;
-  padding: 12px 16px;
-  background: #f5f5f5;
-  border-radius: 4px;
   font-size: 13px;
-  border: 1px solid #e0e0e0;
-}
-#version-info h3 {
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: #555;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.version-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  align-items: baseline;
-  gap: 12px;
-}
-.version-label {
-  font-weight: 500;
-  color: #666;
-  flex-shrink: 0;
-}
-.version-row span:last-child {
-  text-align: right;
-  color: #333;
-  font-family: -apple-system, monospace;
-  font-size: 12px;
-}
-#update-status-display.update-needed {
-  color: #c62828;
-  font-weight: 700;
-}
-#update-status-display.up-to-date {
-  color: #2e7d32;
-  font-weight: 600;
-}
-
-/* Add Category trigger */
-.add-cat-trigger {
-  grid-column: 1 / -1;
-  padding: 10px 8px;
-  background: #fff;
-  border: 2px dashed #999;
-  border-radius: 4px;
-  font-size: 14px;
-  color: #666;
-  cursor: pointer;
-  margin-top: 4px;
-}
-
-.add-cat-trigger:active {
-  background: #f0f0f0;
+  text-align: center;
 }
 
 /* Add Category modal */
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 40;
-}
 
-.modal-content {
+#add-cat-modal {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: #fff;
-  padding: 20px 16px;
-  border-radius: 12px 12px 0 0;
+  inset: 0;
   z-index: 50;
 }
-
-.modal-content h3 {
-  margin-bottom: 12px;
-  font-size: 16px;
+.modal-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
 }
-
+.modal-content {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg);
+  padding: 20px;
+  border-top: 1px solid var(--ink);
+}
+.modal-content h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
 .modal-content label {
   display: block;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 4px;
-  margin-top: 12px;
-  color: #555;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 10px;
 }
-
 .modal-content select,
 .modal-content input[type="text"] {
   width: 100%;
   padding: 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 16px;
+  border: 1px solid var(--rule);
+  font-size: 14px;
+  font-family: inherit;
+  margin-top: 4px;
+  margin-bottom: 10px;
   background: #fff;
+  color: var(--ink);
+  border-radius: 0;
 }
-
 .modal-actions {
   display: flex;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 10px;
 }
-
 .modal-actions button {
   flex: 1;
   padding: 12px;
   border: none;
-  border-radius: 4px;
-  font-size: 16px;
+  font-size: 14px;
+  font-family: inherit;
+  font-weight: 500;
   cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
 }
-
 #cancel-add-cat {
-  background: #eee;
-  color: #333;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
 }
-
 #save-add-cat {
-  background: #1a237e;
-  color: #fff;
+  background: var(--ink);
+  color: var(--bg);
 }
+#save-add-cat:disabled { background: var(--muted-2); color: var(--bg); }
 
-#save-add-cat:disabled {
-  background: #999;
-}
-
-/* ============================== UNDO BAR ============================= */
+/* ============================ UNDO BAR + TOAST ======================= */
 
 #undo-bar {
   position: fixed;
-  bottom: var(--tab-bar-total);
-  left: 0;
-  right: 0;
-  background: #333;
-  color: #fff;
+  left: 12px;
+  right: 12px;
+  bottom: calc(var(--tab-bar-total) + 12px);
+  background: var(--ink);
+  color: var(--bg);
+  padding: 10px 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  z-index: 20;
+  font-size: 13px;
+  z-index: 30;
 }
-
-#undo-text {
-  font-size: 14px;
-  flex: 1;
-  margin-right: 12px;
-}
-
 #undo-btn {
-  background: none;
-  border: 1px solid #fff;
-  color: #fff;
-  padding: 6px 16px;
-  border-radius: 4px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#undo-btn:active {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* ============================== SYNC BAR ============================= */
-/* Contextual bar: visible only when store.syncQueue.length > 0. Sits on
-   the same bottom rail as the undo bar; when the undo bar is also showing
-   (transient post-categorize), .above-undo bumps it up one 48px slot. */
-
-#sync-bar {
-  position: fixed;
-  bottom: var(--tab-bar-total);
-  left: 0;
-  right: 0;
-  background: #1a237e;
-  color: #fff;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  z-index: 19;
-}
-
-#sync-bar.above-undo {
-  bottom: calc(var(--tab-bar-total) + 48px);
-}
-
-#sync-bar-text {
-  font-size: 14px;
-  font-weight: 500;
-  flex: 1;
-  margin-right: 12px;
-}
-
-#sync-btn-inline {
-  background: #e65100;
-  color: #fff;
   border: none;
-  padding: 8px 20px;
-  border-radius: 4px;
-  font-size: 14px;
+  background: transparent;
+  color: var(--bg);
+  font-size: 11px;
+  font-family: inherit;
   font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   cursor: pointer;
-}
-
-#sync-btn-inline:active {
-  background: #bf360c;
-}
-
-#sync-btn-inline:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* ======================= LOADING / EMPTY STATES ====================== */
-
-#loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 16px;
-  color: #666;
-}
-
-.spinner {
-  width: 24px;
-  height: 24px;
-  border: 3px solid #ccc;
-  border-top-color: #1a237e;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-bottom: 12px;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Empty state */
-#empty-state {
-  text-align: center;
-  padding: 48px 16px;
-  color: #666;
-}
-
-#empty-state button {
-  margin-top: 12px;
-  padding: 10px 24px;
-  background: #1a237e;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-/* Period filter bar (Phase 5) — houses the period dropdown and the inline
-   Refresh button (v0.12.2+; was a header action in v0.11–v0.12.1). */
-#period-filter-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0;
-  font-size: 14px;
-}
-#period-filter-bar label {
-  color: #555;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-#period-filter {
-  flex: 1;
-  padding: 8px 10px;
-  font-size: 14px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  color: #222;
-  -webkit-appearance: menulist;
-  appearance: menulist;
-}
-#refresh-inline {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  color: #1a237e;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
+  padding: 4px 8px;
   -webkit-tap-highlight-color: transparent;
 }
-#refresh-inline:active {
-  background: #e8eaf6;
-}
-#refresh-inline:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+#undo-btn:disabled { opacity: 0.5; cursor: default; }
 
-/* Empty state for "this period has 0 txns but others do" — distinct from
-   the global #empty-state which means "no txns anywhere". */
-#period-empty-state {
-  padding: 32px 16px;
-  text-align: center;
-  color: #666;
-}
-#period-empty-state p {
-  margin: 4px 0;
-}
-#period-empty-state .hint {
-  font-size: 13px;
-  color: #999;
-}
-
-/* ================================ TOAST ============================== */
-/* Error / success toast — same element, success state via .success class (B7) */
 #error-toast {
   position: fixed;
-  top: 60px;
-  left: 16px;
-  right: 16px;
-  background: #c62828;
-  color: #fff;
-  padding: 12px 16px;
-  border-radius: 4px;
-  font-size: 14px;
-  z-index: 30;
+  top: 64px;
+  left: 20px;
+  right: 20px;
+  background: var(--red);
+  color: var(--bg);
+  padding: 10px 14px;
+  font-size: 13px;
   text-align: center;
+  z-index: 100;
 }
-#error-toast.success {
-  background: #2e7d32;
-}
+#error-toast.success { background: var(--ink); }
 
 /* ============================== DASHBOARD ============================ */
 
-#dashboard-section {
-  padding: 0 0 16px;
+#dashboard-section { padding: 0 0 16px; }
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 18px 20px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
 }
 
-/* Header row: period dropdown + inline refresh. Mirrors the categorize
-   view's #period-filter-bar structure. */
-#dashboard-header {
+.summary-cell .label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.summary-cell .value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  margin-top: 3px;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.summary-cell.ready .value {
+  font-weight: 600;
+}
+.summary-cell.ready .value.negative { color: var(--red); }
+
+/* Category groups (collapsible) */
+
+.cat-group { background: transparent; }
+
+.cat-group-header {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+  background: var(--bg-selected);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cat-group-header .left {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0;
-  font-size: 14px;
-}
-#dashboard-header label {
-  color: #555;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-#period-select {
-  flex: 1;
-  padding: 8px 10px;
-  font-size: 14px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  color: #222;
-  -webkit-appearance: menulist;
-  appearance: menulist;
-}
-#dashboard-refresh {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  color: #1a237e;
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-#dashboard-refresh:active {
-  background: #e8eaf6;
-}
-#dashboard-refresh:disabled {
-  opacity: 0.4;
-  cursor: default;
 }
 
-#dashboard-body {
-  padding: 12px 16px 24px;
-}
-
-.dashboard-placeholder {
-  text-align: center;
-  color: #666;
-  padding: 32px 8px;
-}
-.dashboard-placeholder .spinner {
-  margin: 0 auto 12px;
-}
-.dashboard-placeholder .hint {
-  font-size: 12px;
-  color: #999;
-  margin-top: 8px;
-}
-.dashboard-error {
-  color: #c62828;
-}
-
-/* Cards — shared card shell */
-.dashboard-card {
-  background: #fff;
-  border-radius: 8px;
-  border: 1px solid #e0e0e0;
-  margin-bottom: 12px;
-  overflow: hidden;
-}
-
-/* Ready-to-Assign hero card */
-.ready-card {
-  padding: 20px 16px;
-  text-align: center;
-  background: linear-gradient(135deg, #1a237e, #3949ab);
-  color: #fff;
-  border: none;
-}
-.ready-amount {
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-}
-.ready-amount.negative {
-  color: #ffccbc;
-}
-.ready-label {
-  font-size: 13px;
-  opacity: 0.85;
-  margin-top: 4px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-}
-.ready-hint {
+.cat-group-header .toggle-glyph {
   font-size: 11px;
-  opacity: 0.8;
-  margin-top: 10px;
-}
-.ready-progress {
-  font-size: 12px;
-  opacity: 0.8;
-  margin-top: 6px;
-}
-
-/* Summary strip — income / fixed / budgeted */
-.summary-strip {
-  padding: 4px 0;
-}
-.summary-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid #f0f0f0;
-  font-size: 14px;
-}
-.summary-row:last-child {
-  border-bottom: none;
-}
-.summary-row .neg {
-  color: #c62828;
+  color: var(--ink);
+  width: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 600;
 }
 
-/* Section headings between card groups */
-.dashboard-section-heading {
+.cat-group-header .group-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+.cat-group-header .group-count {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-sub {
+  padding: 12px 20px 12px 42px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+}
+
+.cat-sub-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  margin: 20px 4px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #666;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-}
-.dashboard-section-heading .section-totals {
-  letter-spacing: 0.3px;
-  font-weight: 500;
-  color: #999;
-  text-transform: none;
-  font-size: 12px;
-}
-
-/* Category group + card */
-.cat-group {
-  margin-bottom: 12px;
-}
-.cat-group-header {
-  font-size: 12px;
-  color: #555;
-  font-weight: 600;
-  margin: 8px 4px 4px;
-  letter-spacing: 0.3px;
-}
-.cat-card {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  padding: 10px 12px;
   margin-bottom: 6px;
 }
-.cat-card-row {
-  display: flex;
-  justify-content: space-between;
+
+.cat-sub-name {
   font-size: 14px;
+  font-weight: 400;
+  color: var(--ink);
 }
-.cat-name {
-  font-weight: 500;
-  color: #222;
-}
-.cat-amounts {
-  color: #555;
+
+.cat-sub-amounts {
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.cat-avail {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #777;
+
+.cat-sub-avail {
+  font-size: 14px;
+  font-weight: 500;
 }
-.cat-avail .neg {
-  color: #c62828;
-  font-weight: 600;
+.cat-sub-avail.pos   { color: var(--ink); }
+.cat-sub-avail.zero  { color: var(--amber); }
+.cat-sub-avail.over  { color: var(--red); }
+
+.cat-sub-spent {
+  font-size: 10px;
+  color: var(--muted-2);
+  margin-top: 1px;
 }
+
 .cat-bar {
-  height: 6px;
-  background: #eeeeee;
-  border-radius: 3px;
-  margin: 8px 0;
-  overflow: hidden;
+  height: 1px;
+  background: var(--rule-2);
 }
 .cat-bar-fill {
-  height: 100%;
-  transition: width 0.3s ease;
+  height: 1px;
+  background: var(--ink);
 }
-.cat-bar-fill.ok { background: #2e7d32; }
-.cat-bar-fill.near { background: #f9a825; }
-.cat-bar-fill.over { background: #c62828; }
+.cat-bar-fill.zero { background: var(--amber); }
+.cat-bar-fill.over { background: var(--red); }
 
-/* Saving goal card — expandable */
+/* Saving goals */
+
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 20px 20px 8px;
+}
+
 .goal-card {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 6px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
   cursor: pointer;
+  user-select: none;
   -webkit-tap-highlight-color: transparent;
 }
-.goal-card:active {
-  background: #f5f5f5;
-}
+.goal-card:active { background: var(--bg-selected); }
+
 .goal-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  margin-bottom: 8px;
+}
+
+.goal-name {
   font-size: 14px;
   font-weight: 500;
-  color: #222;
 }
-.goal-reached {
-  color: #2e7d32;
-  margin-left: 6px;
+.goal-name .done-mark {
+  color: var(--green);
+  margin-left: 4px;
 }
-.goal-caret {
-  color: #999;
-  font-size: 12px;
-  transition: transform 0.2s ease;
-}
-.goal-card.expanded .goal-caret {
-  transform: rotate(90deg);
-}
-.goal-bar {
-  height: 6px;
-  background: #eeeeee;
-  border-radius: 3px;
-  margin: 8px 0 6px;
-  overflow: hidden;
-}
-.goal-bar-fill {
-  height: 100%;
-  background: #1a237e;
-  transition: width 0.3s ease;
-}
-.goal-row {
-  display: flex;
-  justify-content: space-between;
+
+.goal-amount {
   font-size: 13px;
-  color: #555;
   font-variant-numeric: tabular-nums;
 }
-.goal-target-period {
-  color: #888;
-  font-size: 12px;
+.goal-amount .muted { color: var(--muted-2); }
+
+.goal-bar {
+  height: 2px;
+  background: var(--rule);
 }
+.goal-bar-fill {
+  height: 2px;
+  background: var(--ink);
+}
+
+.goal-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+  display: flex;
+  justify-content: space-between;
+}
+
 .goal-details {
   max-height: 0;
   overflow: hidden;
   transition: max-height 0.25s ease, padding 0.25s ease;
-  font-size: 13px;
+  font-size: 12px;
 }
 .goal-card.expanded .goal-details {
   max-height: 260px;
-  padding-top: 8px;
-  margin-top: 6px;
-  border-top: 1px solid #f0f0f0;
+  padding-top: 10px;
+  margin-top: 8px;
+  border-top: 1px solid var(--rule);
 }
 .goal-detail-row {
   display: flex;
   justify-content: space-between;
-  padding: 4px 0;
-  color: #555;
+  padding: 3px 0;
+  color: var(--muted);
 }
 .goal-detail-row span:last-child {
-  color: #222;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 .goal-notes span:last-child {
   font-style: italic;
-  color: #666;
+  color: var(--muted);
   text-align: right;
   max-width: 60%;
 }
 
+/* ============================== SETUP ================================ */
+
+#config-section {
+  padding: 24px 20px;
+}
+
+#config-section h2 {
+  display: none;                  /* design has no visible page title */
+}
+
+#config-section p {
+  display: none;                  /* replaced by eyebrow + underline */
+}
+
+#config-form label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+#config-form input {
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  outline: none;
+  margin-top: 4px;
+  margin-bottom: 16px;
+  border-radius: 0;
+}
+#config-form input:focus { border-bottom-color: var(--ink); }
+
+#config-form button {
+  margin-top: 4px;
+  width: 100%;
+  padding: 12px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.advanced-config {
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.advanced-config summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+  letter-spacing: 0.04em;
+}
+.advanced-config summary:hover { color: var(--ink); }
+.advanced-config input { margin-top: 4px; }
+
+/* Version info — flat list, no card background */
+#version-info {
+  margin-top: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+#version-info h3 {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.version-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  align-items: baseline;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.version-row:last-child { border-bottom: none; }
+.version-label { color: var(--muted); }
+.version-row span:last-child {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+#update-status-display.update-needed { color: var(--red); font-weight: 600; }
+#update-status-display.up-to-date    { color: var(--green); font-weight: 500; }
+
+/* Period empty-state (in Categorize when selected period has 0 txns) */
+#period-empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+#period-empty-state p { margin: 4px 0; }
+#period-empty-state .hint { font-size: 12px; color: var(--muted-2); }
+
+#auto-empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+#auto-empty-state p { margin: 4px 0; }
+#auto-empty-state .hint { font-size: 12px; color: var(--muted-2); }
+
+/* Legacy stubs that should never render again — keep guards in case any
+   orphan DOM sneaks in. */
+#sync-bar, .ready-card { display: none !important; }

@@ -8,21 +8,19 @@ import { navigate } from '../router.js';
 
 const TEMPLATE = `
   <section id="config-section">
-    <h2>Setup</h2>
-    <p>Enter your API key to connect to your budget.</p>
     <form id="config-form">
       <label for="config-key">API Key</label>
-      <input type="text" id="config-key" placeholder="Your API key" required autocomplete="off">
+      <input type="text" id="config-key" placeholder="Paste your API key" required autocomplete="off">
       <details class="advanced-config">
         <summary>Advanced: custom API URL</summary>
-        <label for="config-url">API URL (optional override)</label>
+        <label for="config-url">API URL override</label>
         <input type="url" id="config-url" placeholder="Leave blank to use default">
       </details>
       <button type="submit">Save</button>
     </form>
 
     <div id="version-info">
-      <h3>Version info</h3>
+      <h3>Version</h3>
       <div class="version-row">
         <span class="version-label">PWA</span>
         <span id="pwa-version-display">—</span>
@@ -32,7 +30,7 @@ const TEMPLATE = `
         <span id="as-version-display">—</span>
       </div>
       <div class="version-row" id="update-status-row" hidden>
-        <span class="version-label">Update needed</span>
+        <span class="version-label">Update</span>
         <span id="update-status-display"></span>
       </div>
     </div>

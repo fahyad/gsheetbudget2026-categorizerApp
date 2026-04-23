@@ -1,11 +1,17 @@
-// Categorize view — the existing manual-categorize flow.
-// Refresh and Sync are in-view controls (inline refresh icon in the period
-// row; sticky sync bar above the tab-bar when syncQueue > 0). The shell
-// header only holds Settings.
+// Categorize view — v0.15 redesign (Minimal Monochrome).
+//
+// Layout:
+//   - Period bar at the top (no header): chevrons + collapsible calendar + right slot.
+//   - Right slot: "Sync N" primary pill when queue > 0, else "↻ Parse" outline pill.
+//   - Manual | Auto segmented control (underline on active).
+//   - Manual list: merchant + uppercase date + amount. Tap → picker.
+//   - Auto list: merchant + amount; secondary line "SUGGEST · Category".
+//     Swipe right = accept, swipe left = hide-this-session.
+//   - Undo bar above the tab bar; toast at the top.
 
 import * as api from '../api.js';
 import { store } from '../store.js';
-import { periodForTimestamp, currentPeriod } from '../periods.js';
+import { periodForTimestamp, currentPeriod, allPeriods } from '../periods.js';
 import { showError, showSuccess } from '../ui.js';
 import { updateCategorizeBadge } from '../router.js';
 import { invalidateDashboardCache } from '../lib/budget.js';
@@ -16,32 +22,33 @@ const SUBTAB_KEY = 'budget_categorize_subtab';
 
 const TEMPLATE = `
   <section id="app-section">
+    <div id="period-bar-host"></div>
+
     <div id="subtab-bar" role="tablist">
       <button id="subtab-manual" class="subtab active" role="tab" aria-selected="true">Manual</button>
       <button id="subtab-auto"   class="subtab"        role="tab" aria-selected="false">Auto</button>
     </div>
 
-    <div id="period-filter-bar">
-      <label for="period-filter">Period:</label>
-      <select id="period-filter" aria-label="Filter transactions by pay period"></select>
-      <button id="refresh-inline" title="Refresh" aria-label="Refresh">⟳</button>
-    </div>
-
     <div id="transaction-list"></div>
 
-    <div id="period-empty-state" hidden>
-      <p>No uncategorized transactions in this period.</p>
-      <p class="hint">Pick a different period above, or choose "All".</p>
+    <div id="period-empty-state" class="empty-state" hidden>
+      <div class="glyph">—</div>
+      <p>No transactions in this period.</p>
+      <p class="hint">Tap ‹ or › to move between periods.</p>
     </div>
 
-    <div id="auto-empty-state" hidden>
-      <p>No high-confidence suggestions for this period.</p>
-      <p class="hint">Categorize a few manually, then check back — suggestions need history.</p>
+    <div id="auto-empty-state" class="empty-state" hidden>
+      <div class="glyph">—</div>
+      <p>No high-confidence suggestions.</p>
+      <p class="hint">Categorize a few manually to train the index.</p>
     </div>
 
     <div id="category-picker" hidden>
       <div id="category-picker-header">
-        <span id="selected-merchant"></span>
+        <div>
+          <div id="selected-merchant-eyebrow">Categorize</div>
+          <div id="selected-merchant"></div>
+        </div>
         <button id="cancel-pick">Cancel</button>
       </div>
       <div id="category-buttons"></div>
@@ -52,16 +59,16 @@ const TEMPLATE = `
       <div class="modal-overlay"></div>
       <div class="modal-content">
         <h3>Add Category</h3>
-        <label for="main-cat-select">Main Category</label>
+        <label for="main-cat-select">Main</label>
         <select id="main-cat-select">
-          <option value="" disabled selected>Select...</option>
+          <option value="" disabled selected>Select…</option>
         </select>
         <div id="new-main-group" hidden>
           <label for="new-main-input">New Main Category</label>
           <input type="text" id="new-main-input" placeholder="e.g. Savings">
         </div>
-        <label for="sub-cat-input">Sub Category</label>
-        <input type="text" id="sub-cat-input" placeholder="e.g. Dining Out">
+        <label for="sub-cat-input">Sub</label>
+        <input type="text" id="sub-cat-input" placeholder="e.g. Coffee">
         <div class="modal-actions">
           <button id="cancel-add-cat" type="button">Cancel</button>
           <button id="save-add-cat" type="button">Save</button>
@@ -72,51 +79,46 @@ const TEMPLATE = `
 
   <div id="loading" hidden>
     <div class="spinner"></div>
-    <span>Loading...</span>
+    <span>Loading…</span>
   </div>
 
-  <div id="empty-state" hidden>
+  <div id="empty-state" class="empty-state" hidden>
+    <div class="glyph">—</div>
     <p>No pending transactions.</p>
     <button id="empty-refresh-btn">Refresh</button>
   </div>
 
   <div id="undo-bar" hidden>
     <span id="undo-text"></span>
-    <button id="undo-btn">UNDO</button>
-  </div>
-
-  <div id="sync-bar" hidden>
-    <span id="sync-bar-text"></span>
-    <button id="sync-btn-inline">Sync</button>
+    <button id="undo-btn">Undo</button>
   </div>
 `;
 
-// Module-level state (view is a singleton; re-mounting on re-navigation is OK
-// because DOM refs are re-looked-up in mount()).
+// Module-level state.
 let selectedTimestamp = null;
-let selectedPeriodFilter = null;
+let selectedPeriodIdx = null;  // number; default = current period
 let refreshInFlight = false;
 let syncInFlight = false;
-let activeSubtab = 'manual'; // 'manual' | 'auto'
-// Timestamps swiped-left this session. Intentionally in-memory only — a
-// next-session re-examination gives the index another chance.
+let activeSubtab = 'manual';
+let calendarOpen = false;
 const rejectedThisSession = new Set();
 
-// DOM refs — set in mount(). All live inside the view's own DOM subtree,
-// so they're garbage-collected when the router clears root.innerHTML.
-let appSection, transactionList, categoryPicker, categoryButtons,
+// DOM refs.
+let appSection, periodBarHost, transactionList, categoryPicker, categoryButtons,
     selectedMerchantEl, cancelPick, loadingEl, emptyState,
     emptyRefreshBtn, undoBar, undoText, undoBtn, addCatBtn, addCatModal,
     mainCatSelect, newMainGroup, newMainInput, subCatInput,
-    cancelAddCat, saveAddCat, periodFilter, periodEmptyState,
-    autoEmptyState, subtabManual, subtabAuto,
-    refreshBtn, syncBar, syncBarText, syncBtn;
+    cancelAddCat, saveAddCat, periodEmptyState, autoEmptyState,
+    subtabManual, subtabAuto;
+
+const SHORT_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 export default {
   async mount(root) {
     root.innerHTML = TEMPLATE;
 
     appSection = root.querySelector('#app-section');
+    periodBarHost = root.querySelector('#period-bar-host');
     transactionList = root.querySelector('#transaction-list');
     categoryPicker = root.querySelector('#category-picker');
     categoryButtons = root.querySelector('#category-buttons');
@@ -136,18 +138,11 @@ export default {
     subCatInput = root.querySelector('#sub-cat-input');
     cancelAddCat = root.querySelector('#cancel-add-cat');
     saveAddCat = root.querySelector('#save-add-cat');
-    periodFilter = root.querySelector('#period-filter');
     periodEmptyState = root.querySelector('#period-empty-state');
     autoEmptyState = root.querySelector('#auto-empty-state');
     subtabManual = root.querySelector('#subtab-manual');
     subtabAuto = root.querySelector('#subtab-auto');
-    refreshBtn = root.querySelector('#refresh-inline');
-    syncBar = root.querySelector('#sync-bar');
-    syncBarText = root.querySelector('#sync-bar-text');
-    syncBtn = root.querySelector('#sync-btn-inline');
 
-    refreshBtn.addEventListener('click', () => refresh());
-    syncBtn.addEventListener('click', () => sync());
     emptyRefreshBtn.addEventListener('click', () => refresh());
     cancelPick.addEventListener('click', () => deselectTransaction());
     undoBtn.addEventListener('click', () => undo());
@@ -161,31 +156,20 @@ export default {
     });
     saveAddCat.addEventListener('click', () => saveNewCategory());
 
-    periodFilter.addEventListener('change', () => {
-      selectedPeriodFilter = periodFilter.value === 'all' ? 'all' : Number(periodFilter.value);
-      deselectTransaction();
-      renderTransactions();
-    });
-
     subtabManual.addEventListener('click', () => setSubtab('manual'));
     subtabAuto.addEventListener('click', () => setSubtab('auto'));
 
-    // Restore last sub-tab (default 'manual'). Apply class state; the first
-    // renderTransactions() call below uses activeSubtab to pick a branch.
     const saved = localStorage.getItem(SUBTAB_KEY);
     activeSubtab = saved === 'auto' ? 'auto' : 'manual';
     applySubtabState();
 
-    renderCategories();
-    renderSyncBar();
-    renderUndo();
-    renderTransactions();
+    const cur = currentPeriod();
+    if (cur) selectedPeriodIdx = cur.idx;
+
+    renderAll();
 
     api.fetchCategories()
-      .then(data => {
-        store.setCategories(data.categories);
-        renderCategories();
-      })
+      .then(data => { store.setCategories(data.categories); renderCategories(); })
       .catch(err => {
         console.error('Category fetch failed:', err);
         if (store.categories.length === 0) {
@@ -193,8 +177,6 @@ export default {
         }
       });
 
-    // Warm the suggestion index in the background so Auto-tab toggles are
-    // instant. Failures are silent — Auto tab will just show its empty state.
     ensureIndexReady()
       .then(() => { if (activeSubtab === 'auto') renderTransactions(); })
       .catch(err => console.error('Suggest index warm-up failed:', err));
@@ -204,8 +186,13 @@ export default {
 
   unmount() {
     selectedTimestamp = null;
+    calendarOpen = false;
   },
 };
+
+// ======================================================================
+// SUBTABS
+// ======================================================================
 
 function setSubtab(which) {
   if (which !== 'manual' && which !== 'auto') return;
@@ -224,18 +211,180 @@ function applySubtabState() {
   subtabAuto.setAttribute('aria-selected', String(activeSubtab === 'auto'));
 }
 
-// ================================================================
-// REFRESH
-// ================================================================
+// ======================================================================
+// PERIOD BAR (calendar dropdown)
+// ======================================================================
+
+function pickPeriod() {
+  // Returns the Period object to render in the bar. Defaults to current;
+  // falls back to the most recent period that has any uncategorized txn.
+  const all = allPeriods();
+  if (selectedPeriodIdx != null) {
+    const p = all.find(x => x.idx === selectedPeriodIdx);
+    if (p) return p;
+  }
+  return currentPeriod() || all[all.length - 1];
+}
+
+function renderPeriodBar() {
+  periodBarHost.innerHTML = '';
+
+  const p = pickPeriod();
+  if (!p) return;
+
+  const bar = document.createElement('div');
+  bar.className = 'period-bar' + (calendarOpen ? ' open' : '');
+
+  const top = document.createElement('div');
+  top.className = 'period-bar-top';
+
+  const left = document.createElement('div');
+  left.className = 'period-nav-left';
+
+  const prev = document.createElement('button');
+  prev.className = 'period-chev';
+  prev.type = 'button';
+  prev.textContent = '‹';
+  prev.addEventListener('click', (e) => { e.stopPropagation(); shiftPeriod(-1); });
+
+  const toggle = document.createElement('div');
+  toggle.className = 'period-toggle';
+  toggle.addEventListener('click', () => {
+    calendarOpen = !calendarOpen;
+    renderPeriodBar();
+  });
+
+  const label = document.createElement('div');
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'period-eyebrow';
+  const isCurrent = currentPeriod()?.idx === p.idx;
+  eyebrow.textContent = isCurrent ? 'Current Period' : 'Period';
+  const name = document.createElement('div');
+  name.className = 'period-label';
+  name.textContent = p.label;
+  label.appendChild(eyebrow);
+  label.appendChild(name);
+
+  const caret = document.createElement('span');
+  caret.className = 'period-caret';
+  caret.textContent = '▾';
+
+  toggle.appendChild(label);
+  toggle.appendChild(caret);
+
+  const next = document.createElement('button');
+  next.className = 'period-chev';
+  next.type = 'button';
+  next.textContent = '›';
+  next.addEventListener('click', (e) => { e.stopPropagation(); shiftPeriod(1); });
+
+  left.appendChild(prev);
+  left.appendChild(toggle);
+  left.appendChild(next);
+
+  const right = document.createElement('div');
+  right.className = 'period-right';
+  right.appendChild(renderRightPill());
+
+  top.appendChild(left);
+  top.appendChild(right);
+  bar.appendChild(top);
+
+  if (calendarOpen) {
+    bar.appendChild(renderCalendar(p));
+  }
+
+  periodBarHost.appendChild(bar);
+}
+
+function shiftPeriod(delta) {
+  const all = allPeriods();
+  const cur = pickPeriod();
+  if (!cur) return;
+  const i = all.findIndex(x => x.idx === cur.idx);
+  const target = all[i + delta];
+  if (!target) return;
+  selectedPeriodIdx = target.idx;
+  deselectTransaction();
+  renderAll();
+}
+
+function renderRightPill() {
+  const n = store.syncQueue.length;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'pill-btn' + (n > 0 ? ' primary' : '');
+  if (n > 0) {
+    btn.textContent = syncInFlight ? 'Syncing…' : `Sync ${n}`;
+    btn.disabled = syncInFlight;
+    btn.addEventListener('click', () => sync());
+  } else {
+    const glyph = document.createElement('span');
+    glyph.className = 'pill-glyph';
+    glyph.textContent = '↻';
+    btn.appendChild(glyph);
+    btn.appendChild(document.createTextNode('Parse'));
+    btn.disabled = refreshInFlight;
+    btn.addEventListener('click', () => refresh());
+  }
+  return btn;
+}
+
+function renderCalendar(period) {
+  const grid = document.createElement('div');
+  grid.className = 'calendar-grid';
+
+  // Per-day txn count for the selected period only.
+  const countByIso = {};
+  for (const t of store.transactions) {
+    const iso = String(t.timestamp || '').slice(0, 10);
+    countByIso[iso] = (countByIso[iso] || 0) + 1;
+  }
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const startMs = period.start.getTime();
+  const endMs = period.end.getTime();
+  const ONE_DAY = 86400000;
+
+  for (let ms = startMs; ms <= endMs; ms += ONE_DAY) {
+    const d = new Date(ms);
+    const iso = d.toISOString().slice(0, 10);
+    const count = countByIso[iso] || 0;
+    const isToday = iso === todayIso;
+
+    const cell = document.createElement('div');
+    cell.className = 'calendar-cell'
+      + (isToday ? ' today' : '')
+      + (count > 0 ? ' has-txn' : '');
+
+    const num = document.createElement('div');
+    num.style.lineHeight = '1';
+    num.textContent = String(d.getUTCDate());
+    cell.appendChild(num);
+
+    if (count > 0) {
+      const dot = document.createElement('div');
+      dot.className = 'cell-dot';
+      cell.appendChild(dot);
+    }
+
+    grid.appendChild(cell);
+  }
+
+  return grid;
+}
+
+// ======================================================================
+// REFRESH / CATEGORIZE / UNDO / SYNC (logic unchanged from v0.14)
+// ======================================================================
 
 async function refresh() {
   if (refreshInFlight) return;
   refreshInFlight = true;
-  refreshBtn.disabled = true;
   emptyRefreshBtn.disabled = true;
-
   showLoading(true);
   deselectTransaction();
+  renderPeriodBar();
 
   try {
     try {
@@ -252,35 +401,27 @@ async function refresh() {
     const data = await api.parseAndFetch();
     store.addTransactions(data.transactions);
 
-    const queuedTimestamps = store.getSyncQueueTimestamps();
-    store.transactions = store.transactions.filter(t => !queuedTimestamps.has(t.timestamp));
+    const queued = store.getSyncQueueTimestamps();
+    store.transactions = store.transactions.filter(t => !queued.has(t.timestamp));
 
-    renderTransactions();
+    renderAll();
   } catch (err) {
     showError('Failed to load transactions: ' + err.message);
   } finally {
     showLoading(false);
     refreshInFlight = false;
-    refreshBtn.disabled = false;
     emptyRefreshBtn.disabled = false;
+    renderPeriodBar();
   }
 }
 
-// ================================================================
-// CATEGORIZE / UNDO / SYNC
-// ================================================================
-
 function categorize(timestamp, category) {
-  const removedTxn = store.removeTransaction(timestamp);
-  if (!removedTxn) return;
-
-  store.addToSyncQueue(removedTxn, category);
-  store.setLastCategorized({ ...removedTxn, category });
-
+  const removed = store.removeTransaction(timestamp);
+  if (!removed) return;
+  store.addToSyncQueue(removed, category);
+  store.setLastCategorized({ ...removed, category });
   deselectTransaction();
-  renderTransactions();
-  renderUndo();
-  renderSyncBar();
+  renderAll();
 }
 
 function undo() {
@@ -288,35 +429,27 @@ function undo() {
     showError('Wait for sync to finish before undoing.');
     return;
   }
-
   const last = store.lastCategorized;
   if (!last) return;
-
   const restored = store.removeFromSyncQueue(last.timestamp);
   if (restored) {
-    const txn = {
+    store.restoreTransaction({
       timestamp: restored.timestamp,
       date: restored.date,
       merchant: restored.merchant,
-      amount: restored.amount
-    };
-    store.restoreTransaction(txn);
+      amount: restored.amount,
+    });
   }
   store.clearLastCategorized();
-
-  renderTransactions();
-  renderUndo();
-  renderSyncBar();
+  renderAll();
 }
 
 async function sync() {
   if (store.syncQueue.length === 0) return;
   if (syncInFlight) return;
   syncInFlight = true;
-
-  syncBtn.disabled = true;
-  syncBtn.textContent = 'Syncing…';
   undoBtn.disabled = true;
+  renderPeriodBar();
 
   try {
     const data = await api.batchCategorize(store.syncQueue);
@@ -326,14 +459,12 @@ async function sync() {
     store.clearSyncedItems(succeeded);
 
     if (succeeded.length > 0) {
-      // Spent / Available changed in the sheet — dashboard cache is stale.
       invalidateDashboardCache();
-      // New categorized rows in Transactions → suggestion index is stale too.
       invalidateSuggestIndex();
     }
 
     if (failed.length === 0) {
-      showSuccess('✓ ' + succeeded.length + ' transactions synced');
+      showSuccess('✓ ' + succeeded.length + ' synced');
     } else {
       showError(failed.length + ' failed to sync. Tap Sync to retry.');
     }
@@ -345,13 +476,20 @@ async function sync() {
   } finally {
     syncInFlight = false;
     undoBtn.disabled = false;
-    renderSyncBar();
+    renderPeriodBar();
   }
 }
 
-// ================================================================
+// ======================================================================
 // RENDERING
-// ================================================================
+// ======================================================================
+
+function renderAll() {
+  renderPeriodBar();
+  renderCategories();
+  renderUndo();
+  renderTransactions();
+}
 
 function renderTransactions() {
   transactionList.innerHTML = '';
@@ -367,8 +505,10 @@ function renderTransactions() {
   appSection.hidden = false;
   emptyState.hidden = true;
 
-  populatePeriodFilter();
-  const visible = filterTxnsByPeriod(store.transactions);
+  const visible = store.transactions.filter(t => {
+    const p = periodForTimestamp(t.timestamp);
+    return p && p.idx === selectedPeriodIdx;
+  });
 
   if (activeSubtab === 'auto') {
     renderAutoList(visible);
@@ -392,12 +532,17 @@ function renderManualList(visible) {
     div.dataset.timestamp = txn.timestamp;
 
     const left = document.createElement('div');
+    left.style.flex = '1';
+    left.style.minWidth = '0';
+
     const merchantSpan = document.createElement('div');
     merchantSpan.className = 'txn-merchant';
     merchantSpan.textContent = txn.merchant;
+
     const dateSpan = document.createElement('div');
     dateSpan.className = 'txn-date';
     dateSpan.textContent = txn.date;
+
     left.appendChild(merchantSpan);
     left.appendChild(dateSpan);
 
@@ -416,24 +561,21 @@ function renderManualList(visible) {
 function renderAutoList(visible) {
   periodEmptyState.hidden = true;
 
-  // Only rows with a high-confidence suggestion AND not swiped-away-this-session.
-  const withSuggestions = [];
+  const rows = [];
   for (const txn of visible) {
     if (rejectedThisSession.has(txn.timestamp)) continue;
     const s = suggest(txn.merchant);
     if (!s) continue;
-    withSuggestions.push({ txn, suggestion: s });
+    rows.push({ txn, suggestion: s });
   }
 
-  if (withSuggestions.length === 0) {
+  if (rows.length === 0) {
     autoEmptyState.hidden = false;
     return;
   }
   autoEmptyState.hidden = true;
 
-  for (const { txn, suggestion } of withSuggestions) {
-    // Outer: static shell that holds swipe-action backgrounds (::before
-    // accept, ::after skip). Inner: the visible content that translates.
+  for (const { txn, suggestion } of rows) {
     const row = document.createElement('div');
     row.className = 'auto-row';
     row.dataset.timestamp = txn.timestamp;
@@ -456,10 +598,10 @@ function renderAutoList(visible) {
     line2.className = 'auto-row-line2';
     const indicator = document.createElement('span');
     indicator.className = 'auto-suggest-indicator';
-    indicator.textContent = '↗';
+    indicator.textContent = 'Suggest';
     const catSpan = document.createElement('span');
     catSpan.className = 'auto-suggest-category';
-    catSpan.textContent = suggestion.category;
+    catSpan.textContent = '· ' + suggestion.category;
     line2.appendChild(indicator);
     line2.appendChild(catSpan);
 
@@ -467,20 +609,14 @@ function renderAutoList(visible) {
     inner.appendChild(line2);
     row.appendChild(inner);
 
-    // Tap opens the picker (same as Manual). Swipe intercepts via touch events.
     inner.addEventListener('click', () => selectTransaction(txn));
 
     attachSwipe(inner, {
       revealEl: row,
-      onRight: () => {
-        // Accept: apply suggested category and remove the row.
-        categorize(txn.timestamp, suggestion.category);
-      },
+      onRight: () => categorize(txn.timestamp, suggestion.category),
       onLeft: () => {
-        // Reject for this session — txn stays in Manual tab.
         rejectedThisSession.add(txn.timestamp);
         row.remove();
-        // If this was the last row, show the empty state.
         if (!transactionList.querySelector('.auto-row')) {
           autoEmptyState.hidden = false;
         }
@@ -491,127 +627,50 @@ function renderAutoList(visible) {
   }
 }
 
-function populatePeriodFilter() {
-  const byPeriod = new Map();
-  for (const txn of store.transactions) {
-    const p = periodForTimestamp(txn.timestamp);
-    if (!p) continue;
-    const existing = byPeriod.get(p.idx);
-    if (existing) {
-      existing.count++;
-    } else {
-      byPeriod.set(p.idx, { period: p, count: 1 });
-    }
-  }
-
-  const totalCount = store.transactions.length;
-  const cur = currentPeriod();
-  const curIdx = cur ? cur.idx : null;
-
-  const sortedIdxs = Array.from(byPeriod.keys()).sort((a, b) => b - a);
-
-  periodFilter.innerHTML = '';
-
-  const allOpt = document.createElement('option');
-  allOpt.value = 'all';
-  allOpt.textContent = `All (${totalCount})`;
-  periodFilter.appendChild(allOpt);
-
-  for (const idx of sortedIdxs) {
-    const { period, count } = byPeriod.get(idx);
-    const opt = document.createElement('option');
-    opt.value = String(idx);
-    const isCurrent = (idx === curIdx);
-    opt.textContent = isCurrent
-      ? `${period.label} · current (${count})`
-      : `${period.label} (${count})`;
-    periodFilter.appendChild(opt);
-  }
-
-  let target;
-  if (selectedPeriodFilter === 'all') {
-    target = 'all';
-  } else if (typeof selectedPeriodFilter === 'number' && byPeriod.has(selectedPeriodFilter)) {
-    target = String(selectedPeriodFilter);
-  } else if (curIdx !== null && byPeriod.has(curIdx)) {
-    target = String(curIdx);
-    selectedPeriodFilter = curIdx;
-  } else {
-    target = 'all';
-    selectedPeriodFilter = 'all';
-  }
-  periodFilter.value = target;
-}
-
-function filterTxnsByPeriod(txns) {
-  if (selectedPeriodFilter === 'all' || selectedPeriodFilter === null) return txns;
-  return txns.filter(t => {
-    const p = periodForTimestamp(t.timestamp);
-    return p && p.idx === selectedPeriodFilter;
-  });
-}
-
 function renderCategories() {
   categoryButtons.innerHTML = '';
 
   if (store.categories.length === 0) {
     const msg = document.createElement('p');
     msg.className = 'empty-cats-msg';
-    msg.textContent = 'No categories loaded. Tap Refresh.';
+    msg.textContent = 'No categories loaded. Tap ↻ Parse.';
     categoryButtons.appendChild(msg);
     return;
   }
 
   const groups = {};
   for (const cat of store.categories) {
-    if (!groups[cat.main]) groups[cat.main] = [];
-    groups[cat.main].push(cat.sub);
+    (groups[cat.main] = groups[cat.main] || []).push(cat.sub);
   }
 
   for (const [main, subs] of Object.entries(groups)) {
     const label = document.createElement('div');
     label.className = 'cat-group-label';
     label.textContent = main;
-    label.style.gridColumn = '1 / -1';
     categoryButtons.appendChild(label);
 
+    const chips = document.createElement('div');
+    chips.className = 'cat-chips-row';
     for (const sub of subs) {
       const btn = document.createElement('button');
+      btn.type = 'button';
       btn.className = 'cat-btn';
       btn.textContent = sub;
       btn.addEventListener('click', () => {
-        if (selectedTimestamp) {
-          categorize(selectedTimestamp, sub);
-        }
+        if (selectedTimestamp) categorize(selectedTimestamp, sub);
       });
-      categoryButtons.appendChild(btn);
+      chips.appendChild(btn);
     }
+    categoryButtons.appendChild(chips);
   }
 }
 
 function renderUndo() {
-  const visible = !!store.lastCategorized;
-  if (visible) {
+  if (store.lastCategorized) {
     undoText.textContent = `${store.lastCategorized.merchant} → ${store.lastCategorized.category}`;
     undoBar.hidden = false;
   } else {
     undoBar.hidden = true;
-  }
-  // Keep the sync bar clear of the undo bar when both are visible.
-  if (syncBar) syncBar.classList.toggle('above-undo', visible);
-}
-
-function renderSyncBar() {
-  const count = store.syncQueue.length;
-  if (count === 0) {
-    syncBar.hidden = true;
-    syncBtn.disabled = true;
-    syncBtn.textContent = 'Sync';
-  } else {
-    syncBar.hidden = false;
-    syncBarText.textContent = count === 1 ? '1 to sync' : `${count} to sync`;
-    syncBtn.disabled = syncInFlight;
-    syncBtn.textContent = syncInFlight ? 'Syncing…' : 'Sync';
   }
   updateCategorizeBadge();
 }
@@ -619,11 +678,9 @@ function renderSyncBar() {
 function selectTransaction(txn) {
   selectedTimestamp = txn.timestamp;
   selectedMerchantEl.textContent = txn.merchant + ' · $' + Math.abs(txn.amount).toFixed(2);
-
   document.querySelectorAll('.txn-item').forEach(el => {
     el.classList.toggle('selected', el.dataset.timestamp === txn.timestamp);
   });
-
   renderCategories();
   categoryPicker.hidden = false;
 }
@@ -634,22 +691,22 @@ function deselectTransaction() {
   document.querySelectorAll('.txn-item.selected').forEach(el => el.classList.remove('selected'));
 }
 
-// ================================================================
+// ======================================================================
 // ADD CATEGORY
-// ================================================================
+// ======================================================================
 
 function openAddCategoryModal() {
-  mainCatSelect.innerHTML = '<option value="" disabled selected>Select...</option>';
+  mainCatSelect.innerHTML = '<option value="" disabled selected>Select…</option>';
   const mains = [...new Set(store.categories.map(c => c.main))];
-  for (const main of mains) {
+  for (const m of mains) {
     const opt = document.createElement('option');
-    opt.value = main;
-    opt.textContent = main;
+    opt.value = m;
+    opt.textContent = m;
     mainCatSelect.appendChild(opt);
   }
   const newOpt = document.createElement('option');
   newOpt.value = '__new__';
-  newOpt.textContent = 'New...';
+  newOpt.textContent = 'New…';
   mainCatSelect.appendChild(newOpt);
 
   newMainGroup.hidden = true;
@@ -658,9 +715,7 @@ function openAddCategoryModal() {
   addCatModal.hidden = false;
 }
 
-function closeAddCategoryModal() {
-  addCatModal.hidden = true;
-}
+function closeAddCategoryModal() { addCatModal.hidden = true; }
 
 async function saveNewCategory() {
   const mainVal = mainCatSelect.value;
@@ -671,12 +726,10 @@ async function saveNewCategory() {
     showError('Both main and sub category are required');
     return;
   }
-
   if (store.categories.some(c => c.sub.toLowerCase() === subCategory.toLowerCase())) {
     showError('Category "' + subCategory + '" already exists');
     return;
   }
-
   closeAddCategoryModal();
 
   const newCat = { main: mainCategory, sub: subCategory };
@@ -692,10 +745,4 @@ async function saveNewCategory() {
   }
 }
 
-// ================================================================
-// UI HELPERS
-// ================================================================
-
-function showLoading(show) {
-  loadingEl.hidden = !show;
-}
+function showLoading(show) { loadingEl.hidden = !show; }
