@@ -14,6 +14,12 @@ You are about to update the four documentation files in this repo:
 
 The files have evolved organically across many sessions and have inconsistencies (different postmortem structures, out-of-order phases, stale "user needs to" lines). This skill encodes the established patterns and prevents the common drift modes.
 
+## Known limitation — mid-session discovery
+
+Claude Code auto-discovers skills at **session start** by scanning `.claude/skills/`. If this skill landed on your working branch mid-session (via `git pull`, `git merge`, or a freshly-cloned branch-switch), Claude Code won't auto-register it — so the `Skill()` tool won't see `update-budget-docs` in its available list.
+
+**What to do in that case:** read this `SKILL.md` directly and follow the workflow manually. The templates and `lint.sh` work the same either way; only the `Skill()` invocation wrapper is missing. End result is identical. A fresh Claude Code session in this repo (after the skill is on your branch) will have it registered and invocable.
+
 ## When to invoke
 
 ✅ **Invoke after:**
@@ -126,11 +132,24 @@ bash .claude/skills/update-budget-docs/lint.sh
 ```
 
 Output is grouped by severity:
-- 🔴 BLOCKING — version pointer drift, duplicate Phase numbers (must fix)
-- 🟡 WARNING — postmortem missing Lesson, session missing Status (should fix)
-- 🔵 INFO — code reference may be stale (review)
+- 🔴 BLOCKING — version pointer drift, duplicate Phase numbers, duplicate trip-up numbers (must fix)
+- 🟡 WARNING — postmortem missing Lesson, session missing Status, trip-up link target wrong (should fix)
+- 🔵 INFO — historical "user needs to" markers, etc. (awareness only)
 
 Address blocking issues before committing. Warnings should be fixed unless there's a reason. Info entries are awareness only.
+
+### Optional: install pre-commit hook
+
+To run lint automatically before every commit that touches docs files:
+```bash
+bash .claude/skills/update-budget-docs/install-hook.sh
+```
+
+The hook combines:
+- **Secret detection** (blocks the leaked API key + naive `apiKey = "<long-string>"` patterns from committing)
+- **Docs lint** (runs `lint.sh` only when CLAUDE.md / docs/*.md / apps-script/Code.js / apps-script/VERSION.txt are staged; blocks on 🔴, advisory on 🟡 / 🔵)
+
+To bypass (use sparingly, e.g., for an in-progress commit on a feature branch): `git commit --no-verify`.
 
 ## Step 8 — Commit
 

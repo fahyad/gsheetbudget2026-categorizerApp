@@ -73,35 +73,6 @@
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
 - **Status:** complete
 
-### Phase 13d: Single-Ledger Redesign (v11.0 → v11.1)
-- Pending tab → eliminated; Transactions tab is the single source of truth
-- New Timestamp column (H) on Transactions for PWA dedup matching
-- Empty Category = "needs categorization" (replaces Pending status field)
-- 5 handlers refactored: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
-- Net: ~60 lines of Apps Script removed; copy/move bug class eliminated
-- One-shot `migratePendingToTransactions()` + `consolidateTransactions()` rescue
-- PWA contract preserved — no PWA changes needed
-- Resolves: orphan rows 1001-1008 ($439 invisible spending) — automatically cleaned up during migration
-- **Status:** complete
-
-### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
-- After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
-- Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
-- Dashboard rows 1-6: dropdown + Net Income + Fixed Expenses + Total Budgeted + Ready to Assign (color-coded) + Period progress
-- Header at row 7, data starts at row 8
-- Frozen rows = 7 so dashboard always visible while scrolling
-- Slicer kept independent (filters category rows below) — required explicit `setColumnPosition(1)` after `insertSlicer()` to avoid broken filter UX
-- Named ranges shifted: `Budget_*` from row 2 to row 8
-- User explicitly REJECTED YNAB-style negative-carry rule, Goals columns, Category Transfers ledger, Sparklines (deferred for now)
-- **Status:** complete
-
-### Phase 13b: Instructions Tab Rewrite (v10.3)
-- Stale references to manual paste workflow + missing Logs tab + missing v10.x menu items
-- Rewrote `rows[]` array in `buildInstructionsTab_` (10 sections, ~65 rows)
-- Plain numbered steps + color-coded menu function table
-- Brief "For Developers" section pointing to clasp workflow
-- **Status:** complete
-
 ### Phase 13: Version Display (v10.2 + PWA v0.8)
 - User confused by old sheets bound to outdated Apps Script — wanted in-sheet version display
 - Added `apps-script/VERSION.txt` as source of truth (publicly readable on GitHub raw URL)
@@ -115,12 +86,59 @@
 - `deploy.sh` auto-bumps `LAST_EDITED` timestamp + writes `VERSION.txt` on every deploy
 - **Status:** complete
 
+### Phase 13b: Instructions Tab Rewrite (v10.3)
+- Stale references to manual paste workflow + missing Logs tab + missing v10.x menu items
+- Rewrote `rows[]` array in `buildInstructionsTab_` (10 sections, ~65 rows)
+- Plain numbered steps + color-coded menu function table
+- Brief "For Developers" section pointing to clasp workflow
+- **Status:** complete
+
+### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
+- After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
+- Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
+- Dashboard rows 1-6: dropdown + Net Income + Fixed Expenses + Total Budgeted + Ready to Assign (color-coded) + Period progress
+- Header at row 7, data starts at row 8
+- Frozen rows = 7 so dashboard always visible while scrolling
+- Slicer kept independent (filters category rows below) — required explicit `setColumnPosition(1)` after `insertSlicer()` to avoid broken filter UX
+- Named ranges shifted: `Budget_*` from row 2 to row 8
+- User explicitly REJECTED YNAB-style negative-carry rule, Goals columns, Category Transfers ledger, Sparklines (deferred for now)
+- **Status:** complete
+
+### Phase 13d: Single-Ledger Redesign (v11.0 → v11.1)
+- Pending tab → eliminated; Transactions tab is the single source of truth
+- New Timestamp column (H) on Transactions for PWA dedup matching
+- Empty Category = "needs categorization" (replaces Pending status field)
+- 5 handlers refactored: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
+- Net: ~60 lines of Apps Script removed; copy/move bug class eliminated
+- One-shot `migratePendingToTransactions()` + `consolidateTransactions()` rescue
+- PWA contract preserved — no PWA changes needed
+- Resolves: orphan rows 1001-1008 ($439 invisible spending) — automatically cleaned up during migration
+- **Status:** complete
+
 ### Phase 14: Integrated Code Review (v11.3 → v11.6 + PWA v0.10)
 Three independent reviews (mine + 2 external) merged into a single 26-item plan, executed in 4 phases:
 - **Phase 1 (v11.3):** S1 leaked API key scrub + rotation; S2 sw.js cache version bump (was stuck on v9 across multiple PWA-affecting releases); S3 unique-suffix Timestamps so two same-second emails can't collide; S4 LockService on processInfoAlerts_ (was racing with PWA syncs).
 - **Phase 2 (v11.4):** A3 res.ok HTTP status check (was masking 500s as JSON parse errors); A4 sync/undo race guard; A6 refresh button debounce; A8 handleUncategorize_ no-match returns error (was silent success); A9 localStorage quota guard with fallback recovery.
 - **Phase 3 (v11.5):** A2 batched verify-read in handleBatchCategorize_ (~30x fewer reads on a 30-item batch); A5 handleAddCategoryInner_ capacity error instead of silent overflow; A7 stricter setAllowInvalid validation; B1 findNextEmptyRow_ throws past row 1000 (was silently writing orphans); B3 setNamedRanges_ scoped to owned prefixes; B4 beforeunload prompt actually fires now.
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
+- **Status:** complete
+
+### Phase 15: PWA Period Filter (PWA v0.11)
+The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
+- **Status:** complete
+
+### Phase 16: Slicer Crash Fix (v11.7)
+PWA `addCategory` was crashing with `TypeError: newSlicer.setColumnPosition is not a function` at the slicer-recreation step in `rebuildBudgetInternal_`. Google appears to have changed the Slicer API; the method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The crash propagated up through the handler, leaving the user with: Setup tab updated (succeeded), Budget tab rebuilt (succeeded), slicer in a broken half-state (old removed, new inserted but no filter column), and PWA showing a generic crash error.
+
+Fix in `rebuildBudgetInternal_`:
+1. Prefer UPDATING an existing slicer's range via `setRange()` — preserves the filter column the slicer was originally created with, no `setColumnPosition` call needed on the common path.
+2. Only fall back to recreate when no slicer exists, with a `typeof === 'function'` guard around `setColumnPosition`.
+3. Wrap the entire slicer block in top-level try/catch — slicer is a UI convenience widget, its failure must never crash the parent operation.
+
+User impact: addCategory works again. The user's existing slicer is in the broken-no-column state from the prior crash; one-time manual fix needed (right-click slicer → Set Column → Period). Future addCategory calls only resize the slicer, so the manual fix sticks.
+
+Investigation also covered Budget row 72 (Apr 15-28 Gas showing -$280). Turned out to be the rollover formula working correctly against $340 of Gas overspending in Apr 1-14 (anchored by an erroneous SHELL $250 charge that the user manually uncategorized). Documented in findings.md as a non-bug to prevent re-investigation. Redesign of the formula model (move calculations to Apps Script, drop or split rollover) discussed but deferred.
+
 - **Status:** complete
 
 ### Phase 17: Saving Tab — One-Time Goals (v11.8 → v11.12)
@@ -144,24 +162,6 @@ Verification after v11.12 Update Script: 0 `#REF!` cells across all 267 Budget r
 
 Patterns added to CLAUDE.md trip-up list (items #10, #11, #12).
 - **Status:** complete + verified working
-
-### Phase 16: Slicer Crash Fix (v11.7)
-PWA `addCategory` was crashing with `TypeError: newSlicer.setColumnPosition is not a function` at the slicer-recreation step in `rebuildBudgetInternal_`. Google appears to have changed the Slicer API; the method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The crash propagated up through the handler, leaving the user with: Setup tab updated (succeeded), Budget tab rebuilt (succeeded), slicer in a broken half-state (old removed, new inserted but no filter column), and PWA showing a generic crash error.
-
-Fix in `rebuildBudgetInternal_`:
-1. Prefer UPDATING an existing slicer's range via `setRange()` — preserves the filter column the slicer was originally created with, no `setColumnPosition` call needed on the common path.
-2. Only fall back to recreate when no slicer exists, with a `typeof === 'function'` guard around `setColumnPosition`.
-3. Wrap the entire slicer block in top-level try/catch — slicer is a UI convenience widget, its failure must never crash the parent operation.
-
-User impact: addCategory works again. The user's existing slicer is in the broken-no-column state from the prior crash; one-time manual fix needed (right-click slicer → Set Column → Period). Future addCategory calls only resize the slicer, so the manual fix sticks.
-
-Investigation also covered Budget row 72 (Apr 15-28 Gas showing -$280). Turned out to be the rollover formula working correctly against $340 of Gas overspending in Apr 1-14 (anchored by an erroneous SHELL $250 charge that the user manually uncategorized). Documented in findings.md as a non-bug to prevent re-investigation. Redesign of the formula model (move calculations to Apps Script, drop or split rollover) discussed but deferred.
-
-- **Status:** complete
-
-### Phase 15: PWA Period Filter (PWA v0.11)
-The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
-- **Status:** complete
 
 ## Phases — In Progress / Future
 

@@ -8,6 +8,15 @@ Add to the numbered list under `## Things that will trip you up`. Use the next s
 N. **One-line summary.** Detail in 1-3 sentences. See `docs/findings.md` "Postmortem Title".
 ```
 
+## Link target — link to the H3 postmortem, NOT the H2 section
+
+**Link to an H3 postmortem heading** (`### Title (vX.Y)`), NOT the H2 section heading (`## Section Name`).
+
+- ✅ Correct: `See \`docs/findings.md\` "Budget #REF! After updateWorkbook (v11.12)"`
+- ❌ Wrong: `See \`docs/findings.md\` "Cold-Start Optimization (v0.15.4)"` (if that's the H2 section, not the H3 postmortem inside it)
+
+**Why it matters:** `lint.sh` Check 6 verifies that the quoted title appears as `### <title>` in findings.md. Linking to a section heading instead of a postmortem fails that check. Real bug caught: trip-ups #25/#26 linked to the H2 section "Cold-Start Optimization (v0.15.4)" but the postmortem inside was titled "Cold-Start Perf Findings + Fix (v0.15.4)" — the link was visually plausible but Check 6 caught it.
+
 ## Rules for whether to add a trip-up
 
 ADD a trip-up when:
