@@ -6,7 +6,7 @@
 
 ## Current State (April 2026)
 - **Apps Script:** v11.13 — every response now echoes `_elapsedMs` so the client can split server-exec vs. network/cold-container time; new `logClientMetrics` action appends client-side perf records to a dedicated `ClientMetrics` tab (auto-created). No breaking changes to existing endpoints. v11.12 fixed the Budget `#REF!` cascade via `rebuildBudgetInternal_` delegation; v11.9–v11.11 were Saving tab shakedown. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign (from Claude Design handoff) layered on top of v0.12 → v0.14 functionality. Visual system: near-black on warm off-white, collapsible calendar period bar, 4-col summary, Sync/Parse pill on top-right, collapsible main-category groups, warm-tan period band. Post-redesign fixes: v0.15.1 iOS safe-area (Dynamic Island fix), v0.15.2 Savings/Goals dedup, v0.15.3 rich client-side metrics pipeline (sendBeacon-flushed to ClientMetrics tab). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`, which carries v0.14). `main` still at v0.11 — not merged yet. GitHub Pages currently serves from the feature branch for preview.
+- **PWA:** v0.15.4 (cache v24) — cold-start optimization informed by v0.15.3 ClientMetrics data. Four fixes landed after confirming real-session measurements: dedupe `categories` by sharing mount's promise with `refresh()`, defer `ensureIndexReady()` until first Auto-tab tap, persist `store.transactions` to localStorage for instant cold-open paint, throttle silent re-mount `refresh()` to once per 60s (Parse pill always forces fresh). Also cached `version` response per Setup module lifetime. Layered on v0.15.3 (Minimal Monochrome redesign + iOS safe-area + Savings/Goals dedup + metrics pipeline) and v0.12 → v0.14 (hash router, lazy views, dashboard, auto-suggest). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). `main` at v0.11 — not merged yet. GitHub Pages serves from the feature branch for preview.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -237,7 +237,29 @@ Apps Script side (`handleLogClientMetrics_`, new; `doGet`/`doPost` modified):
 Intended usage:
 - Drive a few cold starts + normal sessions → data lands in ClientMetrics → query via `AVERAGE`/`PERCENTILE`/`COUNTIF` to confirm where the 20s goes (cold network vs. Apps Script cold-container vs. sequential chain vs. duplicate calls) before picking a fix. Specific fixes already on the table from prior log analysis: drop duplicate `fetchCategories` in refresh(), defer `ensureIndexReady` until Auto tab, cache transactions in localStorage for instant first paint.
 
-- **Status:** client-side shipped in v0.15.3; Apps Script v11.13 staged (Code.js + VERSION.txt updated) but pending `./deploy.sh` run on user's machine. Until deployed, flushes return "Unknown action" but metrics capture in memory and are readable via `window.__apiStats`.
+- **Status:** complete + verified working. Apps Script v11.13 deployed @35; ClientMetrics tab auto-created on first successful flush and has populated rows showing per-call timings, concurrency, cache hits, and duplicate flags. Baseline data captured, informing Phase 22.
+
+### Phase 22: Cold-Start Optimization (PWA v0.15.4)
+User reported ~20s cold-open load time. Phase 21's ClientMetrics pipeline produced first real measurements, which guided this fix. Before shipping anything we validated all four prior hypotheses against real data.
+
+Measurement findings from the v0.15.3 baseline:
+- **Confirmed:** duplicate `categories` is real (`Duplicate=Y` on every `mount:categorize` row, ~3s wasted per mount).
+- **Confirmed:** suggest-index warmup is heavy (`dumpSheet:Transactions` = 3136ms on cold mount, fires unconditionally).
+- **Confirmed:** re-mounts pay full tax (`mount:categorize` 7763ms cold → 6864ms warm re-mount → 9198ms third re-mount — not improving).
+- **Contradicted:** network overhead is NOT front-loaded to the first call. The `version` endpoint with 46ms server time paid 2525ms network even mid-session with warm container. Every call pays the 302-redirect + TLS overhead; parallelism doesn't help (calls serialize on the single-threaded Apps Script container).
+
+Four fixes landed in v0.15.4 based on what the data actually said:
+- **v0.15.4 (dedupe categories):** `mount()` stores its `fetchCategories` promise in a module variable (`categoriesPromise`). `refresh()` awaits it instead of firing a duplicate. User-initiated refreshes (`refresh({ force: true })`) opt into fresh fetches so sheet-side category additions still propagate.
+- **v0.15.4 (defer suggest index):** `ensureIndexReady()` now fires only when `activeSubtab === 'auto'` on mount, OR on first `setSubtab('auto')` activation. Manual-only users never pay the 3.1s dumpSheet call.
+- **v0.15.4 (persist transactions):** `store.transactions` now persists to localStorage via a new `saveTransactions()`/`setTransactions()` pattern. Cold PWA open paints cached txns in <200ms; `refresh()` merges server state in the background. `setTransactions()` replaces rather than merges so stale-cached items (e.g., categorized directly in the sheet) get evicted correctly.
+- **v0.15.4 (throttle re-mounts):** silent re-mount `refresh()` is a no-op within 60s of the last successful run. Parse pill + empty-state Refresh always bypass via `force: true`.
+- **v0.15.4 (version cache, bonus):** Setup module caches the `version` response in memory for its lifetime. Saves ~2.5s per Setup re-mount.
+
+No Apps Script changes. All PWA-side. CACHE_VERSION v23 → v24.
+
+Patterns added to CLAUDE.md trip-up list (items #25, #26).
+
+- **Status:** complete. Before/after measurement to be verified in next cold open — target `mount:categorize` first = <3s, re-mount = <500ms, `Duplicate=Y` count = 0.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 

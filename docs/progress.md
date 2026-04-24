@@ -1363,4 +1363,69 @@ Bumped to v0.15.3 / cache v23.
 - `parseCurrency` 11/11 + `normalizeMerchant` 17/17 still passing.
 - Safari remote DevTools connection confirmed `window.__apiStats` exposes live buffer.
 - Branch `pwa/v0.15-refinement` at commit `6110a74`, 4 commits ahead of parent `claude/read-markdown-context-v1c5T`.
-- **Action required:** `cd apps-script && ./deploy.sh "v11.13 — ..."` on the user's machine to activate the `logClientMetrics` endpoint server-side.
+- **Action required:** ~~`cd apps-script && ./deploy.sh "v11.13 — ..."` on the user's machine to activate the `logClientMetrics` endpoint server-side.~~ **RESOLVED 2026-04-24.** User ran deploy.sh (twice — first run was on a stale branch and pushed v11.12; second run after `git checkout pwa/v0.15-refinement` succeeded). Apps Script v11.13 deployed @35. ClientMetrics tab populated with real session data — see next session entry below.
+
+---
+
+## Session: 2026-04-24 (later) — Cold-start fixes confirmed by ClientMetrics (v0.15.4)
+
+### Setup
+User ran v11.13 + backgrounded the PWA a few times. First ClientMetrics rows landed in the sheet. User pasted two sessions' worth of data (`5y2p0s2l5f`, `6w29253t3v`) and asked me to "review your previous optimization assumptions with it and create a plan." Goal: validate the four candidate fixes from Phase 21 against real measurements before touching code.
+
+### Diagnosis
+Parsed both sessions' rows. Key columns: `ClientTotalMs`, `ServerMs`, `NetworkMs = clientTotal − serverMs`, `InFlightAtStart`, `MsSincePrev`, `Duplicate`, `Cached`.
+
+**Confirmed hypotheses:**
+- Duplicate `categories` on every mount: two rows per `mount:categorize`, one flagged `Duplicate=Y`, costing ~3 s together.
+- Eager suggest-index warmup: `dumpSheet:Transactions ClientTotal=3136 ms` on cold mount, fires unconditionally even for Manual-only users.
+- Re-mounts pay the full tax: `mount:categorize` cold=7763 ms, re-mount=6864 ms, third re-mount=**9198 ms** (not improving — sometimes worse under contention).
+
+**Contradicted assumption:**
+- Network overhead is NOT front-loaded to the first call. `version ClientTotal=2571 ms, Server=46 ms, Network=2525 ms, MsSincePrev=340 ms` proved every call pays ~2.5 s regardless of warmth. This is the Apps Script 302 redirect (`script.google.com` → `script.googleusercontent.com`) + TLS handshake per logical fetch. Parallel fetches serialize on the single-threaded container anyway — `dumpSheet:Budget` (2634 ms) and `dumpSheet:Saving` (3838 ms) fired concurrently but Saving waited behind Budget before running.
+
+Reprioritization: re-mount throttle moved up in importance because the 2.5 s network tax applies on EVERY re-mount call, not just the first cold open.
+
+### Fix
+Four coordinated PWA-only fixes landed as v0.15.4 (commit `3ff46c0`, cache v24). No Apps Script changes.
+
+Before implementing, I walked through a full regression trace per fix against existing flows (categorize/undo/sync/Auto-swipe/re-mount/force-refresh) to confirm no functional loss.
+
+- **Fix 1 — share categoriesPromise** in `js/views/categorize.js`. `mount()` stores its fetch promise in a module variable; `refresh()` awaits it instead of firing a second. User-initiated refreshes (Parse pill, empty-state button) pass `force: true` to re-fetch fresh so sheet-side additions propagate.
+- **Fix 2 — defer `ensureIndexReady()`**: `mount()` only warms if `activeSubtab === 'auto'` (restored from localStorage). `setSubtab('auto')` warms on first Auto tap; internally idempotent so flipping back-and-forth is free.
+- **Fix 3 — persist `store.transactions`** to localStorage. New `saveTransactions()` + `setTransactions(list)` methods; all mutators call save. `refresh()` uses `setTransactions(fresh.filter(notQueued))` — replaces rather than merges, correctly evicting stale-cached items.
+- **Fix 4 — throttle `refresh()`** to 60 s. Silent re-mounts within the window return immediately. Parse pill + empty-state Refresh always bypass.
+- **Bonus fix — `version` cache** in `js/views/setup.js`. Module-level `versionCache`; first Setup mount fetches, subsequent mounts paint instantly.
+
+Module imports + file changes:
+- `js/store.js` — 36 insertions (persist + replace semantics)
+- `js/views/categorize.js` — 114 insertions (shared promise, throttle, lazy suggest, `force` parameter plumbing)
+- `js/views/setup.js` — 46 insertions (version cache + extracted render helper)
+- `js/config.js`, `sw.js` — version bumps (v0.15.4, cache v24)
+
+### Status — VERIFIED CODE; MEASUREMENT PENDING NEXT SESSION
+- v0.15.4 deployed via GitHub Pages (commit `3ff46c0`) on `pwa/v0.15-refinement`.
+- All 15 JS modules pass `node --check`; every asset serves 200 locally.
+- No regression: walked through 14 user scenarios (cold open, warm re-open, navigate tabs, force refresh, categorize, undo, sync, Auto swipe, Auto toggle persistence, corrupted localStorage, race conditions, invalidation after sync, setTransactions quota, filter correctness) — all clean.
+- **Next session:** user drives typical workflow, backgrounds the PWA, compares new `ClientMetrics` rows against the v0.15.3 baseline to confirm target deltas (mount:categorize first <3 s, re-mount <500 ms, Duplicate=Y count=0, cold-open paint <200 ms).
+
+---
+
+## Session: 2026-04-24 (later 2) — Docs sync for v0.15.4
+
+### Setup
+User asked "update .md files" after v0.15.4 shipped, and also asked whether I use any skills when updating docs — they recently added one and wanted to verify it works.
+
+### Diagnosis
+No `user-invocable skills` list appeared in this session's system reminders (skills are auto-discovered at session start from `.claude/skills/`, and this one was merged from `main` into `pwa/v0.15-refinement` mid-session so it isn't auto-registered). The skill's SKILL.md + templates + lint.sh are however present in the working tree after the merge. Followed the skill's 8-step workflow manually: classify → sync versions via lint.sh → consult templates → apply → re-lint → commit with the skill's required message format.
+
+### Fix
+Updated all four doc files per the skill's guidance.
+- **CLAUDE.md**: bumped Current versions to v0.15.4/cache v24; extended Deploy sequence history; added trip-ups #25 (shared-promise pattern for duplicate API calls) and #26 (re-mount refresh throttle). Renumbered three pre-existing duplicate-numbered trip-ups (16/17/18 → 22/23/24) to fix a drift I introduced in an earlier session.
+- **docs/task_plan.md**: bumped Current State; appended Phase 22 (Cold-Start Optimization) in ascending order after Phase 21. Also marked Phase 21 Status complete + verified working.
+- **docs/findings.md**: updated header pointer to name v11.13 Apps Script + v0.15.4 PWA (fixes lint warning). Appended "Cold-Start Perf Findings + Fix (v0.15.4)" postmortem using the skill's Symptom/Verification/Root cause/Why it cascaded/Blast radius/Fix/Lesson structure.
+- **docs/progress.md**: closed out the stale v0.15.3 "Action required" line with RESOLVED marker per the session-entry-template's stale-state cleanup pattern. Appended v0.15.4 session entry above.
+
+### Status — VERIFIED WORKING
+- Lint re-ran clean after fixes (0 blocking, 0 warnings on version pointers, phase ordering warning is pre-existing historical drift untouched by this change).
+- Docs commit follows the skill's `Docs: [vX.Y / Phase N / topic] — ...` format.
+- Skill usage reported to user: the skill file is in the repo (`.claude/skills/update-budget-docs/`) but was merged mid-session so it isn't auto-registered for inline `Skill` tool invocation this session. Next session started in this repo will have it auto-discovered. The 8-step workflow was followed manually with identical end result.

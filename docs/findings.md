@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.12 Apps Script + v0.14 PWA on branch `claude/read-markdown-context-v1c5T`; `main` still at v0.11). Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.14 PWA restructure + dashboard + auto-suggest is documented below in "PWA Restructure (v0.12 → v0.14)".**
+> Reference document. Sections describe the system as it currently exists: **v11.13 Apps Script** (echoes `_elapsedMs` + `logClientMetrics` endpoint, ClientMetrics tab) + **v0.15.4 PWA** (Minimal Monochrome redesign + cold-start optimizations) on branch `pwa/v0.15-refinement`; `main` still at v0.11 + v11.12. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1244,3 +1244,64 @@ Typical analysis queries (to be added as a sibling `ClientMetrics-Analysis` tab 
 2. **Diagnostic plumbing must never affect the critical path.** `sendBeacon` is fire-and-forget; instrumentation is O(1); buffer drops oldest on overflow; flush endpoint failures are swallowed. At worst, you miss a batch of metrics — the app doesn't hiccup.
 3. **Self-exclusion is not optional** for any logger that depends on the same transport it's measuring. One line in the instrumentation wrapper prevents the infinite-recursion bug class entirely.
 4. **Keep ops logs and perf logs in separate tabs.** `Logs` stays lightweight for error monitoring (at most one row per API call). `ClientMetrics` can grow to hundreds of rows per session without polluting the ops view.
+
+---
+
+## Cold-Start Optimization (v0.15.4)
+
+### Cold-Start Perf Findings + Fix (v0.15.4)
+
+- **Symptom:** User reported cold PWA opens taking ~20 s before transactions appeared. `Logs` tab showed server exec times of 300–2500 ms per call — nowhere near 20 s in aggregate. Root cause was invisible to server logging.
+
+- **Verification:** v0.15.3's `ClientMetrics` tab captured two real sessions (`5y2p0s2l5f`, `6w29253t3v`) with per-call `ClientTotalMs`, `ServerMs`, `NetworkMs`, `InFlightAtStart`, `MsSincePrev`, `Duplicate`, `Cached` columns populated. Representative cold-open row: `categories ClientTotal=2963ms, Server=301ms, Network=2662ms, Duplicate=Y`. Representative warm-container row: `version ClientTotal=2571ms, Server=46ms, Network=2525ms, MsSincePrev=340ms` — showing ~2.5 s of network overhead **on every call regardless of container warmth**.
+
+- **Root cause:** three independent but co-occurring issues, plus one contradicted assumption:
+  1. **Duplicate `categories`**: `mount()` fires `api.fetchCategories()` in the background for pre-warming the picker; `refresh()` then awaits its own `fetchCategories()` call. Two identical round-trips every mount.
+  2. **Eager suggest-index warmup**: `mount()` always called `ensureIndexReady()` which does `dumpSheet('Transactions', 'A2:H1000')` — an 8000-cell read (~3.1 s cold). Users on the Manual sub-tab never need it that session.
+  3. **Re-mounts pay the full tax**: router's per-view `await mount()` re-fires all awaited calls on every navigation; `store.transactions` was memory-only so re-mounts started with a blank list every time.
+  4. **(Contradicted assumption)** The "Apps Script cold start" was assumed to be the main culprit, expected to affect mainly the first call. Data showed the ~2.5 s network tax applies **per logical fetch** — it's the 302 redirect from `script.google.com` to `script.googleusercontent.com` + TLS handshake, not a one-shot container spin-up. Parallel fetches serialize on the Apps Script single-threaded container, so fire-and-forget parallelism doesn't meaningfully help either.
+
+- **Why it cascaded:** cold Categorize mount sequence was: `fetchCategories` (3 s) + `dumpSheet:Transactions` (3.1 s) + `parseAndFetch` (4.7 s with duplicate categories compounding) + blank paint waiting on all three. Empirically ~7.7 s to first useful paint + background cost of the now-unused suggest index. Re-mounting doubled this cost since nothing was cached.
+
+- **Blast radius:** every cold PWA open AND every re-mount within a session since v0.12 (when the router-per-view architecture landed). Previously masked because v0.11 was one monolithic view that mounted once.
+
+- **Fix (v0.15.4):** four coordinated PWA-only fixes, no Apps Script changes:
+
+  ```js
+  // js/views/categorize.js — share mount's promise, throttle silent re-mounts
+  let categoriesPromise = null;
+  let didInitialRefresh = false;
+  let lastRefreshMs = 0;
+  const REFRESH_THROTTLE_MS = 60 * 1000;
+
+  async function refresh({ force = false } = {}) {
+    if (!force && didInitialRefresh && (Date.now() - lastRefreshMs) < REFRESH_THROTTLE_MS) {
+      return;  // silent re-mount no-op
+    }
+    // ... force branch re-fetches categories fresh; non-force awaits categoriesPromise
+  }
+  ```
+
+  ```js
+  // js/views/categorize.js — defer suggest index to Auto activation
+  if (activeSubtab === 'auto') {
+    ensureIndexReady().then(() => renderTransactions()).catch(err => ...);
+  }
+  // In setSubtab('auto'): same call, idempotent on cache hit.
+  ```
+
+  ```js
+  // js/store.js — persist transactions, replace-semantic setter
+  setTransactions(list) {
+    this.transactions = list.slice().sort(...);
+    this.saveTransactions();
+  }
+  // Called by refresh(): store.setTransactions(fresh.filter(notQueued))
+  ```
+
+- **Lesson:**
+  1. **Server-side duration is a subset of user-perceived latency.** Apps Script's `Logs` captures only handler exec time; Apps Script web apps pay a 302-redirect + TLS tax *per logical fetch* on top. To diagnose perf, you need client-side measurement (`lib/metrics.js` + `ClientMetrics` tab) OR the problem stays invisible.
+  2. **"Fire in parallel at mount, await in refresh" is a trap pattern.** If the same endpoint is reachable through both entry points, one of them must yield to the other — usually by sharing a promise. Added as CLAUDE.md trip-up #25.
+  3. **Every `await mount()` on re-navigation is expensive unless explicitly throttled.** The router's clean re-mount semantics make this non-obvious. Added as CLAUDE.md trip-up #26.
+  4. **Client-side cached state beats server-side cleverness for perceived performance.** `store.transactions` in localStorage turned a 5 s blank screen into a <200 ms paint even on cold open — no server change required.
+  5. **Diagnose before fixing** (from Phase 21 lesson): the four candidate fixes from earlier log analysis were all validated as correct by real `ClientMetrics` data, but the priority ordering changed after seeing network-tax-per-call. If we'd shipped the first three without data, we'd have under-estimated how much the re-mount throttle mattered.
