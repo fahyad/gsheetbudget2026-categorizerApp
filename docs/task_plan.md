@@ -5,8 +5,8 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.12 — `updateWorkbook` now delegates Budget refresh to `rebuildBudgetInternal_`. The previous in-place per-row setFormula loop was silently failing — Budget dashboard formulas worked but per-row formulas stayed `#REF!`. v11.11 was the Saving tab schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods). v11.9 + v11.10 were earlier Saving shakedown fixes. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.14 (cache v19) — **all 3 restructure deploys shipped.** v0.12 scaffolding (hash router + lazy views + tab-bar); v0.12.1 Setup exit; v0.12.2 moved Refresh/Sync out of the shell header into the categorize view (inline `⟳` icon + sticky sync bar, shown only when queue non-empty); v0.13 Dashboard content (period-switchable, cached 10 min, invalidated on sync); v0.14 Auto-suggest sub-tab in Categorize with per-row swipe (right = accept, left = skip for this session). Local-only frequency index, ≥70% confidence threshold. Still on branch `claude/read-markdown-context-v1c5T`; `main` not yet merged. GitHub Pages currently serving from the feature branch for preview (Settings → Pages → Source). See Phase 18 below.
+- **Apps Script:** v11.13 — every response now echoes `_elapsedMs` so the client can split server-exec vs. network/cold-container time; new `logClientMetrics` action appends client-side perf records to a dedicated `ClientMetrics` tab (auto-created). No breaking changes to existing endpoints. v11.12 fixed the Budget `#REF!` cascade via `rebuildBudgetInternal_` delegation; v11.9–v11.11 were Saving tab shakedown. Full postmortems in `docs/findings.md`.
+- **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign (from Claude Design handoff) layered on top of v0.12 → v0.14 functionality. Visual system: near-black on warm off-white, collapsible calendar period bar, 4-col summary, Sync/Parse pill on top-right, collapsible main-category groups, warm-tan period band. Post-redesign fixes: v0.15.1 iOS safe-area (Dynamic Island fix), v0.15.2 Savings/Goals dedup, v0.15.3 rich client-side metrics pipeline (sendBeacon-flushed to ClientMetrics tab). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`, which carries v0.14). `main` still at v0.11 — not merged yet. GitHub Pages currently serves from the feature branch for preview.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -193,6 +193,51 @@ Design choices (scaffolding-level):
 First attempt to deploy the feature branch timed out at `updating_pages` even though the build step "succeeded" — root cause was GitHub Pages running Jekyll by default with no `.nojekyll` marker. Added empty `.nojekyll` at repo root + empty-commit retrigger cleared it. The file must stay on every branch Pages deploys from.
 
 - **Status:** all 3 deploys shipped, verified end-to-end, Pages serving the branch successfully. Not yet merged to `main`.
+
+### Phase 20: PWA Visual Redesign — Minimal Monochrome (v0.15 → v0.15.2)
+After the functional restructure (Phase 18) landed, the user wanted a cleaner aesthetic: drop the indigo theme, simplify information density, improve hierarchy. Scoped design work out to Claude Design (claude.ai/design), received a handoff bundle containing three variations (A, B, C). User iterated via the design canvas UI, converging on Variation A (Minimal Monochrome). B and C were explicitly deleted. Bundle + chat transcript fetched via `/v1/design/h/<id>` (gzipped tar archive), extracted to `/tmp/design-fetch/budget-pwa/`.
+
+Visual system:
+- `#0A0A0A` on `#FAFAF9`, `#E5E5E3` rules, `#EFEDE8` period bar.
+- Inter for UI, JetBrains Mono for the `+`/`−` toggle glyph.
+- Color-coded amounts on dashboard: black (positive), amber `#B45309` (zero), red `#B91C1C` (overspent), green `#15803D` (goal reached).
+
+Shape changes:
+- **Header title/version removed.** The period bar (on Categorize + Dashboard) is the visual top of the app.
+- **Period bar is a collapsible calendar.** Tap label to expand a 7-col day grid; `‹ ›` chevrons advance/retreat periods. Today cell is inverted black.
+- **Sync → top-right pill** in the period bar (`Sync N` primary when queue > 0, else `↻ Parse` outline). Sticky bottom sync bar deleted.
+- **Dashboard:** 4-col summary (Income / Fixed / Budgeted / Ready), collapsible `+`/`−` main-category groups, sub-rows show `left/over` primary + `spent/budgeted` secondary + 1px progress bar.
+- **Tab bar (3 tabs since v0.15):** thick top accent bar on active tab + warm-gray tint + uppercase bold label. Settings is now a tab, not a header button.
+
+Post-redesign fixes discovered on real device testing:
+- **v0.15.1 (iOS safe-area):** on iPhone 16 Pro the Dynamic Island showed a white strip above the period bar. Root cause: I'd translated the design's 54px iPhone 14 frame spacer into a hardcoded `<header>` with `#FAFAF9` background. Actual Dynamic Island inset is ~62px and the color was wrong. Fix: add `viewport-fit=cover` to enable `env(safe-area-inset-*)`; delete the fixed header; extend the period bar's tan background into the notch via `padding-top: calc(env(safe-area-inset-top, 0px) + 10px)`. Applied the same safe-area-aware offset to `#category-picker` and `#error-toast`.
+- **v0.15.2 (Savings/Goals dedup):** Savings main category group was showing sub-categories (Europe, NDEB) that also appear as Saving Goal cards below — same data in two places. Dashboard now filters `categoriesByPeriod` to exclude any category whose `sub` matches a `goal.linkedCategory`. Filter is data-driven, not hardcoded.
+
+- **Status:** complete + shipped on `pwa/v0.15-refinement`.
+
+### Phase 21: Client Metrics Pipeline (PWA v0.15.3 + Apps Script v11.13)
+User reported ~20s cold-start load time. The existing Logs tab captures server exec duration but not client-perceived latency, TLS/DNS cost, cold-container queue wait, or duplicate-call detection. Before fixing anything, built a richer diagnostic pipeline so future optimization decisions are data-driven.
+
+PWA side (`js/lib/metrics.js`, new — ~200 LOC):
+- Session id generated once per cold open; tracks mount counter so each metric is scoped to a view mount within a session.
+- `recordStart(action)` / `recordComplete(ticket, {ok, serverMs, bytes, cached, errorMsg})` wrap every API call in `api.js`.
+- In-flight Set captures concurrency-at-start; `msSincePrev` captures how long since the last completed request (cold/warm heuristic).
+- Duplicate detector: flags any action that fires twice within 2s (catches the known `fetchCategories` bug).
+- `recordEvent(kind, data)` captures non-API events: `mount:<route>` with import-vs-mount-time split; `cache-hit:dashboard` / `cache-miss:dashboard`; `cache-hit:suggest` (with source: memory / in-flight-dedup / localStorage) / `cache-miss:suggest`.
+- 50-entry buffer; flushes on `visibilitychange: hidden` + `pagehide` via `navigator.sendBeacon`. Text/plain Blob to skip CORS preflight (iOS Safari strict; Apps Script doesn't respond to OPTIONS cleanly). Keepalive fetch fallback if sendBeacon unavailable.
+- Exposes `window.__apiStats` / `__apiStats_session` / `__apiStatsFlush()` for Safari remote DevTools inspection.
+- **`logClientMetrics` action excluded from instrumentation** — no logging-about-logging loops.
+
+Apps Script side (`handleLogClientMetrics_`, new; `doGet`/`doPost` modified):
+- Every response now injects `_elapsedMs = Date.now() - start` before returning (client reads it to compute `networkMs = clientTotalMs - serverMs`).
+- `logClientMetrics` action accepts batched records (POST body or GET params), appends to the `ClientMetrics` tab in one `setValues` call.
+- Tab auto-creates on first write with 18-column schema: ReceivedAt, SessionId, MountN, AppVersion, Connection, Action, ClientStartMs, ClientTotalMs, ServerMs, NetworkMs, InFlightAtStart, MsSincePrev, Duplicate, Cached, Ok, ErrorMsg, Bytes, Note.
+- Defensive 500-row/batch cap (client buffer is 50).
+
+Intended usage:
+- Drive a few cold starts + normal sessions → data lands in ClientMetrics → query via `AVERAGE`/`PERCENTILE`/`COUNTIF` to confirm where the 20s goes (cold network vs. Apps Script cold-container vs. sequential chain vs. duplicate calls) before picking a fix. Specific fixes already on the table from prior log analysis: drop duplicate `fetchCategories` in refresh(), defer `ensureIndexReady` until Auto tab, cache transactions in localStorage for instant first paint.
+
+- **Status:** client-side shipped in v0.15.3; Apps Script v11.13 staged (Code.js + VERSION.txt updated) but pending `./deploy.sh` run on user's machine. Until deployed, flushes return "Unknown action" but metrics capture in memory and are readable via `window.__apiStats`.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 

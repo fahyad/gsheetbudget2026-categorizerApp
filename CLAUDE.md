@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.12 (updateWorkbook now delegates Budget refresh to `rebuildBudgetInternal_` because the in-place per-row refresh loop was silently failing — dashboard formulas worked but per-row formulas (rows 8+) stayed `#REF!` indefinitely). Earlier shakedown: v11.9 updateWorkbook ordering so Saving formulas don't break to `#REF!`; v11.10 replaced XLOOKUP-with-array-multiplication with INDEX+MATCH; v11.11 Saving schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods).
-- **PWA:** v0.14 (cache v19) — **all 3 restructure deploys shipped.** v0.12 scaffolding (hash router + lazy views + tab-bar); v0.12.1 Setup exit; v0.12.2 moved Refresh/Sync out of header into the categorize view (Refresh is an inline icon in the period row; Sync is a sticky bar shown only when the queue is non-empty); v0.13 real Dashboard content (period-switchable, cached 10 min, invalidated on sync); v0.14 Auto-suggest sub-tab in Categorize with per-row swipe (right = accept, left = skip), backed by a local merchant→category frequency index (≥70% confidence). Still on branch `claude/read-markdown-context-v1c5T`. `main` has not been merged; see "Current branch state" below.
+- **Apps Script:** v11.13 — `doGet`/`doPost` now echo `_elapsedMs` in every response (lets the client compute network-vs-server split in its diagnostics log), plus new `logClientMetrics` action that batches into a dedicated `ClientMetrics` tab. No breaking changes; the deployment URL is unchanged. v11.12 fixed the Budget `#REF!` cascade by delegating to `rebuildBudgetInternal_`; v11.9–v11.11 were the Saving tab shakedown.
+- **PWA:** v0.15.3 (cache v23) — **Minimal Monochrome redesign** (built from a Claude Design handoff) + iOS Dynamic-Island safe-area fix + Savings/Goals dedup + rich client-side metrics pipeline. Layered on top of the v0.12–v0.14 work (hash router, lazy views, dashboard, auto-suggest swipe deck). See "PWA architecture" below. Currently on branch `pwa/v0.15-refinement` (branched off `claude/read-markdown-context-v1c5T`, which carries v0.14). `main` still at v0.11 + v11.12 — not merged yet.
 
 ## Common commands
 
@@ -76,7 +76,7 @@ curl -sL "${URL}?action=dumpSheet&apiKey=${KEY}&tab=Budget&range=D2:D10&includeF
 
 Caps at 10000 cells per request. Read-only (no writes). API-key gated.
 
-Tabs in this sheet (v11.8+): `Instructions`, `Logs`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Transactions`, `Saving`.
+Tabs in this sheet (v11.13+): `Instructions`, `Logs`, `ClientMetrics`, `Setup`, `Fixed Monthly Expenses`, `Budget`, `Transactions`, `Saving`. `ClientMetrics` auto-creates on first PWA flush — do not rebuild manually.
 
 **Pending tab REMOVED in v11.0** — single-ledger architecture. The Transactions tab now holds:
 - All categorized transactions (manual + email-parsed + PWA-categorized)
@@ -133,84 +133,95 @@ The header version label in `index.html` is populated at runtime from `APP_VERSI
 
 **Pages source:** Settings → Pages → Build and deployment. Currently deploying from `claude/read-markdown-context-v1c5T` for preview (since `main` is still at v0.11). When you merge to main, switch the source back to `main`.
 
-## PWA architecture (v0.12 → v0.14)
+## PWA architecture (v0.12 → v0.15.3)
 
-Restructured in v0.12 from a 657-line single-file app into a thin shell + lazy-loaded view modules. The shell is ~40 LOC and loads instantly; each view is fetched on first navigation. v0.13 filled the dashboard; v0.14 added the Auto sub-tab.
+Restructured in v0.12 from a 657-line single-file app into a thin shell + lazy-loaded view modules. The shell is ~40 LOC and loads instantly; each view is fetched on first navigation. v0.13 filled the dashboard; v0.14 added the Auto sub-tab; v0.15 reskinned the whole app in "Minimal Monochrome" per a Claude Design handoff; v0.15.3 added a client-side metrics pipeline feeding a new `ClientMetrics` sheet tab.
 
 **Module layout:**
 ```
 js/
-  app.js           ~40   shell: version label, settings-btn handler, initial-route gate, beforeunload
-  router.js        ~80   hashchange -> lazy import(view) -> mount(root) / unmount(); owns tab-bar active-class + Categorize pending-count badge
-  ui.js            ~25   shared showError / showSuccess only (setHeaderActions removed in v0.12.2)
+  app.js           ~40   shell: version label, initial-route gate, beforeunload
+  router.js       ~100   hashchange -> lazy import(view) -> mount(root) / unmount(); owns tab-bar active-class + Categorize pending-count badge + mount-timing events
+  ui.js            ~25   shared showError / showSuccess only
   config.js        ~40   APP_VERSION, DEFAULT_API_URL, localStorage getters
-  api.js           ~60   request() + endpoint wrappers (includes dumpSheet since v0.13)
+  api.js           ~80   request() + endpoint wrappers; every request goes through lib/metrics.recordStart/recordComplete
   store.js        ~155   in-memory + localStorage state (txns, categories, syncQueue)
-  periods.js      ~125   bi-weekly pay-period math (currentPeriod, periodForTimestamp, allPeriods since v0.13)
+  periods.js      ~125   bi-weekly pay-period math (currentPeriod, periodForTimestamp, allPeriods)
   lib/
-    budget.js     ~180   data layer for dashboard: dumpSheet(Budget) + dumpSheet(Saving), parseCurrency, formatCurrency, 10-min cache, invalidateDashboardCache (v0.13)
-    suggest.js    ~160   merchant normalizer + frequency index from Transactions; suggest(merchant) returns top category if ≥70% confidence (v0.14)
-    swipe.js       ~95   vanilla touch factory attachSwipe(translateEl, { revealEl, onLeft, onRight }) (v0.14)
+    budget.js     ~200   dashboard data layer: dumpSheet(Budget) + dumpSheet(Saving), parseCurrency, formatCurrency, 10-min cache, invalidateDashboardCache; emits cache-hit/miss metric events
+    suggest.js    ~175   merchant normalizer + frequency index from Transactions; suggest() ≥70% confidence; emits cache-hit/miss events
+    swipe.js       ~95   vanilla touch factory attachSwipe(translateEl, { revealEl, onLeft, onRight })
+    metrics.js    ~200   NEW (v0.15.3) — session id + in-flight tracker + 50-entry buffer + sendBeacon flush to logClientMetrics on visibility-hidden. Exposes window.__apiStats / __apiStats_session / __apiStatsFlush() for Safari DevTools.
   views/
-    categorize.js  ~550  Manual + Auto sub-tabs sharing period filter / refresh / sync bar / picker / undo (v0.14)
-    setup.js       ~115  config form + version info panel
-    dashboard.js  ~240   period dropdown + Ready-to-Assign card + summary strip + category progress bars + saving-goal cards (v0.13)
+    categorize.js  ~560  Manual + Auto sub-tabs; calendar period bar at top; top-right Sync/Parse pill (v0.15 redesign)
+    setup.js       ~100  underline-style config form + version list (v0.15 redesign)
+    dashboard.js  ~320   calendar period bar; 4-col summary strip (Income / Fixed / Budgeted / Ready); collapsible +/- category groups; goal-linked categories suppressed and moved into the Goals section (v0.15.2); tap-to-expand goal cards
 ```
 
-**Routes:** `#/categorize` (default), `#/dashboard`, `#/setup`. Navigation via `<a href="#/...">` in the bottom tab-bar — zero JS click handlers for nav, browser back/forward works.
+**Routes:** `#/categorize` (default), `#/dashboard`, `#/setup`. Navigation via `<a href="#/...">` in the bottom tab-bar (3 tabs since v0.15 — Settings is a tab now, not a header button).
 
-**View contract:** every view module default-exports `{ mount(root), unmount() }`. `mount` renders its DOM into `#view-root` and attaches listeners. `unmount` is typically empty — in-view DOM is wiped by the router's `root.innerHTML = ''` before the next mount, so in-view listeners die with the DOM.
+**View contract:** every view module default-exports `{ mount(root), unmount() }`. `mount` renders into `#view-root` and attaches listeners. `unmount` is typically empty — in-view DOM is wiped by the router's `root.innerHTML = ''` before the next mount.
 
-**Header (v0.12.2+):** just title + `APP_VERSION` + Settings. `Sync` and `Refresh` are **per-view controls that live inside the categorize view**, not shell-level. Settings button always routes to `#/setup`; return via the tab-bar. `setHeaderActions` helper was deleted in v0.12.2 — views no longer declare header chrome.
+**Shell chrome (v0.15):** the `<header>` element is hidden via CSS. The period bar is the visual top of the app (on Categorize + Dashboard) and extends into the iOS safe area via `padding-top: calc(env(safe-area-inset-top, 0px) + 10px)` so the Dynamic Island notch is covered in the period bar's tan `#EFEDE8` background. Setup has no period bar and pads its own section. `viewport-fit=cover` on the viewport meta is required — without it `env(safe-area-inset-*)` returns 0 on iOS.
 
-**Categorize chrome:** `#period-filter-bar` contains the period dropdown **+ inline Refresh `⟳`**. Sync is a sticky bar (`#sync-bar`) above the tab-bar, visible only when `store.syncQueue.length > 0`. When both the undo-bar and sync-bar are active, `.above-undo` on the sync-bar bumps it up 48px to stack. Categorize tab-bar label shows `Categorize (N)` when pending, maintained by `router.updateCategorizeBadge()` on every route change + after categorize/sync mutations.
+**Categorize chrome:** period bar at top (collapsible 7-day calendar grid, `‹ ›` chevrons for prev/next period), with `Sync N` (primary pill) or `↻ Parse` (outline pill) in the right slot. Manual | Auto segmented control directly beneath. Undo bar floats above the tab bar; toast at the top, safe-area-aware.
 
-**Manual | Auto sub-tab (v0.14):** segmented control inside the categorize view (not a sub-route), persisted in `localStorage.budget_categorize_subtab`. Manual tab = today's behaviour unchanged. Auto tab = same list, filtered to rows where `suggest(merchant)?.confidence >= 0.70 && !rejectedThisSession.has(timestamp)`, rendered as two-line rows (merchant + amount on top, `↗ category` below). Swipe right = accept (queue for sync via the normal categorize path), swipe left = hide for this session only (txn stays in Manual). Tap without swipe still opens the picker. `rejectedThisSession` is intentionally in-memory — next session gives the suggestion another shot.
+**Manual | Auto sub-tab:** segmented control inside the categorize view (not a sub-route), persisted in `localStorage.budget_categorize_subtab`. Manual tab = one tap → picker. Auto tab = rows where `suggest(merchant)?.confidence >= 0.70 && !rejectedThisSession.has(timestamp)`. Swipe right = accept, swipe left = hide for this session only. `rejectedThisSession` is intentionally in-memory — next session's richer index gets another chance.
 
-**Tab-bar (v0.12.2+):** bottom-fixed, **always visible** (no longer hidden on `#/setup`). Stacks at `var(--tab-bar-total)` = 56px + `env(safe-area-inset-bottom)`. Undo-bar, category-picker, and sync-bar position themselves above it via the same CSS var.
+**Dashboard (v0.15.2):** same period bar (`Day X of Y` in the right slot). 4-col summary. Main categories are `+`/`−` collapsible. **Categories whose `sub` is linked to a saving goal are filtered out** — they render only in the Goals section so the user doesn't see the same item twice. The filter is data-driven (`goal.linkedCategory` match), not a hardcoded "Savings" main name.
 
-**Service worker (v19):** precaches the shell (`app.js`, `router.js`, `ui.js`, `config.js`, `api.js`, `store.js`, `periods.js`, `index.html`, `style.css`, `manifest.json`). Lazy view + lib modules under `/js/views/` and `/js/lib/` are served via stale-while-revalidate — dynamic imports work offline after first successful fetch. Bump `CACHE_VERSION` on every PWA release so the new SW activates and purges old caches.
+**Tab-bar (v0.12.2+):** bottom-fixed, always visible. Active tab has a thick top accent bar + warm-gray fill + uppercase bold label. Stacks at `var(--tab-bar-total) = 72px + env(safe-area-inset-bottom)`.
 
-**State:** `store.js` is still a singleton loaded once in the shell (`store.loadCache()` before `router.start()`). No pub/sub — cross-view signaling is one explicit call: `categorize.js` calls `invalidateDashboardCache()` + `invalidateSuggestIndex()` after successful `batchCategorize`. Acceptable for two callers; revisit if more cross-view coupling appears.
+**Service worker (v23):** precaches the shell (`app.js`, `router.js`, `ui.js`, `config.js`, `api.js`, `store.js`, `periods.js`, `index.html`, `style.css`, `manifest.json`). Lazy view + lib modules under `/js/views/` and `/js/lib/` are served via stale-while-revalidate. `script.google.com` requests bypass the SW entirely (so `sendBeacon` flushes to the metrics endpoint aren't cached). Bump `CACHE_VERSION` on every PWA release.
 
-### Deploy sequence (3 deploys total) — all shipped
-- ✅ **Deploy 1 (v0.12, v0.12.1, v0.12.2)** — scaffolding + Setup exit fix + move Refresh/Sync into the view. Shell reduced to ~40 LOC.
-- ✅ **Deploy 2 (v0.13)** — Dashboard content. Period-switchable, 10-min TTL cache, invalidated after sync. Per-period Net Income / Fixed / Ready-to-Assign is taken from the sheet's B1-selected row (known scope limit — see v0.13 plan non-goals).
-- ✅ **Deploy 3 (v0.14)** — Auto-suggest sub-tab with per-row swipe. Local-only frequency index, 0.70 confidence threshold.
+**State:** `store.js` is still a singleton loaded once in the shell. No pub/sub — cross-view signaling is two explicit calls: `categorize.js` calls `invalidateDashboardCache()` + `invalidateSuggestIndex()` after successful `batchCategorize`. Two callers; revisit if it grows.
+
+**Client metrics (v0.15.3):** `lib/metrics.js` wraps every request in `api.js`. Captured fields: sessionId, mountN, appVersion, connection, action, clientStartMs, clientTotalMs, serverMs (from `data._elapsedMs`), networkMs (total − server), inFlightAtStart, msSincePrev, duplicateDetected, cached, ok, errorMsg, bytes, note. The buffer flushes on `visibilitychange: hidden` + `pagehide` via `navigator.sendBeacon` (text/plain to skip CORS preflight — the Apps Script endpoint accepts either GET or POST JSON). The `logClientMetrics` action is excluded from its own instrumentation so it doesn't log about logging. Records land in the `ClientMetrics` tab with one `setValues` call per batch.
+
+### Deploy sequence history — all shipped
+- ✅ **v0.12 / v0.12.1 / v0.12.2** — scaffolding + Setup exit fix + relocate Refresh/Sync out of the shell header into the categorize view.
+- ✅ **v0.13** — dashboard data layer + real content (period-switchable, cached).
+- ✅ **v0.14** — Auto-suggest sub-tab with per-row swipe.
+- ✅ **v0.15** — Minimal Monochrome redesign from Claude Design handoff (period-bar calendar, 4-col summary, collapsible groups, warm-tan period band, tab-bar with thick top accent).
+- ✅ **v0.15.1** — iOS safe-area fix (Dynamic Island notch on iPhone 16 Pro showed a white gap above the period bar; dropped the fixed 54px header, added `viewport-fit=cover`, moved all top offsets to `env(safe-area-inset-top)`).
+- ✅ **v0.15.2** — dashboard category/goal dedup (Savings main was showing sub-categories that also appear as Saving Goal cards; now filtered out via `linkedCategory` match).
+- ✅ **v0.15.3** — client metrics pipeline + Apps Script v11.13 (`_elapsedMs` echo + `logClientMetrics` endpoint + `ClientMetrics` tab).
 
 Detailed plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.
 
 ### Current branch state
-- **Feature branch:** `claude/read-markdown-context-v1c5T` — carries v0.12 through v0.14 + `.nojekyll`.
-- **Branched from:** `pwa/experiments`.
-- **`main` still carries v0.11 PWA** (+ v11.12 Apps Script). Not merged yet.
-- **GitHub Pages currently serves from the feature branch** for preview (Settings → Pages → Source). When merging to main, also flip the source back to `main`.
-- **`.nojekyll` (repo root, empty file)** is required — without it Pages runs Jekyll by default and the deploy can time out at "updating_pages" even though the build "succeeds" (observed Apr 23 2026; an empty-commit retrigger cleared it once the marker was in place). Keep it committed.
+- **Active branch:** `pwa/v0.15-refinement` — carries v0.15.0 → v0.15.3 + Apps Script v11.13. Branched from `claude/read-markdown-context-v1c5T` (which has v0.12 → v0.14).
+- **Parent branch:** `claude/read-markdown-context-v1c5T` — still pushed to origin, not merged.
+- **`main`** still at v0.11 + v11.12 Apps Script. Not merged yet.
+- **GitHub Pages Source:** currently pointed at the feature branch for preview (Settings → Pages → Source). When merging to main, flip the source back to `main`.
+- **`.nojekyll`** at repo root is required — without it Pages runs Jekyll by default and the deploy times out at `updating_pages` even when the build "succeeds". Keep it committed.
+- **Apps Script deploy:** `./deploy.sh` must run on your machine (the sandbox has no `clasp`). The script bumps `VERSION.txt` + `APP_SCRIPT_LAST_EDITED` locally, then pushes + creates a new version bound to the same production deployment ID. Never use plain `clasp deploy` — it mints a new URL.
 - **PR:** not opened (user manages PRs manually).
 
 ## File map
 
 | Path | Purpose |
 |------|---------|
-| `index.html` | PWA entry. Shell DOM: header (title + version + Settings) + `<main id="view-root">` + `<nav id="tab-bar">` + `#error-toast`. Views render into `#view-root`. |
-| `.nojekyll` | Empty marker. Opts the repo out of GitHub Pages' default Jekyll build — required, do not delete. |
-| `sw.js`, `manifest.json` | Service worker (`CACHE_VERSION` v19) + PWA manifest |
-| `css/style.css` | Single stylesheet with section-header TOC. `--tab-bar-total` CSS var drives bottom-fixed stacking (undo-bar / sync-bar / category-picker). |
-| `js/app.js` | Shell (~40 LOC). Version label, settings-btn routing, beforeunload, store.loadCache(), hands off to router. |
-| `js/router.js` | Hashchange router + lazy view imports + mount/unmount lifecycle; owns tab-bar active-class and the `Categorize (N)` pending-count badge. |
-| `js/ui.js` | Shared UI helpers: `showError`, `showSuccess`. (setHeaderActions deleted in v0.12.2.) |
+| `index.html` | PWA entry. `<header>` exists but is hidden via CSS; `<main id="view-root">` + `<nav id="tab-bar">` (3 tabs) + `#error-toast`. Viewport has `viewport-fit=cover` for iOS safe-area. |
+| `.nojekyll` | Empty marker. Opts out of GitHub Pages' default Jekyll build — required. |
+| `sw.js`, `manifest.json` | Service worker (`CACHE_VERSION` v23) + PWA manifest |
+| `css/style.css` | Single stylesheet, Minimal Monochrome tokens in `:root`. `--tab-bar-total` drives bottom-fixed stacking. Period bar + setup section use `env(safe-area-inset-top)` to cover the iOS Dynamic Island. |
+| `js/app.js` | Shell (~40 LOC). Version label, settings-btn routing (kept for back-compat; button hidden), beforeunload, store.loadCache(), hands off to router. |
+| `js/router.js` | Hashchange router + lazy view imports + mount/unmount lifecycle; records `mount:<route>` timing events into the metrics pipeline; owns tab-bar active-class and the `Categorize (N)` pending-count badge. |
+| `js/ui.js` | Shared UI helpers: `showError`, `showSuccess`. |
 | `js/config.js` | `APP_VERSION`, `APP_LAST_EDITED`, hardcoded `DEFAULT_API_URL`, localStorage config getters/setters. |
-| `js/api.js` | Thin fetch wrapper around Apps Script endpoints, including `dumpSheet(tab, range)` since v0.13. |
+| `js/api.js` | Fetch wrapper around Apps Script endpoints (including `dumpSheet(tab, range)`). Every call flows through `lib/metrics.recordStart/recordComplete`. Reads `data._elapsedMs` to populate server-timing metrics. |
 | `js/store.js` | In-memory + localStorage state: transactions, categories, syncQueue, lastCategorized. |
-| `js/periods.js` | Client-side pay-period math. `currentPeriod`, `periodForTimestamp`, `allPeriods` (v0.13). |
-| `js/lib/budget.js` | Dashboard data layer (v0.13). Two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:I105), `parseCurrency` → numbers, `formatCurrency` via `Intl.NumberFormat`, 10-min TTL in localStorage, `invalidateDashboardCache()`. |
-| `js/lib/suggest.js` | Auto-suggest engine (v0.14). `normalizeMerchant()` (6 regex rules, unit-tested against 17 patterns), `ensureIndexReady` fetches Transactions + builds `{normMerchant: {category: count}}`, `suggest(merchant, {threshold=0.70})`, `invalidateSuggestIndex()`. 1-hr cache TTL. |
-| `js/lib/swipe.js` | Vanilla touch factory (v0.14). `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold=0.40 })`. Abort on vertical-dominant first move; short tap falls through to click; commit animates off-screen then fires callback. |
-| `js/views/categorize.js` | Manual + Auto sub-tabs (v0.14) sharing period filter, refresh, sync bar, picker, undo. Auto tab: per-row swipe + in-memory rejectedThisSession set. |
-| `js/views/setup.js` | Config form + version info panel. |
-| `js/views/dashboard.js` | Period dropdown + Ready-to-Assign hero + summary strip + category progress bars + saving-goal tap-to-expand cards (v0.13). |
-| `apps-script/Code.js` | Apps Script source (~2400 lines) |
-| `apps-script/deploy.sh` | One-command production deploy |
+| `js/periods.js` | Client-side pay-period math: `currentPeriod`, `periodForTimestamp`, `allPeriods`. |
+| `js/lib/budget.js` | Dashboard data layer. Two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:I105), `parseCurrency` → numbers, `formatCurrency` via `Intl.NumberFormat`, 10-min TTL in localStorage, `invalidateDashboardCache()`. Emits `cache-hit:dashboard` / `cache-miss:dashboard` events. |
+| `js/lib/suggest.js` | Auto-suggest engine. `normalizeMerchant()` (6 regex rules, unit-tested against 17 patterns), `ensureIndexReady` fetches Transactions + builds `{normMerchant: {category: count}}`, `suggest(merchant, {threshold=0.70})`, `invalidateSuggestIndex()`. 1-hr cache TTL. Emits cache-hit/miss events with source (memory / in-flight-dedup / localStorage). |
+| `js/lib/swipe.js` | Vanilla touch factory. `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold=0.40 })`. Abort on vertical-dominant first move; short tap falls through to click. |
+| `js/lib/metrics.js` | **NEW (v0.15.3)** — client-side diagnostics pipeline. Session id + 50-entry buffer + in-flight tracking + `sendBeacon` flush to `logClientMetrics` on visibility-hidden + pagehide. Records every API call + view mounts + cache decisions. Exposes `window.__apiStats` / `__apiStats_session` / `__apiStatsFlush()` for Safari remote DevTools. |
+| `js/views/categorize.js` | Manual + Auto sub-tabs sharing calendar period bar + Parse/Sync pill + picker + undo. Auto tab: per-row swipe + in-memory `rejectedThisSession` set. |
+| `js/views/setup.js` | Underline-style config form + version list (v0.15 redesign). |
+| `js/views/dashboard.js` | Calendar period bar + 4-col summary strip + collapsible `+`/`−` category groups (goal-linked categories filtered out since v0.15.2) + tap-to-expand saving-goal cards. |
+| `apps-script/Code.js` | Apps Script source (~2500 lines). v11.13+ echoes `_elapsedMs` on every response + has `logClientMetrics` action. |
+| `apps-script/deploy.sh` | One-command production deploy. Must run on user's machine — sandbox has no `clasp`. |
 | `apps-script/.clasp.json` | Apps Script project link (scriptId + rootDir) |
 | `apps-script/.claspignore` | Allowlist (only Code.js + appsscript.json get pushed) |
 | `docs/task_plan.md` | Current state + phases — **read this first** |
@@ -262,6 +273,18 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 14. **In-view event listeners die with the DOM; shell-level listeners must be removed explicitly.** The router does `root.innerHTML = ''` before mounting the next view, so any listener on an element inside `#view-root` is garbage-collected. The only shell-level listener today is on `#settings-btn` — `app.js` handles it once at boot, so views don't need to clean up. If you add a new shell-level element that a view attaches listeners to, track the handler refs and remove them in `unmount()`.
 
 15. **Merchant normalizer MUST produce identical keys for variants of the same merchant (v0.14).** The suggestion index aggregates by normalized merchant; if `AMAZON.COM*MT12345 SEATTLE WA` and `AMAZON.COM*XY98765 SEATTLE WA` normalize to different keys, the index bucketizes them separately and confidence stays below threshold forever. The normalizer uses `\*[a-z0-9]+` (strip card/txn suffixes anywhere), `#\w+` (strip store IDs), and `\S*\d+\S*` (strip any token containing digits — including hyphenated like `T-0384`). If you touch `normalizeMerchant()`, run the test block in the v0.14 commit message / session log against the full 17-case suite before shipping.
+
+16. **iOS safe-area needs BOTH `viewport-fit=cover` AND `env(safe-area-inset-*)` (v0.15.1).** Without `viewport-fit=cover` in the viewport meta, `env(safe-area-inset-top)` silently returns `0` on iOS and you end up hardcoding pixel values that are wrong for iPhone 16 Pro's Dynamic Island (~62px inset) or any future device. Symptoms: a white/mismatched strip above your top bar on notched iPhones. Fix: the top visual component (period bar on Categorize + Dashboard, section wrapper on Setup) does `padding-top: calc(env(safe-area-inset-top, 0px) + <design offset>px)` and extends its own background into the notch area. Don't re-introduce a fixed `<header>` spacer.
+
+17. **Floating top offsets (toasts, pickers) must also be safe-area-aware.** `#error-toast top: 64px` and `#category-picker top: 100px` were calibrated against the old fixed-header layout; on iPhone 16 Pro they hide under the Dynamic Island or overlap the period bar. Use `top: calc(env(safe-area-inset-top, 0px) + <offset>)` for anything anchored near the viewport top.
+
+18. **Dashboard category / saving-goal duplication (v0.15.2).** "Savings" main category subs (Europe, NDEB, etc.) pulled double duty as both Budget category rows and Goal cards. Dashboard now filters `categoriesByPeriod` by `!goal.linkedCategory.has(sub)` so the same item never shows twice. The filter is data-driven — don't hardcode `main === 'Savings'` (future goals may live under different mains).
+
+19. **Apps Script web-app POST must use `text/plain` (or GET) to avoid CORS preflight.** iOS Safari sends an `OPTIONS` preflight for any POST with `Content-Type: application/json`, and Apps Script responds with a 302 redirect that breaks preflight. The symptom is a silent fetch failure with no error reaching the client. `lib/metrics.js` uses `navigator.sendBeacon` with a `text/plain` Blob for exactly this reason; `doPost` parses `e.postData.contents` as JSON regardless of the declared content type.
+
+20. **Instrumentation self-exclusion: the logger must never log about itself.** `lib/metrics.js` flushes to `logClientMetrics`, which is an Apps Script call like any other. `api.js` specifically skips instrumenting this endpoint (`metricKey !== 'logClientMetrics'` guard) — otherwise the act of reporting generates a report about reporting, and the buffer fills with recursive meta-noise. If you add a new diagnostic endpoint, apply the same guard.
+
+21. **`_elapsedMs` is server-self-reported exec time, not total round-trip.** The `doGet`/`doPost` wrappers echo `_elapsedMs = Date.now() - start` on every response so the client can compute `networkMs = clientTotalMs - serverMs`. Do NOT treat it as a true network metric — it excludes Apps Script's cold-container spin-up (the infamous 2–3 s first-call tax) because that happens before the handler starts timing. In the `ClientMetrics` tab, a high `NetworkMs` with normal `ServerMs` signals cold-container or TLS/DNS cost, not slow script execution.
 
 16. **GitHub Pages needs `.nojekyll` at the repo root.** Without it, Pages runs Jekyll by default. We observed a failure mode on Apr 23 2026 where the build step "succeeded" but the deploy step hung at `updating_pages` until timeout (`Error: Timeout reached, aborting!`). Adding `.nojekyll` (empty file) + an empty-commit retrigger cleared it. Don't delete the marker; it belongs on every branch Pages deploys from.
 

@@ -2,9 +2,9 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.12 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA).
+> **Apps Script:** v11.13 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.13 adds `_elapsedMs` echo + `logClientMetrics` endpoint + auto-created `ClientMetrics` tab.
 >
-> **PWA:** v0.14 (cache v19) — at `index.html`, `js/`, `css/`, `sw.js`. All 3 restructure deploys shipped on branch `claude/read-markdown-context-v1c5T` (not yet merged to `main`). GitHub Pages currently deploying from the feature branch for preview. `.nojekyll` at repo root is required — don't delete.
+> **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign + iOS safe-area fix + Savings/Goals dedup + client metrics pipeline. On branch `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). Neither has been merged to `main`. GitHub Pages currently serving from the active refinement branch for preview. `.nojekyll` at repo root is required — don't delete.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -1282,3 +1282,85 @@ Rules captured in `CLAUDE.md` (trip-up #16) and `docs/findings.md` ("GitHub Page
 - `http.server` asset check — every new file serves 200.
 - GitHub Pages deployment succeeded after `.nojekyll` + retrigger; user confirmed "everything works."
 - Branch `claude/read-markdown-context-v1c5T` at commit `211d764`, 9 commits ahead of `main`.
+
+---
+
+## Session: 2026-04-24 — PWA v0.15 redesign, safe-area fix, dedup, metrics pipeline
+
+Forked a new refinement branch `pwa/v0.15-refinement` off `claude/read-markdown-context-v1c5T` to iterate on the visual design without destabilizing the v0.14 parent. Four shipped increments.
+
+### Redesign: Minimal Monochrome (commit `e2b769a`, v0.15.0)
+
+User pointed at a design handoff bundle from Claude Design: `/v1/design/h/Gq2GUSFxrOJQWkT4ISX2yg`. Fetched via WebFetch — came back as a 32KB gzipped tarball. Extracted to `/tmp/design-fetch/budget-pwa/`. README insisted on reading the chat transcript first; the transcript showed the user had iterated through three variations (A Minimal Monochrome, B Paper Ledger, C High-Contrast Editorial) and explicitly deleted B and C. Final = Variation A.
+
+Translated from the React-in-HTML prototype (`variations/variationA.jsx`) to our vanilla JS/CSS. Pulled out CSS custom properties for the palette (`--ink`, `--bg`, `--bg-period`, etc.) and rebuilt three views:
+
+- **Categorize:** calendar period bar at top (`‹ · Apr 17 — 30 ▾ · ›`), Parse/Sync pill in right slot, Manual/Auto segmented control, list rows with merchant + uppercase date + amount.
+- **Dashboard:** 4-col summary strip, collapsible `+`/`−` main-category groups, sub-rows with color-coded `left/over` + muted `spent/budgeted` + 1px progress bar, Saving Goals section with tap-to-expand.
+- **Setup:** underline-style API-key input + solid-black Save button + flat version list.
+
+Added Settings as a third tab in the bottom bar (previously a header button); kept `<header>` in DOM but hid it via CSS. Bumped to v0.15 / cache v20.
+
+### Safe-area fix (commit `1d1829b`, v0.15.1)
+
+User reported a white strip above the period bar on iPhone 16 Pro. Traced: the design prototype used a fixed 390×844 iPhone 14 frame with a 54px notch block, and I'd literally translated that as `<header>{ height: 54px; background: var(--bg); }`. On iPhone 16 Pro the actual `safe-area-inset-top` is ~62px AND the color was wrong (near-white `#FAFAF9` vs. the period bar's tan `#EFEDE8`).
+
+Three coordinated fixes:
+
+1. `viewport-fit=cover` in the viewport meta → unlocks `env(safe-area-inset-*)` on iOS.
+2. Deleted the fixed-height `<header>` spacer.
+3. `.period-bar { padding-top: calc(env(safe-area-inset-top, 0px) + 10px); }` — the tan background fills whatever inset the OS reports.
+
+Also made `#category-picker top: 100px` and `#error-toast top: 64px` safe-area-aware via the same `calc()` pattern. Bumped to v0.15.1 / cache v21.
+
+### Savings/Goals dedup (commit `49073a2`, v0.15.2)
+
+User noticed the Savings main group showed Europe + NDEB subs that ALSO render below as Saving Goal cards — same data in two places. In `views/dashboard.js renderBody()`:
+
+```js
+const linkedSubs = new Set(goals.map(g => g.linkedCategory).filter(Boolean));
+const cats = allCats.filter(c => !linkedSubs.has(c.sub));
+```
+
+Chose data-driven filter (match on `goal.linkedCategory`) over hardcoding `main === 'Savings'` so future goals under different mains still dedup correctly. Goal cards already carry strictly more info (target, periods remaining, needed-per-period), so nothing is lost by suppressing the category row. Bumped to v0.15.2 / cache v22.
+
+### Pause for diagnostics: client metrics pipeline (commit `6110a74`, v0.15.3 + Apps Script v11.13)
+
+User asked to go back to the cold-start performance issue and pasted an activity log snippet. Analysis: the Logs tab shows `parseAndFetch ~1.8s` and `dumpSheet Transactions ~2.5s` cold, but doesn't capture TLS/DNS/redirect cost, cold-container queue wait, or duplicate-call patterns. Gap between the logged 3-6s server execution and the user-reported ~20s wall clock lives in network + cold-container + serialization time.
+
+Before shipping any fixes, user explicitly requested rich client-side metrics — "make the logs sheet a rich source of data not only for error monitoring but also for optimization." Built a pipeline that writes to a new `ClientMetrics` tab (intentionally separate from `Logs`).
+
+**Client side** (`js/lib/metrics.js`, new):
+
+- Session id + mount counter (so each metric is scoped to one cold-open of the PWA, with view-mount-level granularity).
+- `recordStart(action)` / `recordComplete(ticket, {ok, serverMs, bytes, cached, errorMsg})` wrapping every call in `api.js`. `inFlightAtStart` captures concurrency; `msSincePrev` captures cold/warm state; per-action `lastStartByAction` flags duplicates within 2s.
+- `recordEvent(kind, data)` for non-API events: `mount:<route>` (with import-time vs mount-time note), `cache-hit:dashboard`, `cache-miss:dashboard`, `cache-hit:suggest` (with source), `cache-miss:suggest`.
+- 50-entry buffer flushed on `visibilitychange: hidden` + `pagehide` via `navigator.sendBeacon` (fire-and-forget). Text/plain Blob to skip CORS preflight. Keepalive-fetch fallback.
+- **Self-exclusion**: the `logClientMetrics` action is skipped in the instrumentation wrapper (otherwise flushing generates logs about flushing, recursively).
+- Exposes `window.__apiStats`, `window.__apiStats_session`, `window.__apiStatsFlush()` for Safari remote DevTools.
+
+**Apps Script side** (v11.13, bumped `APP_SCRIPT_VERSION` in Code.js + `VERSION.txt`):
+
+- `doGet` / `doPost` inject `_elapsedMs` into every response body (success and error paths). Client reads it to compute `networkMs = clientTotalMs - serverMs`.
+- `handleLogClientMetrics_` accepts batched records, appends to `ClientMetrics` tab in one `setValues` call. Tab auto-creates on first write with 18 columns: `ReceivedAt, SessionId, MountN, AppVersion, Connection, Action, ClientStartMs, ClientTotalMs, ServerMs, NetworkMs, InFlightAtStart, MsSincePrev, Duplicate, Cached, Ok, ErrorMsg, Bytes, Note`.
+- 500-row batch cap (defense-in-depth; client buffer is 50).
+
+Apps Script deploy must run on the user's machine (`clasp` unavailable in this sandbox). The PWA ships independently — until v11.13 is live, flushes silently fail with "Unknown action" but metrics still accumulate in memory and are inspectable via `window.__apiStats`.
+
+Bumped to v0.15.3 / cache v23.
+
+### Lessons captured
+
+- **Pixel-hardcoded "device chrome" assumptions from design prototypes are bugs waiting for the next device generation.** When translating a design, map every fixed device-frame offset to `env(safe-area-inset-*)` with `viewport-fit=cover` opt-in.
+- **CORS preflight + Apps Script = silent fetch failures.** iOS Safari sends OPTIONS for any POST with `Content-Type: application/json`; Apps Script responds with 302 redirects that break preflight. Using `text/plain` Blobs with `sendBeacon` keeps the request in the CORS "simple" lane.
+- **Any logger that depends on the transport it's measuring must self-exclude**, or it logs about logging until the buffer fills with recursive noise. One line in the wrapper prevents the whole bug class.
+- **Diagnose before fixing**, especially for cold-start class bugs where four plausible optimizations exist and only one probably actually helps. The metrics tab pays for itself the first time it shows a fix was wasted effort.
+- **Keep ops logs and perf logs in separate tabs.** `Logs` is for error monitoring (one row per API call). `ClientMetrics` can grow hundreds of rows per session without polluting the ops view.
+
+### Status — PWA verified; Apps Script pending user deploy
+
+- All 14 JS modules (now 15 with metrics.js) pass `node --check`.
+- `parseCurrency` 11/11 + `normalizeMerchant` 17/17 still passing.
+- Safari remote DevTools connection confirmed `window.__apiStats` exposes live buffer.
+- Branch `pwa/v0.15-refinement` at commit `6110a74`, 4 commits ahead of parent `claude/read-markdown-context-v1c5T`.
+- **Action required:** `cd apps-script && ./deploy.sh "v11.13 — ..."` on the user's machine to activate the `logClientMetrics` endpoint server-side.
