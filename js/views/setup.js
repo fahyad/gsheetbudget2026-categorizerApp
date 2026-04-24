@@ -60,6 +60,12 @@ export default {
   unmount() {},
 };
 
+// v0.15.4: cache the version response per module lifetime. The ClientMetrics
+// log showed `version` calls paying ~2.5 s of network overhead on every
+// Setup re-mount despite server exec being <50 ms — identical response,
+// so one fetch is enough. Module-level cache clears only on page reload.
+let versionCache = null;
+
 async function populateVersionInfo(root) {
   const pwaEl = root.querySelector('#pwa-version-display');
   const asEl = root.querySelector('#as-version-display');
@@ -67,7 +73,6 @@ async function populateVersionInfo(root) {
   const statusEl = root.querySelector('#update-status-display');
 
   pwaEl.textContent = `${APP_VERSION} (last edited ${APP_LAST_EDITED})`;
-  asEl.textContent = 'checking…';
   statusRow.hidden = true;
 
   if (!config.isConfigured()) {
@@ -75,25 +80,34 @@ async function populateVersionInfo(root) {
     return;
   }
 
+  // Paint cached value immediately if we have it; else show checking spinner.
+  if (versionCache) {
+    renderVersion_(asEl, statusRow, statusEl, versionCache);
+    return;
+  }
+  asEl.textContent = 'checking…';
+
   try {
     const data = await api.fetchVersion();
-    const v = data.appsScript;
-
-    asEl.textContent = `${v.version} (last edited ${v.lastEdited})`;
-    statusRow.hidden = false;
-    statusEl.classList.remove('update-needed', 'up-to-date');
-
-    if (v.error) {
-      statusEl.textContent = '⚠ could not verify (' + v.error + ')';
-    } else if (v.updateNeeded) {
-      statusEl.textContent = `YES — latest is ${v.latestVersion}`;
-      statusEl.classList.add('update-needed');
-    } else {
-      statusEl.textContent = `No (latest: ${v.latestVersion})`;
-      statusEl.classList.add('up-to-date');
-    }
+    versionCache = data.appsScript;
+    renderVersion_(asEl, statusRow, statusEl, versionCache);
   } catch (err) {
     asEl.textContent = '⚠ could not connect (check API key)';
     statusRow.hidden = true;
+  }
+}
+
+function renderVersion_(asEl, statusRow, statusEl, v) {
+  asEl.textContent = `${v.version} (last edited ${v.lastEdited})`;
+  statusRow.hidden = false;
+  statusEl.classList.remove('update-needed', 'up-to-date');
+  if (v.error) {
+    statusEl.textContent = '⚠ could not verify (' + v.error + ')';
+  } else if (v.updateNeeded) {
+    statusEl.textContent = `YES — latest is ${v.latestVersion}`;
+    statusEl.classList.add('update-needed');
+  } else {
+    statusEl.textContent = `No (latest: ${v.latestVersion})`;
+    statusEl.classList.add('up-to-date');
   }
 }

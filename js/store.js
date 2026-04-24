@@ -1,5 +1,6 @@
 const CATEGORIES_KEY = 'budget_categories';
 const SYNC_QUEUE_KEY = 'budget_sync_queue';
+const TRANSACTIONS_KEY = 'budget_transactions';
 
 // A9: wrap localStorage.setItem so QuotaExceededError doesn't crash the app
 // and we can attempt a recovery for the sync queue (which is the only state
@@ -44,6 +45,14 @@ export const store = {
     } catch (e) {
       this.syncQueue = [];
     }
+    // v0.15.4: cache uncategorized txns so cold-open can render from disk
+    // before parseAndFetch returns. Paint instant, refresh in background.
+    try {
+      const t = localStorage.getItem(TRANSACTIONS_KEY);
+      if (t) this.transactions = JSON.parse(t);
+    } catch (e) {
+      this.transactions = [];
+    }
     // Clear stale keys from older versions
     localStorage.removeItem('budget_known_timestamps');
   },
@@ -78,24 +87,47 @@ export const store = {
     this.saveCache();
   },
 
+  // Transactions cache is non-critical (source of truth is server's
+  // uncategorized view), so silent best-effort — quota failures just mean
+  // the next cold open paints later, not lost data.
+  saveTransactions() {
+    safeSetItem_(TRANSACTIONS_KEY, JSON.stringify(this.transactions));
+  },
+
+  // v0.15.4: replace-and-save. Used by refresh() to install the server's
+  // authoritative list, avoiding stale cached txns that have since been
+  // categorized elsewhere (e.g. in the sheet directly).
+  setTransactions(list) {
+    this.transactions = list.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    this.saveTransactions();
+  },
+
   addTransactions(newTxns) {
+    let changed = false;
     for (const txn of newTxns) {
       if (!this.transactions.some(t => t.timestamp === txn.timestamp)) {
         this.transactions.push(txn);
+        changed = true;
       }
     }
-    this.transactions.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    if (changed) {
+      this.transactions.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      this.saveTransactions();
+    }
   },
 
   removeTransaction(timestamp) {
     const idx = this.transactions.findIndex(t => t.timestamp === timestamp);
     if (idx === -1) return null;
-    return this.transactions.splice(idx, 1)[0];
+    const removed = this.transactions.splice(idx, 1)[0];
+    this.saveTransactions();
+    return removed;
   },
 
   restoreTransaction(txn) {
     this.transactions.push(txn);
     this.transactions.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    this.saveTransactions();
   },
 
   // ── Sync Queue ──
