@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists (v11.12 Apps Script + v0.11 PWA, single-ledger architecture + Saving tab with adaptive per-period formula). Bug-fix sub-sections (e.g. "POST Redirect Bug", "knownTimestamps Stale Cache Bug") are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging.
+> Reference document. Sections describe the system as it currently exists: **v11.13 Apps Script** (echoes `_elapsedMs` + `logClientMetrics` endpoint, ClientMetrics tab) + **v0.15.4 PWA** (Minimal Monochrome redesign + cold-start optimizations) on branch `pwa/v0.15-refinement`; `main` still at v0.11 + v11.12. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1029,3 +1029,297 @@ Stored in `apps-script/.clasp.json`. Public (embedded in deployment URLs anyway)
 
 ### MCP integration (optional)
 `~/Library/Application Support/Claude/claude_desktop_config.json` has a `mcpServers.clasp` entry that lets Claude call clasp directly as tools after restarting Claude Desktop. The CLI works fine either way.
+
+---
+
+## PWA Restructure (v0.12 → v0.14)
+
+Shipped on branch `claude/read-markdown-context-v1c5T` in three deploys. `main` still serves v0.11 until this is merged. Full plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.
+
+### Shell + hash router (v0.12)
+
+Chose hash routing (`#/categorize`, `#/dashboard`, `#/setup`) over History API because: no server-side rewrite rules, `<a href="#/..">` links give native accessibility and free back/forward, and GitHub Pages doesn't support per-route 404-to-index rewrites cleanly.
+
+`js/router.js` is ~80 LOC: one `hashchange` listener, lazy `import('./views/...')` on first activation, wipes `#view-root`'s innerHTML before the next mount. View contract: every module default-exports `{ mount(root), unmount() }`. `unmount` is usually empty because in-view DOM is garbage-collected when innerHTML is cleared — only shell-level listeners need explicit cleanup.
+
+`js/app.js` is ~40 LOC: version label, `#settings-btn` → `navigate('#/setup')`, `beforeunload` warning when `syncQueue.length > 0`, `store.loadCache()` once before `router.start()`.
+
+**Lazy loading gain:** users who only categorize never download `dashboard.js`, `budget.js`, `suggest.js`, `swipe.js`. Verified via DevTools Network tab — `/js/views/dashboard.js` only appears when the Dashboard tab is tapped the first time. Subsequent loads come from the service worker's stale-while-revalidate rule for `/js/views/` and `/js/lib/`.
+
+### v0.12.2 — moving chrome into the view that owns it
+
+v0.12.1 shipped with Refresh + Sync in the shell header and a `setHeaderActions({refresh, sync, settings})` helper that each view called on mount. Fine mechanism, wrong location:
+
+- Refresh and Sync are **categorize-flow tools** — they're meaningless on Dashboard or Setup.
+- The helper required bookkeeping at every view, plus a "Done" relabel on Setup's Settings button because the whole header/tab-bar was hidden on `#/setup`.
+
+v0.12.2 deleted `setHeaderActions` entirely. Header is now just title + version + Settings. Refresh is an inline `⟳` icon in `#period-filter-bar` (next to the period dropdown). Sync is a sticky bar (`#sync-bar`) above the tab-bar, hidden when `store.syncQueue.length === 0`. When the undo-bar is also visible, `.above-undo` on the sync-bar bumps it up 48px to stack.
+
+The Categorize tab-bar label gained a pending-count badge: `Categorize (N)` when a queue exists, maintained by `router.updateCategorizeBadge()` — called on every route change and from `categorize.js` after any mutation (categorize, undo, sync complete). No pub/sub needed; explicit calls at the mutation sites.
+
+Explicit non-goals (documented in the v0.12.2 plan): no pull-to-refresh gesture (~60 LOC of touch handling the icon covers functionally), no FAB, no pub/sub.
+
+### v0.13 — dashboard data layer
+
+The key design decision was **not** to add a new Apps Script endpoint. The spreadsheet has already computed every value we need: Budget rows 8+ contain pre-computed Spent + Available per period/category via SUMIFS, and Saving rows 6+ contain pre-computed per-goal rollups. `lib/budget.js` makes two parallel `dumpSheet` calls (Budget `A1:F215` = 1,290 cells; Saving `A1:I105` = 945 cells — both under the 10K cap), parses display-strings like `"$1,234.56"` into numbers on ingest, and caches the normalized shape for 10 minutes in localStorage.
+
+Period switching is **zero-network**. One fetch pulls all 26 periods × 8 categories; the dropdown `onchange` filters the cached JS array. This was the biggest design win — naively fetching per-period would have been 26× worse.
+
+Currency round-trip goes through two helpers. `parseCurrency` is tolerant of `$`, commas, whitespace, paren-negatives, blanks, null — 11 edge cases unit-tested via `node --input-type=module` before commit. `formatCurrency` uses `new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })` — all display runs through it so future locale changes happen in one place.
+
+Cache invalidation is one explicit call from `views/categorize.js sync()`: after `batchCategorize` success, call `invalidateDashboardCache()` alongside `invalidateSuggestIndex()`. Two callers total, so no pub/sub yet.
+
+**Known scope limit (documented in the plan's non-goals):** the per-period Net Income / Fixed Expenses / Ready-to-Assign numbers live in `Budget!A4:F4`, pre-computed against whatever `$B$1` (the sheet's period dropdown) is set to. Replicating them client-side for arbitrary periods would require three more `dumpSheet` calls (Transactions for Paycheck SUMIFS, FixedMonthlyExpenses for the LET monthly-day-check, Setup for PayPeriod dates). For v0.13 we read the summary row as-is; if `Budget!B1` ≠ the PWA's selected period, the hero card shows a small "sheet period: X" hint. Full replication is a v0.14+ stretch.
+
+### v0.14 — auto-suggest engine + per-row swipe
+
+Local-only by design. No LLM, no new endpoint. One `dumpSheet('Transactions', 'A2:H1000')` call builds `{normalizedMerchant: {category: count}}` — cached 1 hour, invalidated after `batchCategorize` just like the dashboard cache.
+
+**Merchant normalizer** (`lib/suggest.js`): 6 regex rules applied in order. Goal is **deterministic variant collapse** — if `AMAZON.COM*MT12345 SEATTLE WA` and `AMAZON.COM*XY98765 SEATTLE WA` produce different keys, the index bucketizes them separately and confidence never rises above threshold. Initial draft of the rules failed that test; tightened to:
+
+1. lowercase + trim
+2. `^(sq|tst|sp|paypal)\s*\*\s*` — payment-processor prefixes
+3. `\s*\*[a-z0-9]+` global — strip card/txn ID suffixes **anywhere**, not just at end
+4. `\s*#\w+` — strip store IDs (`#4321`, `#10211`)
+5. `\S*\d+\S*` — strip any token with a digit (catches `T-0384`, `123abc`, `12345`)
+6. `\s+[a-z]{2}$` — strip trailing 2-letter state code
+7. collapse whitespace
+
+17 unit-test cases run before commit (`Starbucks #4321` → `starbucks`, `AMAZON.COM*MT12345 SEATTLE WA` and `AMAZON.COM*XY98765 SEATTLE WA` → same key, `TARGET T-0384` and `TARGET 00026452` → `target`, etc.). If you edit the rules, re-run the suite — the `node --input-type=module` block in the session log makes it easy.
+
+**Confidence threshold:** `topCount / totalSeen >= 0.70` else no suggestion. PayPal-style ambiguous merchants don't get suggested; users handle them in Manual. Cold start with < 20 historical categorizations suggests almost nothing — by design, coverage grows as the user categorizes.
+
+**Swipe gesture** (`lib/swipe.js`, ~95 LOC): `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold = 0.40 })`. The `translateEl`/`revealEl` split is critical — pseudo-elements transform with their parent, so if the row itself translates, the action-background `::before`/`::after` go off-screen with it. The Auto tab uses a two-element DOM: outer `.auto-row` stays static and holds the Accept/Skip backgrounds; inner `.auto-row-inner` has the visible content and translates. `attachSwipe(inner, { revealEl: outer, ... })` wires both.
+
+Vertical-scroll preservation: on the first meaningful move (`|dx|` or `|dy|` > 4 px), if `|dy| > |dx| * 1.5` the swipe aborts and the browser takes scroll control. Short static taps (dx < 5 px and t < 300 ms) fall through to the normal click handler — that's how tap-to-open-picker still works on the same row. Commit (>= 40% of row width) animates the row off-screen over 180 ms, then fires the callback.
+
+**`rejectedThisSession`** is a module-level Set in `categorize.js`, intentionally in-memory only. Next session — after more categorizations have expanded the index — a suggestion that was below threshold today might hit threshold, and the user deserves another look.
+
+### GitHub Pages `.nojekyll` failure mode (Apr 23 2026)
+
+First deploy of the feature branch to Pages timed out at `updating_pages` with `Error: Timeout reached, aborting!`. The build step "succeeded" — an artifact was created — but the deploy-to-live step hung and eventually cancelled. Misleading symptom: the failure log looks unrelated to content.
+
+Root cause: GitHub Pages runs Jekyll by default when no `.nojekyll` marker exists. The build produced some artifact that the deploy step couldn't apply (likely a path or content that Jekyll munged). The static PWA shouldn't be Jekyll-processed at all.
+
+Fix: empty `.nojekyll` at repo root + empty-commit retrigger. After landing the marker and pushing a no-op commit, the next deploy succeeded.
+
+Rules:
+
+- **Keep `.nojekyll` on every branch Pages deploys from.** When merging the feature branch into `main`, the marker goes with the merge.
+- **Pages build "success" doesn't imply deploy success.** If the live site doesn't update, check Actions → pages build and deployment → the DEPLOY step specifically.
+- **Empty-commit retrigger is a valid diagnostic.** `git commit --allow-empty -m "Retrigger Pages deploy" && git push` is safe and often clears transient GitHub infrastructure hiccups.
+
+---
+
+## Minimal Monochrome Redesign (v0.15 → v0.15.2)
+
+The v0.14 PWA had full functionality but an indigo-themed aesthetic the user wanted simplified. Design work was outsourced to Claude Design (claude.ai/design); the handoff came back as a gzipped tar at `/v1/design/h/<id>` containing HTML/JS prototypes + README + chat transcripts. The README is emphatic: **read the chat transcripts first** — the prototype is the output of the iteration, but the chat is where the intent lives.
+
+Three variations were initially offered (A Minimal Monochrome, B Paper Ledger, C High-Contrast Editorial). After iterating on Variation A, the user explicitly deleted B and C. Final direction locked in:
+
+**Tokens** (defined as CSS custom properties in `:root`):
+- `--ink: #0A0A0A`, `--bg: #FAFAF9`, `--bg-period: #EFEDE8`, `--bg-selected: #F5F5F4`, `--bg-active-tab: #F0EFEC`
+- `--muted: #737373`, `--muted-2: #A3A3A3`, `--rule: #E5E5E3`, `--rule-2: #EDEDEB`
+- Status colors: `--amber: #B45309` (zero), `--red: #B91C1C` (over), `--green: #15803D` (goal reached)
+
+**Typography:** Inter 400/500/600/700 for UI (loaded from Google Fonts with preconnect). JetBrains Mono 500/600 reserved for the `+`/`−` toggle glyph only — one monospace touch as a counterweight to the otherwise Inter-only setup. Tabular-nums on all numeric columns.
+
+**Period bar** (common to Categorize + Dashboard): `‹ ` + label + `▾` + ` ›` in a row at the very top, `#EFEDE8` tan background with thick black bottom border. Clicking the label toggles a 7-column 14-day calendar grid that shows txn dots under each day and inverts the "today" cell black. Right slot differs per view:
+- Categorize → `Sync N` (black primary pill) when queue > 0, else `↻ Parse` (white outline pill).
+- Dashboard → `Day X of Y` eyebrow text.
+
+**Tab bar** (3 tabs): `Categorize / Dashboard / Settings`. Active state gets a thick black accent bar across the top + warm-gray `#F0EFEC` background tint + uppercase bold label. Previous `Sync-button-in-header` idea (v0.11) and `Settings-button-in-header` (v0.14) both retired.
+
+**Dashboard body:** 4-col grid (Income / Fixed / Budgeted / Ready). Categories grouped by main name; `+`/`−` toggle at left, uppercase group label with letter-spacing, gray band background. Sub-rows inset at 42px from left; amounts right-aligned with `left/over` primary (color-coded) and `spent/budgeted` secondary (muted). 1px progress bar matches the status color.
+
+### v0.15.1 — iOS safe-area fix
+
+The design prototype assumed a fixed 390×844 iPhone 14 device frame, and its 54px "notch area" block got translated literally as `<header>{ height: 54px; background: var(--bg); }`. On iPhone 16 Pro (Dynamic Island, actual safe-area-inset-top ≈ 62px) this produced a visible white strip above the tan period bar.
+
+Fix required three coordinated changes:
+
+1. **`viewport-fit=cover` in the viewport meta.** Without this, `env(safe-area-inset-*)` returns `0` on iOS regardless of notch state — the entire CSS mechanism is gated by this opt-in.
+2. **Delete the fixed header spacer.** Replaced with `env()`-aware padding on the top-most visible element in each view.
+3. **Extend the period bar's tan background into the notch.** `.period-bar { padding-top: calc(env(safe-area-inset-top, 0px) + 10px); }` — the `10px` is the design's intended internal padding; the `env()` portion fills whatever inset the OS reports (`0` on SE, `47` on regular iPhones, `59` on older Pro, `62` on 16 Pro).
+
+Also required: update every other top-anchored fixed element to be safe-area-aware. `#category-picker top: 100px` and `#error-toast top: 64px` were both calibrated against the old fixed-header layout and need `calc(env(safe-area-inset-top, 0px) + <offset>)` to avoid hiding under the Dynamic Island.
+
+Principle: **when translating from a design prototype, identify every pixel-hardcoded "device chrome" assumption and translate it to an environment variable.** Anything else is a bug waiting for the next device generation.
+
+### v0.15.2 — data-driven dedup
+
+"Savings" main-category subs (Europe, NDEB) were rendering in two places: the dashboard's Budget category section (as `Savings > Europe: $0 left, $250 / $250, 1px bar`) AND the Saving Goals section below (as `Europe Trip: $3250 / $5000, 18 periods remaining, $97/period`). Same underlying sheet data via different lenses — the Saving tab's `Currently Saved` column IS `SUMIFS(Budget_Available, Budget_Category, linkedCategory, Budget_Period, $B$3)`.
+
+Fix in `views/dashboard.js`:
+
+```js
+const linkedSubs = new Set(goals.map(g => g.linkedCategory).filter(Boolean));
+const cats = allCats.filter(c => !linkedSubs.has(c.sub));
+```
+
+Intentionally data-driven, not `main === 'Savings'`. If the user later creates a goal under a different main (e.g., `Nice Things > Small trip`), it still gets suppressed from the Budget section. The Goal card carries strictly more info (target, periods remaining, needed-per-period), so nothing is lost.
+
+---
+
+## Client Metrics Pipeline (v0.15.3 + Apps Script v11.13)
+
+### Motivation
+
+Pre-v0.15.3 the only observability was the `Logs` tab (timestamp + action + duration + status + details + error). Each row captures Apps Script execution time, but **not**:
+
+- client-perceived latency (fetch start → parse end)
+- TLS / DNS / 302-redirect overhead to `script.google.com` → `script.googleusercontent.com`
+- cold-container queue wait when multiple requests arrive concurrently
+- duplicate calls (same action fired twice in the same session)
+- cache-hit rates (did `lib/budget.js`'s 10-min cache actually save a round-trip?)
+- view mount latency
+
+After logs showed `parseAndFetch: 1789ms` but the user reported `~20s` perceived load, it became clear the gap lives in client + network + cold-container time — all invisible to server-side logging. Before picking a fix, the pipeline was built to capture exactly those signals.
+
+### Architecture
+
+**Client side** (`js/lib/metrics.js`, ~200 LOC):
+
+- **Session id** generated once per module load (random base-36, 10 chars). Every metric carries it so rows can be grouped by cold PWA open.
+- **Mount counter** incremented by `router.js noteMount()` on every successful view mount. Lets us distinguish "first mount of the session" (pays cold-container tax) from subsequent warm mounts.
+- **In-flight Set** tracks active tickets; `recordStart(action)` returns a ticket, `recordComplete(ticket, {...})` finalizes. `inFlightAtStart` captures how many concurrent calls were in flight when THIS one started — direct evidence of the "3 parallel calls serialize on a cold container" pattern.
+- **Previous-complete timestamp** lets us compute `msSincePrev` per call. A large gap (>30s) correlates with cold-container state; <1s correlates with the refresh flurry.
+- **Duplicate detector**: per-action `lastStartByAction` map; if same action's `clientStartMs` is within 2s of its previous start, `duplicateDetected: true`. No analysis pass required — the column self-annotates.
+- **Cache-hit events** emitted by `lib/budget.js` and `lib/suggest.js` via `recordEvent(kind, { cached: true/false, note: '...' })`. Lets us compute cache-hit rate ∈ sheet formulas.
+- **Mount-timing events** emitted by `router.js`: `mount:categorize`, `mount:dashboard`, `mount:setup` with `clientTotalMs` = mount round-trip and `note` = "import=XXms,mount=YYms" so we can split lazy-load import time from render time.
+- **Buffer**: 50-entry ring (drop oldest on overflow).
+- **Flush**: `navigator.sendBeacon` on `visibilitychange: hidden` + `pagehide`. Fallback to `fetch({keepalive: true})`. Manual flush via `window.__apiStatsFlush()`. 30s safety interval flush if buffer >80% full mid-session.
+- **Self-exclusion**: the `logClientMetrics` action is not instrumented (`metricKey !== 'logClientMetrics'` guard in `api.js request()`). Without this, each flush generates a new metric about the flush, which generates a new metric, indefinitely.
+
+**Server side** (`apps-script/Code.js`, v11.13):
+
+- `doGet` and `doPost` now inject `_elapsedMs = Date.now() - start` into the parsed response body before returning. Applies to both success and error paths. The client reads it into `serverMs` and computes `networkMs = clientTotalMs - serverMs` — the residual where TLS + DNS + redirect + cold-container wait live.
+- `handleLogClientMetrics_` accepts `{ session, records: [...] }` and appends to a dedicated `ClientMetrics` tab. Tab auto-creates on first write with 18 columns (see below). One `setValues(rows)` call per batch — cheap at the scale of 50-record batches.
+- Safety: hard 500-record cap per batch (client buffer is 50, but defense-in-depth against bugs).
+
+### Tab schema
+
+`ClientMetrics`:
+
+```
+ReceivedAt | SessionId | MountN | AppVersion | Connection | Action
+ClientStartMs | ClientTotalMs | ServerMs | NetworkMs
+InFlightAtStart | MsSincePrev | Duplicate | Cached
+Ok | ErrorMsg | Bytes | Note
+```
+
+- **Timestamps**: `ReceivedAt` is server-side wall clock (for ordering); `ClientStartMs` is `performance.now()` relative (for delta math within a session).
+- **`Action`**: the API action name, with `dumpSheet:<tab>` suffix for dumpSheet calls (splits the 8K-cell Transactions read from smaller ones). Also synthetic kinds: `mount:categorize`, `cache-hit:dashboard`, `cache-miss:suggest`, etc.
+- **`Duplicate` / `Cached` / `Ok`**: `Y` / `N` / blank for compact filtering.
+
+### CORS preflight avoidance
+
+`sendBeacon` + Apps Script has a quiet trap. Apps Script web apps respond to `OPTIONS` preflight requests with a 302 redirect (there's no way to return a direct response), which breaks the CORS preflight handshake. The symptom is a silent fetch failure with no client-visible error — the beacon is dropped, no logs land.
+
+Any POST whose `Content-Type` is `application/json` triggers preflight because it's a "non-simple" content type. Workarounds:
+
+- Use `text/plain` Blob for `sendBeacon`. `Content-Type: text/plain` is a "simple" CORS content type that skips preflight. Server-side, Apps Script can still `JSON.parse(e.postData.contents)` regardless of the declared type.
+- Put `action` and `apiKey` in the JSON body (not URL query string), so existing `doPost` routing works unchanged.
+
+Applied in `lib/metrics.js flush()`:
+
+```js
+const blob = new Blob([body], { type: 'text/plain;charset=UTF-8' });
+navigator.sendBeacon(url, blob);
+```
+
+### Querying
+
+Typical analysis queries (to be added as a sibling `ClientMetrics-Analysis` tab or run in a notebook):
+
+- Cold start penalty: `AVERAGEIF(MsSincePrev, ">60000", NetworkMs)` vs `AVERAGEIF(MsSincePrev, "<5000", NetworkMs)` — the gap is the cold container + TLS/DNS cost.
+- Concurrency cost: `AVERAGEIF(InFlightAtStart, ">=2", NetworkMs)` vs `AVERAGEIF(InFlightAtStart, "=0", NetworkMs)` — measures serialization on cold containers.
+- Duplicate call frequency: `COUNTIF(Duplicate, "Y") / COUNTA(Action)`.
+- Cache-hit ratio: `COUNTIF(Action, "cache-hit:dashboard") / (COUNTIF(Action, "cache-hit:dashboard") + COUNTIF(Action, "cache-miss:dashboard"))`.
+- Per-view mount latency P90: `PERCENTILE(FILTER(ClientTotalMs, Action = "mount:categorize"), 0.9)`.
+
+### Design principles worth preserving
+
+1. **Diagnose before fixing.** Four candidate fixes (drop duplicate `fetchCategories`, defer `ensureIndexReady`, cache txns in localStorage, client-side logger) were all plausible. Instead of shipping them on guesswork, the logger goes first so each subsequent fix can be validated against before/after numbers in the same tab.
+2. **Diagnostic plumbing must never affect the critical path.** `sendBeacon` is fire-and-forget; instrumentation is O(1); buffer drops oldest on overflow; flush endpoint failures are swallowed. At worst, you miss a batch of metrics — the app doesn't hiccup.
+3. **Self-exclusion is not optional** for any logger that depends on the same transport it's measuring. One line in the instrumentation wrapper prevents the infinite-recursion bug class entirely.
+4. **Keep ops logs and perf logs in separate tabs.** `Logs` stays lightweight for error monitoring (at most one row per API call). `ClientMetrics` can grow to hundreds of rows per session without polluting the ops view.
+
+---
+
+## Cold-Start Optimization (v0.15.4)
+
+### Cold-Start Perf Findings + Fix (v0.15.4)
+
+- **Symptom:** User reported cold PWA opens taking ~20 s before transactions appeared. `Logs` tab showed server exec times of 300–2500 ms per call — nowhere near 20 s in aggregate. Root cause was invisible to server logging.
+
+- **Verification:** v0.15.3's `ClientMetrics` tab captured two real sessions (`5y2p0s2l5f`, `6w29253t3v`) with per-call `ClientTotalMs`, `ServerMs`, `NetworkMs`, `InFlightAtStart`, `MsSincePrev`, `Duplicate`, `Cached` columns populated. Representative cold-open row: `categories ClientTotal=2963ms, Server=301ms, Network=2662ms, Duplicate=Y`. Representative warm-container row: `version ClientTotal=2571ms, Server=46ms, Network=2525ms, MsSincePrev=340ms` — showing ~2.5 s of network overhead **on every call regardless of container warmth**.
+
+- **Root cause:** three independent but co-occurring issues, plus one contradicted assumption:
+  1. **Duplicate `categories`**: `mount()` fires `api.fetchCategories()` in the background for pre-warming the picker; `refresh()` then awaits its own `fetchCategories()` call. Two identical round-trips every mount.
+  2. **Eager suggest-index warmup**: `mount()` always called `ensureIndexReady()` which does `dumpSheet('Transactions', 'A2:H1000')` — an 8000-cell read (~3.1 s cold). Users on the Manual sub-tab never need it that session.
+  3. **Re-mounts pay the full tax**: router's per-view `await mount()` re-fires all awaited calls on every navigation; `store.transactions` was memory-only so re-mounts started with a blank list every time.
+  4. **(Contradicted assumption)** The "Apps Script cold start" was assumed to be the main culprit, expected to affect mainly the first call. Data showed the ~2.5 s network tax applies **per logical fetch** — it's the 302 redirect from `script.google.com` to `script.googleusercontent.com` + TLS handshake, not a one-shot container spin-up. Parallel fetches serialize on the Apps Script single-threaded container, so fire-and-forget parallelism doesn't meaningfully help either.
+
+- **Why it cascaded:** cold Categorize mount sequence was: `fetchCategories` (3 s) + `dumpSheet:Transactions` (3.1 s) + `parseAndFetch` (4.7 s with duplicate categories compounding) + blank paint waiting on all three. Empirically ~7.7 s to first useful paint + background cost of the now-unused suggest index. Re-mounting doubled this cost since nothing was cached.
+
+- **Blast radius:** every cold PWA open AND every re-mount within a session since v0.12 (when the router-per-view architecture landed). Previously masked because v0.11 was one monolithic view that mounted once.
+
+- **Fix (v0.15.4):** four coordinated PWA-only fixes, no Apps Script changes:
+
+  ```js
+  // js/views/categorize.js — share mount's promise, throttle silent re-mounts
+  let categoriesPromise = null;
+  let didInitialRefresh = false;
+  let lastRefreshMs = 0;
+  const REFRESH_THROTTLE_MS = 60 * 1000;
+
+  async function refresh({ force = false } = {}) {
+    if (!force && didInitialRefresh && (Date.now() - lastRefreshMs) < REFRESH_THROTTLE_MS) {
+      return;  // silent re-mount no-op
+    }
+    // ... force branch re-fetches categories fresh; non-force awaits categoriesPromise
+  }
+  ```
+
+  ```js
+  // js/views/categorize.js — defer suggest index to Auto activation
+  if (activeSubtab === 'auto') {
+    ensureIndexReady().then(() => renderTransactions()).catch(err => ...);
+  }
+  // In setSubtab('auto'): same call, idempotent on cache hit.
+  ```
+
+  ```js
+  // js/store.js — persist transactions, replace-semantic setter
+  setTransactions(list) {
+    this.transactions = list.slice().sort(...);
+    this.saveTransactions();
+  }
+  // Called by refresh(): store.setTransactions(fresh.filter(notQueued))
+  ```
+
+- **Verification (post-deploy, 2026-04-24):** v0.15.4-tagged `ClientMetrics` rows from sessions `2e6604343r`, `3h0s4b3g18`, `4j2w0v1w6k`. Five of six perf targets hit:
+
+  | Metric | v0.15.3 baseline | v0.15.4 measured | Status |
+  |---|---|---|---|
+  | Rows with `Duplicate=Y` | many per session | 0 | ✅ |
+  | `dumpSheet:Transactions` on Manual mount | 1 (3136 ms) | 0 calls | ✅ |
+  | `mount:dashboard` re-mount (cache hit) | 3861 ms | 3 / 14 / 16 ms | ✅ |
+  | `mount:categorize` re-mount (throttled) | 6864–9198 ms | 1 ms | ✅ |
+  | `mount:setup` re-mount `version` call | 2525 ms | 0 ms (cached) | ✅ |
+  | `mount:categorize` first cold | 7763 ms | 7348 / 9038 ms | ❌ |
+
+  The miss on first cold `mount:categorize` is bounded by `parseAndFetch` (~3 s server) + `categories` (~500 ms server) + ~2.5 s per-call network tax. With duplicate `categories` removed (saving ~3 s), the remaining critical path is genuinely those two awaited calls. Beating it further would need either a consolidated `dashboardData`-style endpoint OR cold-container optimization on Google's side — neither in scope. **Important nuance:** `mount:categorize ClientTotalMs` measures when `await refresh()` returns, not when pixels paint. The localStorage txns cache (Fix #3) paints in <200 ms regardless, so the user-perceived cold-open is materially faster than the metric suggests.
+
+  Two suspicious observations from the same data, neither a v0.15.4 bug:
+  - Session `2e6604343r` opened with 5× `Invalid API key` rows + 1× `HTTP 404` row producing a 26 s `mount:dashboard`. This was the v0.15.3 → v0.15.4 service-worker activation transition. Transient.
+  - Session `4j2w0v1w6k` MountN=1 had `categories ClientTotalMs=20383 ms` after `msSincePrev=66697 ms`. Almost certainly iOS Safari suspending the tab mid-fetch, then resuming much later. Browser behavior, not a code bug.
+
+- **Lesson:**
+  1. **Server-side duration is a subset of user-perceived latency.** Apps Script's `Logs` captures only handler exec time; Apps Script web apps pay a 302-redirect + TLS tax *per logical fetch* on top. To diagnose perf, you need client-side measurement (`lib/metrics.js` + `ClientMetrics` tab) OR the problem stays invisible.
+  2. **"Fire in parallel at mount, await in refresh" is a trap pattern.** If the same endpoint is reachable through both entry points, one of them must yield to the other — usually by sharing a promise. Added as CLAUDE.md trip-up #25.
+  3. **Every `await mount()` on re-navigation is expensive unless explicitly throttled.** The router's clean re-mount semantics make this non-obvious. Added as CLAUDE.md trip-up #26.
+  4. **Client-side cached state beats server-side cleverness for perceived performance.** `store.transactions` in localStorage turned a 5 s blank screen into a <200 ms paint even on cold open — no server change required.
+  5. **Diagnose before fixing** (from Phase 21 lesson): the four candidate fixes from earlier log analysis were all validated as correct by real `ClientMetrics` data, but the priority ordering changed after seeing network-tax-per-call. If we'd shipped the first three without data, we'd have under-estimated how much the re-mount throttle mattered.
+  6. **Mount latency is a misleading single number for "is the app fast?"** — the metric improvement table above shows `mount:categorize` first-cold barely changed, but the user experience improved dramatically because cached txns paint before mount completes AND every subsequent in-session navigation dropped to ~1–16 ms. Always pair mount timings with cache-hit ratio + perceived-paint reasoning when evaluating perf changes.

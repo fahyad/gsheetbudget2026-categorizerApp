@@ -1,4 +1,5 @@
 import { getApiUrl, getApiKey } from './config.js';
+import { recordStart, recordComplete } from './lib/metrics.js';
 
 function buildUrl(action, params = {}) {
   const url = getApiUrl();
@@ -7,22 +8,52 @@ function buildUrl(action, params = {}) {
   return `${url}?${query.toString()}`;
 }
 
-async function request(url) {
+// `metricKey` is the action-name used in the ClientMetrics log. Usually
+// equal to the endpoint action, but dumpSheet passes a richer key like
+// "dumpSheet:Transactions" so we can distinguish the 8K-cell read from
+// the smaller ones in analysis.
+//
+// `action` in the URL always matches the server's endpoint name.
+async function request(metricKey, url) {
+  // The flush endpoint itself must not generate metrics — otherwise the
+  // act of reporting generates reports-about-reporting.
+  const instrument = metricKey !== 'logClientMetrics';
+  const ticket = instrument ? recordStart(metricKey) : null;
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
 
   try {
     const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
-    // A3: surface HTTP errors before we try to parse the body. Apps Script
-    // returns HTML error pages on 500s; calling res.json() on HTML throws a
-    // cryptic "Unexpected token <" with no clue the server actually 500'd.
     if (!res.ok) {
+      if (ticket) recordComplete(ticket, { ok: false, errorMsg: `HTTP ${res.status}` });
       throw new Error(`HTTP ${res.status} ${res.statusText || ''}`.trim());
     }
-    const data = await res.json();
+
+    // Read as text first so we can capture byte length and recover from
+    // Apps Script's occasional HTML error pages (which crash res.json()).
+    const text = await res.text();
+    const bytes = text.length;
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      if (ticket) recordComplete(ticket, { ok: false, bytes, errorMsg: 'JSON parse' });
+      throw e;
+    }
+
+    // serverMs is server's self-reported exec time (Apps Script v11.13+
+    // echoes `_elapsedMs` in every response). Older servers omit it and
+    // we just log null.
+    const serverMs = (typeof data._elapsedMs === 'number') ? data._elapsedMs : null;
+
     if (!data.success) {
+      if (ticket) recordComplete(ticket, { ok: false, bytes, serverMs, errorMsg: data.error || 'API request failed' });
       throw new Error(data.error || 'API request failed');
     }
+
+    if (ticket) recordComplete(ticket, { ok: true, bytes, serverMs });
     return data;
   } finally {
     clearTimeout(timeout);
@@ -30,24 +61,28 @@ async function request(url) {
 }
 
 export async function fetchCategories() {
-  return request(buildUrl('categories'));
+  return request('categories', buildUrl('categories'));
 }
 
 export async function parseAndFetch() {
-  return request(buildUrl('parseAndFetch'));
+  return request('parseAndFetch', buildUrl('parseAndFetch'));
 }
 
 export async function batchCategorize(items) {
-  // items = [{timestamp, category, ...}, ...]
-  // Serialize as compact JSON in URL param
   const compact = items.map(i => ({ ts: i.timestamp, cat: i.category }));
-  return request(buildUrl('batchCategorize', { items: JSON.stringify(compact) }));
+  return request('batchCategorize', buildUrl('batchCategorize', { items: JSON.stringify(compact) }));
 }
 
 export async function addCategory(mainCategory, subCategory) {
-  return request(buildUrl('addCategory', { mainCategory, subCategory }));
+  return request('addCategory', buildUrl('addCategory', { mainCategory, subCategory }));
 }
 
 export async function fetchVersion() {
-  return request(buildUrl('version'));
+  return request('version', buildUrl('version'));
+}
+
+export async function dumpSheet(tab, range) {
+  const params = { tab };
+  if (range) params.range = range;
+  return request('dumpSheet:' + tab, buildUrl('dumpSheet', params));
 }

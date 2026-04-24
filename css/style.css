@@ -1,516 +1,1046 @@
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+/*
+ * style.css — Budget Categorizer PWA (v0.15 redesign)
+ *
+ * Minimal Monochrome direction per the Claude Design handoff. Near-black on
+ * warm off-white, thin rules, no gradients, period bar is a collapsible
+ * calendar. Left/over amounts are color-coded: black = positive, amber =
+ * zero, red = overspent. Green only for goal-reached.
+ *
+ * Design tokens are in :root below. Change them in one place to retheme.
+ *
+ * TOC
+ *   TOKENS + RESET
+ *   SHELL (header spacer + tab-bar)
+ *   PERIOD BAR (calendar dropdown)
+ *   CATEGORIZE — sub-tab control, manual row, auto row, empty states
+ *   CATEGORIZE — picker + add-category modal
+ *   UNDO BAR + TOAST
+ *   DASHBOARD — summary strip, category groups, goals
+ *   SETUP — form + version list
+ */
+
+:root {
+  --bg:           #FAFAF9;
+  --bg-period:    #EFEDE8;
+  --bg-selected:  #F5F5F4;
+  --bg-active-tab:#F0EFEC;
+  --ink:          #0A0A0A;
+  --muted:        #737373;
+  --muted-2:      #A3A3A3;
+  --rule:         #E5E5E3;
+  --rule-2:       #EDEDEB;
+  --amber:        #B45309;   /* zero balance */
+  --red:          #B91C1C;   /* overspent / error */
+  --green:        #15803D;   /* goal complete */
+  --tab-bar-h:    72px;
+  --tab-bar-total:calc(var(--tab-bar-h) + env(safe-area-inset-bottom, 0px));
 }
 
-[hidden] {
-  display: none !important;
-}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+[hidden] { display: none !important; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f5f5f5;
-  color: #333;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--ink);
   min-height: 100vh;
-  padding-bottom: 60px;
+  padding-bottom: var(--tab-bar-total);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;     /* prevent iOS elastic bounce exposing backdrop */
 }
 
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #1a237e;
-  color: #fff;
+/* ================================ SHELL ============================== */
+
+/* The old fixed-height status-bar spacer is gone. Views that need the
+   notch covered (Categorize, Dashboard) extend the period bar's background
+   into the safe area via padding-top: env(safe-area-inset-top). Setup
+   has no period bar and pads its own section top. */
+header,
+.header-actions,
+header h1,
+#settings-btn {
+  display: none;
 }
 
-header h1 {
-  font-size: 18px;
-  font-weight: 600;
-}
+#view-root { padding-bottom: 8px; }
 
-.version {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.6;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.header-actions button {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-  border: none;
-  padding: 6px 12px;
-  border-radius: 4px;
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.header-actions button:active {
-  background: rgba(255, 255, 255, 0.35);
-}
-
-#sync-btn.has-pending {
-  background: #e65100;
-  font-weight: 600;
-}
-
-#sync-btn:disabled {
-  opacity: 0.4;
-}
-
-/* Config form */
-#config-section {
-  padding: 24px 16px;
-}
-
-#config-section h2 {
-  margin-bottom: 8px;
-}
-
-#config-section p {
-  margin-bottom: 16px;
-  color: #666;
-  font-size: 14px;
-}
-
-#config-form label {
-  display: block;
-  font-size: 14px;
-  font-weight: 500;
-  margin-bottom: 4px;
-  margin-top: 12px;
-}
-
-#config-form input {
-  width: 100%;
-  padding: 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 16px;
-}
-
-#config-form button {
-  margin-top: 16px;
-  width: 100%;
-  padding: 12px;
-  background: #1a237e;
-  color: #fff;
-  border: none;
-  border-radius: 4px;
-  font-size: 16px;
-  cursor: pointer;
-}
-
-.advanced-config {
-  margin-top: 16px;
-  font-size: 13px;
-  color: #666;
-}
-
-.advanced-config summary {
-  cursor: pointer;
-  padding: 4px 0;
-  user-select: none;
-}
-
-.advanced-config summary:hover {
-  color: #1a237e;
-}
-
-.advanced-config input {
-  margin-top: 4px;
-}
-
-/* Transaction list */
-#transaction-list {
-  padding: 8px 0;
-}
-
-.txn-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: #fff;
-  border-bottom: 1px solid #eee;
-  cursor: pointer;
-  min-height: 48px;
-}
-
-.txn-item:active {
-  background: #e8eaf6;
-}
-
-.txn-item.selected {
-  background: #c5cae9;
-}
-
-.txn-merchant {
-  font-size: 14px;
-  font-weight: 500;
-  flex: 1;
-  margin-right: 12px;
-}
-
-.txn-amount {
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.txn-date {
-  font-size: 11px;
-  color: #999;
-}
-
-/* Category picker */
-#category-picker {
+#tab-bar {
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
-  background: #fff;
-  border-top: 2px solid #1a237e;
-  padding: 12px 16px 60px;
-  max-height: 60vh;
+  height: var(--tab-bar-total);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--bg);
+  border-top: 1px solid var(--rule);
+  display: flex;
+  z-index: 15;
+}
+
+#tab-bar .tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  position: relative;
+  height: var(--tab-bar-h);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  background: transparent;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+#tab-bar .tab.active {
+  color: var(--ink);
+  font-weight: 700;
+  background: var(--bg-active-tab);
+}
+
+#tab-bar .tab.active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--ink);
+}
+
+/* ============================= PERIOD BAR ============================ */
+
+.period-bar {
+  background: var(--bg-period);
+  border-bottom: 2px solid var(--ink);
+  padding: 10px 16px 12px;
+  /* Fill the iOS safe area (Dynamic Island / notch) with the period-bar's
+     tan background so there's no white seam above it. Works on all iPhones:
+     env(safe-area-inset-top) is 0 on non-notch displays. */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 10px);
+}
+
+.period-bar-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.period-nav-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.period-chev {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--muted);
+  padding: 2px 6px;
+  line-height: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+.period-chev:disabled { opacity: 0.3; cursor: default; }
+
+.period-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+  min-width: 0;
+}
+
+.period-eyebrow {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.period-label {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.period-caret {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 0.18s ease;
+  display: inline-block;
+  margin-top: 10px;
+}
+.period-bar.open .period-caret { transform: rotate(180deg); }
+
+.period-right {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* "↻ Parse" and "Sync N" pill buttons living in the period bar's right slot. */
+.pill-btn {
+  font-size: 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--ink);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-weight: 600;
+  background: var(--bg);
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  -webkit-tap-highlight-color: transparent;
+  font-family: inherit;
+  line-height: 1;
+}
+.pill-btn:active { background: var(--bg-selected); }
+.pill-btn.primary { background: var(--ink); color: var(--bg); }
+.pill-btn.primary:active { background: #222; }
+.pill-btn:disabled { opacity: 0.4; cursor: default; }
+.pill-btn .pill-glyph { font-size: 12px; line-height: 1; }
+
+/* Dashboard progress "Day 7 of 14" label in the right slot. */
+.period-progress {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.calendar-cell {
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--muted-2);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  position: relative;
+}
+.calendar-cell.has-txn {
+  background: var(--rule-2);
+  color: var(--ink);
+}
+.calendar-cell.today {
+  border: 1.5px solid var(--ink);
+  background: var(--ink);
+  color: var(--bg);
+  font-weight: 600;
+}
+.calendar-cell .cell-dot {
+  width: 3px; height: 3px; border-radius: 2px;
+  background: var(--ink);
+  margin-top: 2px;
+}
+.calendar-cell.today .cell-dot { background: var(--bg); }
+
+/* ============================= CATEGORIZE ============================ */
+/* Manual | Auto segmented control */
+
+#subtab-bar {
+  display: flex;
+  padding: 14px 20px 8px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  gap: 0;
+}
+
+.subtab {
+  padding-right: 16px;
+  padding-bottom: 10px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--muted-2);
+  cursor: pointer;
+  position: relative;
+  -webkit-tap-highlight-color: transparent;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.subtab.active {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.subtab.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 16px;
+  bottom: -1px;
+  height: 1px;
+  background: var(--ink);
+}
+
+/* Manual list — single row per txn */
+
+#transaction-list { padding: 0; }
+
+.txn-item {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 56px;
+  -webkit-tap-highlight-color: transparent;
+}
+.txn-item:active { background: var(--bg-selected); }
+.txn-item.selected { background: var(--bg-selected); }
+
+.txn-merchant {
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  flex: 1;
+  margin-right: 12px;
+}
+
+.txn-date {
+  font-size: 11px;
+  color: var(--muted-2);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.txn-amount {
+  font-size: 17px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+/* Auto row — outer shell + inner content (swipe.js translates the inner) */
+
+.auto-row {
+  position: relative;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+}
+
+.auto-row::before,
+.auto-row::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--bg);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  pointer-events: none;
+}
+.auto-row::before {
+  content: 'Accept →';
+  background: var(--ink);
+  justify-content: flex-start;
+}
+.auto-row::after {
+  content: '← Skip';
+  background: var(--muted);
+  justify-content: flex-end;
+}
+.auto-row.reveal-right::before { opacity: 1; }
+.auto-row.reveal-left::after   { opacity: 1; }
+
+.auto-row-inner {
+  position: relative;
+  padding: 14px 20px;
+  background: var(--bg);
+  transform: translateX(0);
+  touch-action: pan-y;
+  cursor: pointer;
+  z-index: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+.auto-row.swiping .auto-row-inner { background: var(--bg-selected); }
+
+.auto-row-line1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.auto-row-line2 {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.auto-suggest-indicator {
+  text-transform: uppercase;
+  margin-right: 4px;
+}
+
+.auto-suggest-category {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* Empty states (both Manual and Auto). Reused layout. */
+
+.empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.empty-state .glyph {
+  font-size: 32px;
+  margin-bottom: 8px;
+  color: var(--muted-2);
+}
+.empty-state .hint {
+  font-size: 12px;
+  color: var(--muted-2);
+  margin-top: 6px;
+}
+.empty-state button {
+  margin-top: 14px;
+  padding: 8px 16px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-family: inherit;
+}
+
+#loading {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-size: 13px;
+}
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--rule);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ====================== CATEGORIZE — PICKER + MODAL ================== */
+
+#category-picker {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--tab-bar-total);
+  /* Anchor below the period bar + sub-tab bar. Grows with the safe area
+     so it never overlaps chrome on Dynamic Island iPhones. */
+  top: calc(env(safe-area-inset-top, 0px) + 120px);
+  background: var(--bg);
+  border-top: 1px solid var(--ink);
+  padding: 16px 20px;
   overflow-y: auto;
-  z-index: 10;
+  z-index: 20;
 }
 
 #category-picker-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
+  align-items: baseline;
+  margin-bottom: 16px;
+}
+
+#selected-merchant-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 #selected-merchant {
+  font-size: 16px;
   font-weight: 600;
-  font-size: 14px;
+  margin-top: 2px;
 }
 
 #cancel-pick {
-  background: none;
   border: none;
-  color: #1a237e;
-  font-size: 14px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: inherit;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .cat-group-label {
-  font-size: 12px;
-  color: #666;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-top: 8px;
-  margin-bottom: 4px;
+  color: var(--muted-2);
+  margin-bottom: 6px;
+  margin-top: 14px;
 }
+.cat-group-label:first-child { margin-top: 0; }
 
 #category-buttons {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.cat-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .cat-btn {
-  padding: 10px 8px;
-  background: #e8eaf6;
-  border: none;
-  border-radius: 4px;
-  font-size: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--rule);
+  background: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  border-radius: 0;
+}
+.cat-btn:active { background: var(--bg-selected); }
+
+.add-cat-trigger {
+  display: block;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--muted);
   cursor: pointer;
   text-align: center;
-  min-height: 44px;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
 }
-
-.cat-btn:active {
-  background: #c5cae9;
-}
+.add-cat-trigger:active { background: var(--bg-selected); }
 
 .empty-cats-msg {
-  grid-column: 1 / -1;
-  text-align: center;
-  color: #888;
+  color: var(--muted-2);
   padding: 16px;
-  font-size: 14px;
-}
-
-/* Version info block (Setup screen) */
-#version-info {
-  margin-top: 24px;
-  padding: 12px 16px;
-  background: #f5f5f5;
-  border-radius: 4px;
   font-size: 13px;
-  border: 1px solid #e0e0e0;
-}
-#version-info h3 {
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  color: #555;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-.version-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  align-items: baseline;
-  gap: 12px;
-}
-.version-label {
-  font-weight: 500;
-  color: #666;
-  flex-shrink: 0;
-}
-.version-row span:last-child {
-  text-align: right;
-  color: #333;
-  font-family: -apple-system, monospace;
-  font-size: 12px;
-}
-#update-status-display.update-needed {
-  color: #c62828;
-  font-weight: 700;
-}
-#update-status-display.up-to-date {
-  color: #2e7d32;
-  font-weight: 600;
-}
-
-/* Add Category trigger */
-.add-cat-trigger {
-  grid-column: 1 / -1;
-  padding: 10px 8px;
-  background: #fff;
-  border: 2px dashed #999;
-  border-radius: 4px;
-  font-size: 14px;
-  color: #666;
-  cursor: pointer;
-  margin-top: 4px;
-}
-
-.add-cat-trigger:active {
-  background: #f0f0f0;
+  text-align: center;
 }
 
 /* Add Category modal */
-.modal-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
-  z-index: 40;
-}
 
-.modal-content {
+#add-cat-modal {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: #fff;
-  padding: 20px 16px;
-  border-radius: 12px 12px 0 0;
+  inset: 0;
   z-index: 50;
 }
-
-.modal-content h3 {
-  margin-bottom: 12px;
-  font-size: 16px;
+.modal-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
 }
-
+.modal-content {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--bg);
+  padding: 20px;
+  border-top: 1px solid var(--ink);
+}
+.modal-content h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
 .modal-content label {
   display: block;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 4px;
-  margin-top: 12px;
-  color: #555;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 10px;
 }
-
 .modal-content select,
 .modal-content input[type="text"] {
   width: 100%;
   padding: 10px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 16px;
+  border: 1px solid var(--rule);
+  font-size: 14px;
+  font-family: inherit;
+  margin-top: 4px;
+  margin-bottom: 10px;
   background: #fff;
+  color: var(--ink);
+  border-radius: 0;
 }
-
 .modal-actions {
   display: flex;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 10px;
 }
-
 .modal-actions button {
   flex: 1;
   padding: 12px;
   border: none;
-  border-radius: 4px;
-  font-size: 16px;
+  font-size: 14px;
+  font-family: inherit;
+  font-weight: 500;
   cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
 }
-
 #cancel-add-cat {
-  background: #eee;
-  color: #333;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
 }
-
 #save-add-cat {
-  background: #1a237e;
-  color: #fff;
+  background: var(--ink);
+  color: var(--bg);
 }
+#save-add-cat:disabled { background: var(--muted-2); color: var(--bg); }
 
-#save-add-cat:disabled {
-  background: #999;
-}
+/* ============================ UNDO BAR + TOAST ======================= */
 
-/* Undo bar */
 #undo-bar {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background: #333;
-  color: #fff;
+  left: 12px;
+  right: 12px;
+  bottom: calc(var(--tab-bar-total) + 12px);
+  background: var(--ink);
+  color: var(--bg);
+  padding: 10px 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
-  z-index: 20;
+  font-size: 13px;
+  z-index: 30;
 }
-
-#undo-text {
-  font-size: 14px;
-  flex: 1;
-  margin-right: 12px;
-}
-
 #undo-btn {
-  background: none;
-  border: 1px solid #fff;
-  color: #fff;
-  padding: 6px 16px;
-  border-radius: 4px;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#undo-btn:active {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-/* Loading */
-#loading {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 16px;
-  color: #666;
-}
-
-.spinner {
-  width: 24px;
-  height: 24px;
-  border: 3px solid #ccc;
-  border-top-color: #1a237e;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-bottom: 12px;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Empty state */
-#empty-state {
-  text-align: center;
-  padding: 48px 16px;
-  color: #666;
-}
-
-#empty-state button {
-  margin-top: 12px;
-  padding: 10px 24px;
-  background: #1a237e;
-  color: #fff;
   border: none;
-  border-radius: 4px;
-  font-size: 14px;
+  background: transparent;
+  color: var(--bg);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   cursor: pointer;
+  padding: 4px 8px;
+  -webkit-tap-highlight-color: transparent;
+}
+#undo-btn:disabled { opacity: 0.5; cursor: default; }
+
+#error-toast {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 12px);
+  left: 20px;
+  right: 20px;
+  background: var(--red);
+  color: var(--bg);
+  padding: 10px 14px;
+  font-size: 13px;
+  text-align: center;
+  z-index: 100;
+}
+#error-toast.success { background: var(--ink); }
+
+/* ============================== DASHBOARD ============================ */
+
+#dashboard-section { padding: 0 0 16px; }
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 18px 20px 20px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
 }
 
-/* Period filter bar (Phase 5) */
-#period-filter-bar {
+.summary-cell .label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.summary-cell .value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  margin-top: 3px;
+  font-size: 14px;
+  letter-spacing: -0.01em;
+}
+
+.summary-cell.ready .value {
+  font-weight: 600;
+}
+.summary-cell.ready .value.negative { color: var(--red); }
+
+/* Category groups (collapsible) */
+
+.cat-group { background: transparent; }
+
+.cat-group-header {
+  padding: 18px 20px 12px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+  background: var(--bg-selected);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.cat-group-header .left {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px;
-  background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0;
-  font-size: 14px;
-}
-#period-filter-bar label {
-  color: #555;
-  font-weight: 500;
-  flex-shrink: 0;
-}
-#period-filter {
-  flex: 1;
-  padding: 8px 10px;
-  font-size: 14px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  color: #222;
-  -webkit-appearance: menulist;
-  appearance: menulist;
 }
 
-/* Empty state for "this period has 0 txns but others do" — distinct from
-   the global #empty-state which means "no txns anywhere". */
-#period-empty-state {
-  padding: 32px 16px;
-  text-align: center;
-  color: #666;
+.cat-group-header .toggle-glyph {
+  font-size: 11px;
+  color: var(--ink);
+  width: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 600;
 }
-#period-empty-state p {
-  margin: 4px 0;
-}
-#period-empty-state .hint {
+
+.cat-group-header .group-name {
   font-size: 13px;
-  color: #999;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
 }
 
-/* Error / success toast — same element, success state via .success class (B7) */
-#error-toast {
-  position: fixed;
-  top: 60px;
-  left: 16px;
-  right: 16px;
-  background: #c62828;
-  color: #fff;
-  padding: 12px 16px;
-  border-radius: 4px;
+.cat-group-header .group-count {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-sub {
+  padding: 12px 20px 12px 42px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+}
+
+.cat-sub-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+
+.cat-sub-name {
   font-size: 14px;
-  z-index: 30;
+  font-weight: 400;
+  color: var(--ink);
+}
+
+.cat-sub-amounts {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cat-sub-avail {
+  font-size: 14px;
+  font-weight: 500;
+}
+.cat-sub-avail.pos   { color: var(--ink); }
+.cat-sub-avail.zero  { color: var(--amber); }
+.cat-sub-avail.over  { color: var(--red); }
+
+.cat-sub-spent {
+  font-size: 10px;
+  color: var(--muted-2);
+  margin-top: 1px;
+}
+
+.cat-bar {
+  height: 1px;
+  background: var(--rule-2);
+}
+.cat-bar-fill {
+  height: 1px;
+  background: var(--ink);
+}
+.cat-bar-fill.zero { background: var(--amber); }
+.cat-bar-fill.over { background: var(--red); }
+
+/* Saving goals */
+
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 20px 20px 8px;
+}
+
+.goal-card {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.goal-card:active { background: var(--bg-selected); }
+
+.goal-head {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.goal-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+.goal-name .done-mark {
+  color: var(--green);
+  margin-left: 4px;
+}
+
+.goal-amount {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.goal-amount .muted { color: var(--muted-2); }
+
+.goal-bar {
+  height: 2px;
+  background: var(--rule);
+}
+.goal-bar-fill {
+  height: 2px;
+  background: var(--ink);
+}
+
+.goal-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 6px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.goal-details {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, padding 0.25s ease;
+  font-size: 12px;
+}
+.goal-card.expanded .goal-details {
+  max-height: 260px;
+  padding-top: 10px;
+  margin-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+.goal-detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  color: var(--muted);
+}
+.goal-detail-row span:last-child {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.goal-notes span:last-child {
+  font-style: italic;
+  color: var(--muted);
+  text-align: right;
+  max-width: 60%;
+}
+
+/* ============================== SETUP ================================ */
+
+#config-section {
+  padding: 24px 20px;
+  /* Setup has no period bar, so it pads for the safe area itself. */
+  padding-top: calc(env(safe-area-inset-top, 0px) + 24px);
+}
+
+#config-section h2 {
+  display: none;                  /* design has no visible page title */
+}
+
+#config-section p {
+  display: none;                  /* replaced by eyebrow + underline */
+}
+
+#config-form label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+#config-form input {
+  width: 100%;
+  padding: 10px 0;
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--ink);
+  outline: none;
+  margin-top: 4px;
+  margin-bottom: 16px;
+  border-radius: 0;
+}
+#config-form input:focus { border-bottom-color: var(--ink); }
+
+#config-form button {
+  margin-top: 4px;
+  width: 100%;
+  padding: 12px;
+  background: var(--ink);
+  color: var(--bg);
+  border: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.advanced-config {
+  margin-top: 20px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.advanced-config summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+  letter-spacing: 0.04em;
+}
+.advanced-config summary:hover { color: var(--ink); }
+.advanced-config input { margin-top: 4px; }
+
+/* Version info — flat list, no card background */
+#version-info {
+  margin-top: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+#version-info h3 {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.version-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  align-items: baseline;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+}
+.version-row:last-child { border-bottom: none; }
+.version-label { color: var(--muted); }
+.version-row span:last-child {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+#update-status-display.update-needed { color: var(--red); font-weight: 600; }
+#update-status-display.up-to-date    { color: var(--green); font-weight: 500; }
+
+/* Period empty-state (in Categorize when selected period has 0 txns) */
+#period-empty-state {
+  padding: 40px 20px;
   text-align: center;
+  color: var(--muted);
+  font-size: 13px;
 }
-#error-toast.success {
-  background: #2e7d32;
+#period-empty-state p { margin: 4px 0; }
+#period-empty-state .hint { font-size: 12px; color: var(--muted-2); }
+
+#auto-empty-state {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
 }
+#auto-empty-state p { margin: 4px 0; }
+#auto-empty-state .hint { font-size: 12px; color: var(--muted-2); }
+
+/* Legacy stubs that should never render again — keep guards in case any
+   orphan DOM sneaks in. */
+#sync-bar, .ready-card { display: none !important; }

@@ -5,8 +5,8 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.12 — `updateWorkbook` now delegates Budget refresh to `rebuildBudgetInternal_`. The previous in-place per-row setFormula loop was silently failing — Budget dashboard formulas worked but per-row formulas stayed `#REF!`. v11.11 was the Saving tab schema refactor (dropped On Track?, added Allocated This Period, adaptive Needed Future Periods). v11.9 + v11.10 were earlier Saving shakedown fixes. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.11 (cache v14) — adds period filter dropdown so the user can scope the list to a single pay period (Phase 5). Plus all v0.10 fixes (sync/undo race guard, refresh debounce, localStorage quota recovery, green success toast, beforeunload prompt fix, single APP_VERSION source).
+- **Apps Script:** v11.13 — every response now echoes `_elapsedMs` so the client can split server-exec vs. network/cold-container time; new `logClientMetrics` action appends client-side perf records to a dedicated `ClientMetrics` tab (auto-created). No breaking changes to existing endpoints. v11.12 fixed the Budget `#REF!` cascade via `rebuildBudgetInternal_` delegation; v11.9–v11.11 were Saving tab shakedown. Full postmortems in `docs/findings.md`.
+- **PWA:** v0.15.4 (cache v24) — cold-start optimization informed by v0.15.3 ClientMetrics data. Four fixes landed after confirming real-session measurements: dedupe `categories` by sharing mount's promise with `refresh()`, defer `ensureIndexReady()` until first Auto-tab tap, persist `store.transactions` to localStorage for instant cold-open paint, throttle silent re-mount `refresh()` to once per 60s (Parse pill always forces fresh). Also cached `version` response per Setup module lifetime. Layered on v0.15.3 (Minimal Monochrome redesign + iOS safe-area + Savings/Goals dedup + metrics pipeline) and v0.12 → v0.14 (hash router, lazy views, dashboard, auto-suggest). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). `main` at v0.11 — not merged yet. GitHub Pages serves from the feature branch for preview.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -73,35 +73,6 @@
 - Discovered 2 data issues via inspection (see "Deferred Cleanup Items" below)
 - **Status:** complete
 
-### Phase 13d: Single-Ledger Redesign (v11.0 → v11.1)
-- Pending tab → eliminated; Transactions tab is the single source of truth
-- New Timestamp column (H) on Transactions for PWA dedup matching
-- Empty Category = "needs categorization" (replaces Pending status field)
-- 5 handlers refactored: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
-- Net: ~60 lines of Apps Script removed; copy/move bug class eliminated
-- One-shot `migratePendingToTransactions()` + `consolidateTransactions()` rescue
-- PWA contract preserved — no PWA changes needed
-- Resolves: orphan rows 1001-1008 ($439 invisible spending) — automatically cleaned up during migration
-- **Status:** complete
-
-### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
-- After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
-- Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
-- Dashboard rows 1-6: dropdown + Net Income + Fixed Expenses + Total Budgeted + Ready to Assign (color-coded) + Period progress
-- Header at row 7, data starts at row 8
-- Frozen rows = 7 so dashboard always visible while scrolling
-- Slicer kept independent (filters category rows below) — required explicit `setColumnPosition(1)` after `insertSlicer()` to avoid broken filter UX
-- Named ranges shifted: `Budget_*` from row 2 to row 8
-- User explicitly REJECTED YNAB-style negative-carry rule, Goals columns, Category Transfers ledger, Sparklines (deferred for now)
-- **Status:** complete
-
-### Phase 13b: Instructions Tab Rewrite (v10.3)
-- Stale references to manual paste workflow + missing Logs tab + missing v10.x menu items
-- Rewrote `rows[]` array in `buildInstructionsTab_` (10 sections, ~65 rows)
-- Plain numbered steps + color-coded menu function table
-- Brief "For Developers" section pointing to clasp workflow
-- **Status:** complete
-
 ### Phase 13: Version Display (v10.2 + PWA v0.8)
 - User confused by old sheets bound to outdated Apps Script — wanted in-sheet version display
 - Added `apps-script/VERSION.txt` as source of truth (publicly readable on GitHub raw URL)
@@ -115,12 +86,59 @@
 - `deploy.sh` auto-bumps `LAST_EDITED` timestamp + writes `VERSION.txt` on every deploy
 - **Status:** complete
 
+### Phase 13b: Instructions Tab Rewrite (v10.3)
+- Stale references to manual paste workflow + missing Logs tab + missing v10.x menu items
+- Rewrote `rows[]` array in `buildInstructionsTab_` (10 sections, ~65 rows)
+- Plain numbered steps + color-coded menu function table
+- Brief "For Developers" section pointing to clasp workflow
+- **Status:** complete
+
+### Phase 13c: Budget Tab Dashboard Redesign (v10.5)
+- After reading ZBB research report, user wanted dashboard-style "Ready to Assign" surface instead of scattered `_income` rows
+- Removed 26 `_income` rows (one per period) — now ONE dashboard at top with period dropdown
+- Dashboard rows 1-6: dropdown + Net Income + Fixed Expenses + Total Budgeted + Ready to Assign (color-coded) + Period progress
+- Header at row 7, data starts at row 8
+- Frozen rows = 7 so dashboard always visible while scrolling
+- Slicer kept independent (filters category rows below) — required explicit `setColumnPosition(1)` after `insertSlicer()` to avoid broken filter UX
+- Named ranges shifted: `Budget_*` from row 2 to row 8
+- User explicitly REJECTED YNAB-style negative-carry rule, Goals columns, Category Transfers ledger, Sparklines (deferred for now)
+- **Status:** complete
+
+### Phase 13d: Single-Ledger Redesign (v11.0 → v11.1)
+- Pending tab → eliminated; Transactions tab is the single source of truth
+- New Timestamp column (H) on Transactions for PWA dedup matching
+- Empty Category = "needs categorization" (replaces Pending status field)
+- 5 handlers refactored: processInfoAlerts_, handleParseAndFetch_, handleBatchCategorize_, handleCategorize_, handleUncategorize_
+- Net: ~60 lines of Apps Script removed; copy/move bug class eliminated
+- One-shot `migratePendingToTransactions()` + `consolidateTransactions()` rescue
+- PWA contract preserved — no PWA changes needed
+- Resolves: orphan rows 1001-1008 ($439 invisible spending) — automatically cleaned up during migration
+- **Status:** complete
+
 ### Phase 14: Integrated Code Review (v11.3 → v11.6 + PWA v0.10)
 Three independent reviews (mine + 2 external) merged into a single 26-item plan, executed in 4 phases:
 - **Phase 1 (v11.3):** S1 leaked API key scrub + rotation; S2 sw.js cache version bump (was stuck on v9 across multiple PWA-affecting releases); S3 unique-suffix Timestamps so two same-second emails can't collide; S4 LockService on processInfoAlerts_ (was racing with PWA syncs).
 - **Phase 2 (v11.4):** A3 res.ok HTTP status check (was masking 500s as JSON parse errors); A4 sync/undo race guard; A6 refresh button debounce; A8 handleUncategorize_ no-match returns error (was silent success); A9 localStorage quota guard with fallback recovery.
 - **Phase 3 (v11.5):** A2 batched verify-read in handleBatchCategorize_ (~30x fewer reads on a 30-item batch); A5 handleAddCategoryInner_ capacity error instead of silent overflow; A7 stricter setAllowInvalid validation; B1 findNextEmptyRow_ throws past row 1000 (was silently writing orphans); B3 setNamedRanges_ scoped to owned prefixes; B4 beforeunload prompt actually fires now.
 - **Phase 4 (v11.6):** B2 consolidateTransactions renamed to consolidateTransactionsRescue with stronger docstring; B5 PWA version unified to single APP_VERSION source; B7 showSuccess() helper (sync success no longer red); B8 portable `sed -i.bak` in deploy.sh; B9 BUDGET_YEAR constant; B10 buildAvailableFormula_ helper extracted; C1 scrubbed remaining Pending references in user-visible Instructions tab + alerts + comments.
+- **Status:** complete
+
+### Phase 15: PWA Period Filter (PWA v0.11)
+The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
+- **Status:** complete
+
+### Phase 16: Slicer Crash Fix (v11.7)
+PWA `addCategory` was crashing with `TypeError: newSlicer.setColumnPosition is not a function` at the slicer-recreation step in `rebuildBudgetInternal_`. Google appears to have changed the Slicer API; the method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The crash propagated up through the handler, leaving the user with: Setup tab updated (succeeded), Budget tab rebuilt (succeeded), slicer in a broken half-state (old removed, new inserted but no filter column), and PWA showing a generic crash error.
+
+Fix in `rebuildBudgetInternal_`:
+1. Prefer UPDATING an existing slicer's range via `setRange()` — preserves the filter column the slicer was originally created with, no `setColumnPosition` call needed on the common path.
+2. Only fall back to recreate when no slicer exists, with a `typeof === 'function'` guard around `setColumnPosition`.
+3. Wrap the entire slicer block in top-level try/catch — slicer is a UI convenience widget, its failure must never crash the parent operation.
+
+User impact: addCategory works again. The user's existing slicer is in the broken-no-column state from the prior crash; one-time manual fix needed (right-click slicer → Set Column → Period). Future addCategory calls only resize the slicer, so the manual fix sticks.
+
+Investigation also covered Budget row 72 (Apr 15-28 Gas showing -$280). Turned out to be the rollover formula working correctly against $340 of Gas overspending in Apr 1-14 (anchored by an erroneous SHELL $250 charge that the user manually uncategorized). Documented in findings.md as a non-bug to prevent re-investigation. Redesign of the formula model (move calculations to Apps Script, drop or split rollover) discussed but deferred.
+
 - **Status:** complete
 
 ### Phase 17: Saving Tab — One-Time Goals (v11.8 → v11.12)
@@ -145,31 +163,103 @@ Verification after v11.12 Update Script: 0 `#REF!` cells across all 267 Budget r
 Patterns added to CLAUDE.md trip-up list (items #10, #11, #12).
 - **Status:** complete + verified working
 
-### Phase 16: Slicer Crash Fix (v11.7)
-PWA `addCategory` was crashing with `TypeError: newSlicer.setColumnPosition is not a function` at the slicer-recreation step in `rebuildBudgetInternal_`. Google appears to have changed the Slicer API; the method is no longer present on the object returned by `Sheet.insertSlicer()` in web-app context. The crash propagated up through the handler, leaving the user with: Setup tab updated (succeeded), Budget tab rebuilt (succeeded), slicer in a broken half-state (old removed, new inserted but no filter column), and PWA showing a generic crash error.
+## Phases — In Progress / Future
 
-Fix in `rebuildBudgetInternal_`:
-1. Prefer UPDATING an existing slicer's range via `setRange()` — preserves the filter column the slicer was originally created with, no `setColumnPosition` call needed on the common path.
-2. Only fall back to recreate when no slicer exists, with a `typeof === 'function'` guard around `setColumnPosition`.
-3. Wrap the entire slicer block in top-level try/catch — slicer is a UI convenience widget, its failure must never crash the parent operation.
+### Phase 18: PWA Experimental Restructure (v0.12+)
+User wanted the PWA to feel snappier ("like Wikipedia Mobile / Twitter Lite / Pinterest") and had two new features queued: a Dashboard tab (read-only Budget-sheet view) and an auto-categorization swipe deck. Scaling the existing 657-line single-file `app.js` to absorb both was going to regress first-paint time and make the file unmaintainable. Chose to restructure the shell first, then build features on the clean foundation.
 
-User impact: addCategory works again. The user's existing slicer is in the broken-no-column state from the prior crash; one-time manual fix needed (right-click slicer → Set Column → Period). Future addCategory calls only resize the slicer, so the manual fix sticks.
+**3-deploy plan. Detailed architecture doc: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.**
 
-Investigation also covered Budget row 72 (Apr 15-28 Gas showing -$280). Turned out to be the rollover formula working correctly against $340 of Gas overspending in Apr 1-14 (anchored by an erroneous SHELL $250 charge that the user manually uncategorized). Documented in findings.md as a non-bug to prevent re-investigation. Redesign of the formula model (move calculations to Apps Script, drop or split rollover) discussed but deferred.
+Design choices (scaffolding-level):
+- **Hash routing** (`#/categorize`, `#/dashboard`, `#/setup`) via `<a>` hrefs in a bottom tab-bar. ~60-line router, zero click handlers for nav, browser back works.
+- **View module contract:** `export default { mount(root), unmount() }`. Router lazy-imports on first navigation, wipes root innerHTML on transition.
+- **Lazy loading:** dashboard and future auto-suggest chunks aren't downloaded until the user navigates there. Users who only categorize never pay for the rest.
+- **Service worker stale-while-revalidate** for `/js/views/` and `/js/lib/` so dynamic imports work offline after first successful fetch.
+- **State management unchanged** — `store.js` stays as a singleton. No pub/sub (deferred per user direction; revisit if view-to-view coupling becomes painful in Deploy 2 or 3).
+- **Keep single `style.css`** with section-header TOC. Splitting deferred until it crosses ~1200 LOC.
+- **Header buttons** (`refresh`, `sync`) hidden by default; each view declares what it needs via `setHeaderActions(...)` on mount. Settings button is always visible; shell handler routes based on current hash (to `#/setup` from elsewhere, back to `#/categorize` when already there). Setup view relabels the button to "Done" so the affordance reads correctly.
 
-- **Status:** complete
+**Branch state:**
+- Working on `claude/read-markdown-context-v1c5T` (branched from `pwa/experiments`).
+- Pushed to origin; **NOT merged to `main`**. `main` still at v0.11 + v11.12 Apps Script.
+- GitHub Pages currently deploys from the feature branch (Settings → Pages → Source switched for preview). When merging to main, flip the source back.
 
-### Phase 15: PWA Period Filter (PWA v0.11)
-The user falls behind on categorization sometimes. When a new pay period starts, they want to focus on just-the-current-period txns and circle back to the older ones later. New `js/periods.js` derives pay-period info from a single anchor (`Date.UTC(2026,0,21)` = period 1 start) plus a special case for period 0 (the long lead-in). No backend changes — period assignment uses `txn.timestamp.slice(0,10)` (locale-independent ISO date). Dropdown options are computed from the current uncategorized set: empty periods don't appear, current period is flagged, counts inline. Default selection: current if it has txns, else "All". Annual rollover touches the two PWA constants. Verified with 13 boundary tests including hash-suffixed timestamps.
-- **Status:** complete
+**Deploy sequence — all shipped:**
+- ✅ **Deploy 1 — v0.12 / v0.12.1 / v0.12.2.** Scaffolding + UX polish. v0.12 introduced the router + lazy views + tab-bar (behaviour identical to v0.11). v0.12.1 fixed a Setup exit regression. v0.12.2 deleted the `setHeaderActions` helper entirely — Refresh and Sync moved from the shell header into the categorize view (inline `⟳` in the period row; sticky sync bar above the tab-bar visible only when `syncQueue.length > 0`); tab-bar no longer hidden on Setup; Categorize tab-bar label shows pending count `Categorize (N)`. Cache `v14 → v17`.
+- ✅ **Deploy 2 — v0.13.** Real dashboard content. `js/lib/budget.js` owns two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:I105), parses currency strings → numbers on ingest (`parseCurrency`), formats via `Intl.NumberFormat`, persists with a 10-min TTL, invalidates on successful `batchCategorize`. View: Ready-to-Assign hero + Income/Fixed/Budgeted summary strip + per-period category cards with green/amber/red progress bars + saving-goal tap-to-expand cards. Period switching is client-side — one fetch, 26 periods filter in-memory. Known scope limit (documented in the plan): summary block reflects sheet `Budget!B1`, not the PWA's selected period, because Net Income / Fixed Expenses formulas depend on Transactions + FixedMonthlyExpenses tabs that v0.13 intentionally doesn't fetch. Cache `v17 → v18`.
+- ✅ **Deploy 3 — v0.14.** Manual | Auto segmented control inside the categorize view (not a sub-route — shares period filter + refresh + sync bar + picker). `js/lib/suggest.js` fetches Transactions once per hour, builds `{normalizedMerchant: {category: count}}`, exposes `suggest(merchant)` returning the top category if confidence ≥ 0.70, else null. Normalizer strips payment-processor prefixes (`SQ*`, `TST*`, `PAYPAL*`, `SP*`), `*alnum` tokens, `#alnum` IDs, `\S*\d+\S*` tokens, trailing state codes — 17-case unit-test suite run before commit. `js/lib/swipe.js` is a vanilla touch factory: right = accept (reuses existing categorize path + queues for sync), left = hide this session only (txn remains in Manual). `rejectedThisSession` is in-memory only so a richer index next session gets another shot. Cache `v18 → v19`.
 
-## Phases — Future
+**Pages build failure + fix (Apr 23 2026):**
+First attempt to deploy the feature branch timed out at `updating_pages` even though the build step "succeeded" — root cause was GitHub Pages running Jekyll by default with no `.nojekyll` marker. Added empty `.nojekyll` at repo root + empty-commit retrigger cleared it. The file must stay on every branch Pages deploys from.
 
-### Phase 18: Auto-Categorization (not started)
-- [ ] Merchant → category mapping table in sheet
-- [ ] Known merchants auto-categorize during parseAndFetch (skip the uncategorized queue)
-- [ ] Only unknown merchants need manual review in PWA
-- **Status:** future
+- **Status:** all 3 deploys shipped, verified end-to-end, Pages serving the branch successfully. Not yet merged to `main`.
+
+### Phase 20: PWA Visual Redesign — Minimal Monochrome (v0.15 → v0.15.2)
+After the functional restructure (Phase 18) landed, the user wanted a cleaner aesthetic: drop the indigo theme, simplify information density, improve hierarchy. Scoped design work out to Claude Design (claude.ai/design), received a handoff bundle containing three variations (A, B, C). User iterated via the design canvas UI, converging on Variation A (Minimal Monochrome). B and C were explicitly deleted. Bundle + chat transcript fetched via `/v1/design/h/<id>` (gzipped tar archive), extracted to `/tmp/design-fetch/budget-pwa/`.
+
+Visual system:
+- `#0A0A0A` on `#FAFAF9`, `#E5E5E3` rules, `#EFEDE8` period bar.
+- Inter for UI, JetBrains Mono for the `+`/`−` toggle glyph.
+- Color-coded amounts on dashboard: black (positive), amber `#B45309` (zero), red `#B91C1C` (overspent), green `#15803D` (goal reached).
+
+Shape changes:
+- **Header title/version removed.** The period bar (on Categorize + Dashboard) is the visual top of the app.
+- **Period bar is a collapsible calendar.** Tap label to expand a 7-col day grid; `‹ ›` chevrons advance/retreat periods. Today cell is inverted black.
+- **Sync → top-right pill** in the period bar (`Sync N` primary when queue > 0, else `↻ Parse` outline). Sticky bottom sync bar deleted.
+- **Dashboard:** 4-col summary (Income / Fixed / Budgeted / Ready), collapsible `+`/`−` main-category groups, sub-rows show `left/over` primary + `spent/budgeted` secondary + 1px progress bar.
+- **Tab bar (3 tabs since v0.15):** thick top accent bar on active tab + warm-gray tint + uppercase bold label. Settings is now a tab, not a header button.
+
+Post-redesign fixes discovered on real device testing:
+- **v0.15.1 (iOS safe-area):** on iPhone 16 Pro the Dynamic Island showed a white strip above the period bar. Root cause: I'd translated the design's 54px iPhone 14 frame spacer into a hardcoded `<header>` with `#FAFAF9` background. Actual Dynamic Island inset is ~62px and the color was wrong. Fix: add `viewport-fit=cover` to enable `env(safe-area-inset-*)`; delete the fixed header; extend the period bar's tan background into the notch via `padding-top: calc(env(safe-area-inset-top, 0px) + 10px)`. Applied the same safe-area-aware offset to `#category-picker` and `#error-toast`.
+- **v0.15.2 (Savings/Goals dedup):** Savings main category group was showing sub-categories (Europe, NDEB) that also appear as Saving Goal cards below — same data in two places. Dashboard now filters `categoriesByPeriod` to exclude any category whose `sub` matches a `goal.linkedCategory`. Filter is data-driven, not hardcoded.
+
+- **Status:** complete + shipped on `pwa/v0.15-refinement`.
+
+### Phase 21: Client Metrics Pipeline (PWA v0.15.3 + Apps Script v11.13)
+User reported ~20s cold-start load time. The existing Logs tab captures server exec duration but not client-perceived latency, TLS/DNS cost, cold-container queue wait, or duplicate-call detection. Before fixing anything, built a richer diagnostic pipeline so future optimization decisions are data-driven.
+
+PWA side (`js/lib/metrics.js`, new — ~200 LOC):
+- Session id generated once per cold open; tracks mount counter so each metric is scoped to a view mount within a session.
+- `recordStart(action)` / `recordComplete(ticket, {ok, serverMs, bytes, cached, errorMsg})` wrap every API call in `api.js`.
+- In-flight Set captures concurrency-at-start; `msSincePrev` captures how long since the last completed request (cold/warm heuristic).
+- Duplicate detector: flags any action that fires twice within 2s (catches the known `fetchCategories` bug).
+- `recordEvent(kind, data)` captures non-API events: `mount:<route>` with import-vs-mount-time split; `cache-hit:dashboard` / `cache-miss:dashboard`; `cache-hit:suggest` (with source: memory / in-flight-dedup / localStorage) / `cache-miss:suggest`.
+- 50-entry buffer; flushes on `visibilitychange: hidden` + `pagehide` via `navigator.sendBeacon`. Text/plain Blob to skip CORS preflight (iOS Safari strict; Apps Script doesn't respond to OPTIONS cleanly). Keepalive fetch fallback if sendBeacon unavailable.
+- Exposes `window.__apiStats` / `__apiStats_session` / `__apiStatsFlush()` for Safari remote DevTools inspection.
+- **`logClientMetrics` action excluded from instrumentation** — no logging-about-logging loops.
+
+Apps Script side (`handleLogClientMetrics_`, new; `doGet`/`doPost` modified):
+- Every response now injects `_elapsedMs = Date.now() - start` before returning (client reads it to compute `networkMs = clientTotalMs - serverMs`).
+- `logClientMetrics` action accepts batched records (POST body or GET params), appends to the `ClientMetrics` tab in one `setValues` call.
+- Tab auto-creates on first write with 18-column schema: ReceivedAt, SessionId, MountN, AppVersion, Connection, Action, ClientStartMs, ClientTotalMs, ServerMs, NetworkMs, InFlightAtStart, MsSincePrev, Duplicate, Cached, Ok, ErrorMsg, Bytes, Note.
+- Defensive 500-row/batch cap (client buffer is 50).
+
+Intended usage:
+- Drive a few cold starts + normal sessions → data lands in ClientMetrics → query via `AVERAGE`/`PERCENTILE`/`COUNTIF` to confirm where the 20s goes (cold network vs. Apps Script cold-container vs. sequential chain vs. duplicate calls) before picking a fix. Specific fixes already on the table from prior log analysis: drop duplicate `fetchCategories` in refresh(), defer `ensureIndexReady` until Auto tab, cache transactions in localStorage for instant first paint.
+
+- **Status:** complete + verified working. Apps Script v11.13 deployed @35; ClientMetrics tab auto-created on first successful flush and has populated rows showing per-call timings, concurrency, cache hits, and duplicate flags. Baseline data captured, informing Phase 22.
+
+### Phase 22: Cold-Start Optimization (PWA v0.15.4)
+User reported ~20s cold-open load time. Phase 21's ClientMetrics pipeline produced first real measurements, which guided this fix. Before shipping anything we validated all four prior hypotheses against real data.
+
+Measurement findings from the v0.15.3 baseline:
+- **Confirmed:** duplicate `categories` is real (`Duplicate=Y` on every `mount:categorize` row, ~3s wasted per mount).
+- **Confirmed:** suggest-index warmup is heavy (`dumpSheet:Transactions` = 3136ms on cold mount, fires unconditionally).
+- **Confirmed:** re-mounts pay full tax (`mount:categorize` 7763ms cold → 6864ms warm re-mount → 9198ms third re-mount — not improving).
+- **Contradicted:** network overhead is NOT front-loaded to the first call. The `version` endpoint with 46ms server time paid 2525ms network even mid-session with warm container. Every call pays the 302-redirect + TLS overhead; parallelism doesn't help (calls serialize on the single-threaded Apps Script container).
+
+Four fixes landed in v0.15.4 based on what the data actually said:
+- **v0.15.4 (dedupe categories):** `mount()` stores its `fetchCategories` promise in a module variable (`categoriesPromise`). `refresh()` awaits it instead of firing a duplicate. User-initiated refreshes (`refresh({ force: true })`) opt into fresh fetches so sheet-side category additions still propagate.
+- **v0.15.4 (defer suggest index):** `ensureIndexReady()` now fires only when `activeSubtab === 'auto'` on mount, OR on first `setSubtab('auto')` activation. Manual-only users never pay the 3.1s dumpSheet call.
+- **v0.15.4 (persist transactions):** `store.transactions` now persists to localStorage via a new `saveTransactions()`/`setTransactions()` pattern. Cold PWA open paints cached txns in <200ms; `refresh()` merges server state in the background. `setTransactions()` replaces rather than merges so stale-cached items (e.g., categorized directly in the sheet) get evicted correctly.
+- **v0.15.4 (throttle re-mounts):** silent re-mount `refresh()` is a no-op within 60s of the last successful run. Parse pill + empty-state Refresh always bypass via `force: true`.
+- **v0.15.4 (version cache, bonus):** Setup module caches the `version` response in memory for its lifetime. Saves ~2.5s per Setup re-mount.
+
+No Apps Script changes. All PWA-side. CACHE_VERSION v23 → v24.
+
+Patterns added to CLAUDE.md trip-up list (items #25, #26).
+
+- **Status:** complete + verified working. Five of six perf targets hit per measured ClientMetrics on 2026-04-24: `Duplicate=Y` rows = 0 (was many), `dumpSheet:Transactions` on Manual mount = 0 calls (was always firing), `mount:dashboard` re-mount = 3–16 ms (was 3861 ms), throttled `mount:categorize` re-mount = 1 ms (was 6864–9198 ms), Setup `version` re-mount = 0 ms (was ~2500 ms each). Sixth target (first cold `mount:categorize` < 3 s) missed: still 7348 ms / 9038 ms because `parseAndFetch` + `categories` are gated by ~2.5 s per-call network tax that is unavoidable without a server-side consolidated endpoint. The localStorage-cached transactions fix paints in <200 ms regardless, so the user-perceived cold open is materially faster even though `mount:categorize` ClientTotalMs (which fires after refresh awaits) is still long. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)" Verification block for raw numbers.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
@@ -218,10 +308,12 @@ cd ~/gsheetbudget2026-categorizerApp/apps-script
 ```bash
 cd ~/gsheetbudget2026-categorizerApp
 # edit js/, index.html, css/, sw.js
-# bump version in index.html (header span) AND CACHE_VERSION in sw.js
+# bump APP_VERSION in js/config.js AND CACHE_VERSION in sw.js
+# (header label is populated at runtime from APP_VERSION — no HTML edit needed)
 git add . && git commit -m "..." && git push
 # GitHub Pages auto-deploys from main branch
 ```
+Bumping CACHE_VERSION is how the service worker knows to activate and purge the old cache. Skip it and installed PWAs will keep serving stale code.
 
 ### After Apps Script changes, check the Logs tab
 Open the budget sheet → Budget Tools → View Activity Log. Every API call from the PWA appears with duration, status, and details.
@@ -245,6 +337,9 @@ clasp deployments     # should still show 7 deployments (HEAD + 6 versions)
 | knownTimestamps stale cache hiding txns | In-memory only, removed entirely in v8 |
 | **Transaction writes going to row 1001+** | Rewrote `findNextEmptyRow_` to scan column A (formula-filled cells confuse `getLastRow`) (v9) |
 | Categories not showing on tap | `selectTransaction()` now calls `renderCategories()` (v0.6) |
+| Dashboard showing stale Spent totals after sync (v0.13) | `categorize.js sync()` calls `invalidateDashboardCache()` after `batchCategorize` success; dashboard refetches on next mount |
+| Auto-tab bucketizing Amazon variants separately (v0.14 design-time) | Normalizer changed from trailing-only `*alnum$` + `\b\d{4,}\b` to global `*alnum` + `\S*\d+\S*` + `#alnum`, plus 17-case Node test gate before commit |
+| GitHub Pages deploy timeout at `updating_pages` (Apr 23 2026) | Added `.nojekyll` at repo root + empty-commit retrigger. Root cause was Pages running Jekyll by default on a non-Jekyll static PWA |
 
 ## Notes
 - **Source of truth:** this git repo. Old Google Drive Code.gs and .md files are stale backups (still synced as a safety copy after each session).

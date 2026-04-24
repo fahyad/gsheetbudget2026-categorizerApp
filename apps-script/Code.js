@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.12';
-var APP_SCRIPT_LAST_EDITED = '2026-04-20 10:01 MDT';
+var APP_SCRIPT_VERSION = 'v11.13';
+var APP_SCRIPT_LAST_EDITED = '2026-04-24 01:13 UTC';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -86,6 +86,7 @@ function routeAction_(action, params) {
   if (action === 'batchCategorize')  return handleBatchCategorize_(params);
   if (action === 'dumpSheet')        return handleDumpSheet_(params);
   if (action === 'version')          return handleVersion_(params);
+  if (action === 'logClientMetrics') return handleLogClientMetrics_(params);
   return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
 }
 
@@ -108,6 +109,11 @@ function doGet(e) {
     var parsed = { success: true };
     try { parsed = JSON.parse(response.getContent()); } catch (parseErr) { /* leave as default */ }
 
+    // v11.13: echo the server's self-reported exec time so the client can
+    // compute networkMs = clientTotalMs - serverMs in its diagnostics log.
+    parsed._elapsedMs = duration;
+    response = jsonResponse_(parsed);
+
     logActivity_(
       action,
       duration,
@@ -119,7 +125,7 @@ function doGet(e) {
   } catch (err) {
     var duration = Date.now() - start;
     logActivity_(action, duration, 'crash', 'method: GET', err.toString() + '\n' + (err.stack || ''));
-    return jsonResponse_({ success: false, error: err.toString() });
+    return jsonResponse_({ success: false, error: err.toString(), _elapsedMs: duration });
   }
 }
 
@@ -146,6 +152,9 @@ function doPost(e) {
     var parsed = { success: true };
     try { parsed = JSON.parse(response.getContent()); } catch (parseErr) { /* leave as default */ }
 
+    parsed._elapsedMs = duration;
+    response = jsonResponse_(parsed);
+
     logActivity_(
       action,
       duration,
@@ -157,7 +166,7 @@ function doPost(e) {
   } catch (err) {
     var duration = Date.now() - start;
     logActivity_(action, duration, 'crash', 'method: POST', err.toString() + '\n' + (err.stack || ''));
-    return jsonResponse_({ success: false, error: err.toString() });
+    return jsonResponse_({ success: false, error: err.toString(), _elapsedMs: duration });
   }
 }
 
@@ -958,6 +967,89 @@ function getOrCreateLogsSheet_() {
     sheet.getRange('A:A').setNumberFormat('yyyy-mm-dd HH:mm:ss');
   }
   return sheet;
+}
+
+// ================================================================
+// CLIENT METRICS (v11.13)
+// Batch sink for per-request perf/context records from the PWA. Kept in
+// its own tab so ops "Logs" stays lightweight. Rows are append-only.
+// ================================================================
+
+var CLIENT_METRICS_HEADER = [
+  'ReceivedAt','SessionId','MountN','AppVersion','Connection','Action',
+  'ClientStartMs','ClientTotalMs','ServerMs','NetworkMs',
+  'InFlightAtStart','MsSincePrev','Duplicate','Cached','Ok','ErrorMsg','Bytes','Note'
+];
+
+function getOrCreateClientMetricsSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('ClientMetrics');
+  if (!sheet) {
+    sheet = ss.insertSheet('ClientMetrics');
+    sheet.appendRow(CLIENT_METRICS_HEADER);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, CLIENT_METRICS_HEADER.length)
+      .setFontWeight('bold').setBackground('#E8EAF6');
+    sheet.getRange('A:A').setNumberFormat('yyyy-mm-dd HH:mm:ss');
+    sheet.setTabColor('#7986CB');
+  }
+  return sheet;
+}
+
+/**
+ * handleLogClientMetrics_ — accepts a batch of client-side metric records
+ * and appends them to the ClientMetrics tab. Called via sendBeacon on
+ * visibility-hidden; must be cheap and non-blocking.
+ *
+ * Input shape (params):
+ *   { session: string, records: [{ sessionId, mountN, appVersion,
+ *       connection, action, clientStartMs, clientTotalMs, serverMs,
+ *       networkMs, inFlightAtStart, msSincePrev, duplicateDetected,
+ *       cached, ok, errorMsg, bytes, note }, ...] }
+ */
+function handleLogClientMetrics_(params) {
+  var records = (params && params.records) || [];
+  if (!Array.isArray(records) || records.length === 0) {
+    return jsonResponse_({ success: true, count: 0 });
+  }
+
+  // Hard cap on batch size — defensive against buggy clients. 500 rows is
+  // plenty (client buffer is 50).
+  if (records.length > 500) records = records.slice(0, 500);
+
+  var sheet = getOrCreateClientMetricsSheet_();
+  var now = new Date();
+  var rows = [];
+  for (var i = 0; i < records.length; i++) {
+    var r = records[i] || {};
+    rows.push([
+      now,
+      r.sessionId || '',
+      (typeof r.mountN === 'number') ? r.mountN : '',
+      r.appVersion || '',
+      r.connection || '',
+      r.action || '',
+      (typeof r.clientStartMs === 'number') ? r.clientStartMs : '',
+      (typeof r.clientTotalMs === 'number') ? r.clientTotalMs : '',
+      (typeof r.serverMs === 'number') ? r.serverMs : '',
+      (typeof r.networkMs === 'number') ? r.networkMs : '',
+      (typeof r.inFlightAtStart === 'number') ? r.inFlightAtStart : '',
+      (typeof r.msSincePrev === 'number') ? r.msSincePrev : '',
+      r.duplicateDetected ? 'Y' : '',
+      r.cached ? 'Y' : '',
+      (r.ok === false) ? 'N' : 'Y',
+      r.errorMsg ? String(r.errorMsg).slice(0, 500) : '',
+      (typeof r.bytes === 'number') ? r.bytes : '',
+      r.note ? String(r.note).slice(0, 200) : ''
+    ]);
+  }
+
+  // One setValues call — much cheaper than N appendRow calls. Append at
+  // the bottom so the tab stays chronological (oldest → newest).
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length)
+    .setValues(rows);
+
+  return jsonResponse_({ success: true, count: rows.length });
 }
 
 /**

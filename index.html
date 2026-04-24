@@ -2,11 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Budget Categorizer</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
-  <meta name="theme-color" content="#1a237e">
+  <meta name="theme-color" content="#FAFAF9">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/icon.svg">
@@ -15,111 +18,17 @@
   <header>
     <h1>Categorizer <span class="version" id="header-version">—</span></h1>
     <div class="header-actions">
-      <button id="sync-btn" disabled>Sync</button>
-      <button id="refresh-btn" title="Refresh">Refresh</button>
       <button id="settings-btn" title="Settings">Settings</button>
     </div>
   </header>
 
-  <main>
-    <!-- Config / Setup screen -->
-    <section id="config-section" hidden>
-      <h2>Setup</h2>
-      <p>Enter your API key to connect to your budget.</p>
-      <form id="config-form">
-        <label for="config-key">API Key</label>
-        <input type="text" id="config-key" placeholder="Your API key" required autocomplete="off">
-        <details class="advanced-config">
-          <summary>Advanced: custom API URL</summary>
-          <label for="config-url">API URL (optional override)</label>
-          <input type="url" id="config-url" placeholder="Leave blank to use default">
-        </details>
-        <button type="submit">Save</button>
-      </form>
+  <main id="view-root"></main>
 
-      <div id="version-info">
-        <h3>Version info</h3>
-        <div class="version-row">
-          <span class="version-label">PWA</span>
-          <span id="pwa-version-display">—</span>
-        </div>
-        <div class="version-row">
-          <span class="version-label">Apps Script</span>
-          <span id="as-version-display">—</span>
-        </div>
-        <div class="version-row" id="update-status-row" hidden>
-          <span class="version-label">Update needed</span>
-          <span id="update-status-display"></span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Main app -->
-    <section id="app-section" hidden>
-      <!-- Period filter (Phase 5): scope the txn list to a pay period.
-           Dropdown options are derived from the current uncategorized set —
-           periods with zero items don't appear. Defaults to current period
-           if it has txns, otherwise "All". -->
-      <div id="period-filter-bar">
-        <label for="period-filter">Period:</label>
-        <select id="period-filter" aria-label="Filter transactions by pay period"></select>
-      </div>
-
-      <div id="transaction-list"></div>
-
-      <!-- Shown when the selected period has 0 txns but other periods do. -->
-      <div id="period-empty-state" hidden>
-        <p>No uncategorized transactions in this period.</p>
-        <p class="hint">Pick a different period above, or choose "All".</p>
-      </div>
-
-      <div id="category-picker" hidden>
-        <div id="category-picker-header">
-          <span id="selected-merchant"></span>
-          <button id="cancel-pick">Cancel</button>
-        </div>
-        <div id="category-buttons"></div>
-        <button id="add-cat-btn" class="add-cat-trigger">+ Add Category</button>
-      </div>
-
-      <!-- Add Category modal -->
-      <div id="add-cat-modal" hidden>
-        <div class="modal-overlay"></div>
-        <div class="modal-content">
-          <h3>Add Category</h3>
-          <label for="main-cat-select">Main Category</label>
-          <select id="main-cat-select">
-            <option value="" disabled selected>Select...</option>
-          </select>
-          <div id="new-main-group" hidden>
-            <label for="new-main-input">New Main Category</label>
-            <input type="text" id="new-main-input" placeholder="e.g. Savings">
-          </div>
-          <label for="sub-cat-input">Sub Category</label>
-          <input type="text" id="sub-cat-input" placeholder="e.g. Dining Out">
-          <div class="modal-actions">
-            <button id="cancel-add-cat" type="button">Cancel</button>
-            <button id="save-add-cat" type="button">Save</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <div id="loading" hidden>
-      <div class="spinner"></div>
-      <span>Loading...</span>
-    </div>
-
-    <div id="empty-state" hidden>
-      <p>No pending transactions.</p>
-      <button id="empty-refresh-btn">Refresh</button>
-    </div>
-  </main>
-
-  <div id="undo-bar" hidden>
-    <span id="undo-text"></span>
-    <button id="undo-btn">UNDO</button>
-  </div>
+  <nav id="tab-bar">
+    <a href="#/categorize" class="tab">Categorize</a>
+    <a href="#/dashboard" class="tab">Dashboard</a>
+    <a href="#/setup" class="tab">Settings</a>
+  </nav>
 
   <div id="error-toast" hidden></div>
 

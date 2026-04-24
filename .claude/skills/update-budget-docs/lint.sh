@@ -119,7 +119,7 @@ fi
 # Check ordering: phases in "Phases — Completed" should be ascending by NUMBER.
 # Sub-phases (13a, 13b, 13c) can interleave with each other under the same
 # number but 14 should come after 13x.
-awk '/^## Phases — Completed/,/^## Phases — Future/' docs/task_plan.md | \
+awk '/^## Phases — Completed/,/^## Phases — (In Progress|Future)/' docs/task_plan.md | \
   grep -E "^### Phase [0-9]+" | \
   sed -E "s/^### Phase ([0-9]+)[a-z]?.*/\1/" > /tmp/phase_order_$$.txt
 
@@ -322,6 +322,47 @@ if [ -n "$TABS_LINE" ]; then
   if echo "$TABS_LINE" | grep -q "Pending"; then
     warning "CLAUDE.md 'Tabs in this sheet' line mentions 'Pending' — that tab was removed in v11.0"
   fi
+fi
+
+# ===========================================================
+# Check 9: CLAUDE.md trip-up list has no duplicate numbers
+# ===========================================================
+section "Check 9: CLAUDE.md trip-up numbering"
+
+# Extract "^N. **" pattern (numbered list items in CLAUDE.md that look like
+# trip-ups — they start with a number, period, bold text). Only check within
+# the "Things that will trip you up" section.
+awk '/^## Things that will trip you up/,/^## When in doubt/' CLAUDE.md | \
+  grep -E "^[0-9]+\. \*\*" | \
+  sed -E 's/^([0-9]+)\..*/\1/' > /tmp/tripups_$$.txt
+
+DUPS=$(sort /tmp/tripups_$$.txt | uniq -d)
+TOTAL=$(wc -l < /tmp/tripups_$$.txt | tr -d '[:space:]')
+
+if [ -n "$DUPS" ]; then
+  for n in $DUPS; do
+    blocking "Duplicate trip-up number #$n in CLAUDE.md (appears more than once in the numbered list)"
+  done
+else
+  echo "  ✓ No duplicate trip-up numbers ($TOTAL items)"
+fi
+
+# Also check ascending order: trip-ups should be in increasing numeric order.
+# This catches "16, 17, 18, ..., 16, 17, 18" drift where a new Claude
+# appended numbers that already existed earlier in the list.
+prev=0
+out_of_order=0
+while IFS= read -r n; do
+  if [ "$n" -lt "$prev" ]; then
+    out_of_order=1
+    break
+  fi
+  prev=$n
+done < /tmp/tripups_$$.txt
+rm -f /tmp/tripups_$$.txt
+
+if [ "$out_of_order" -eq 1 ]; then
+  warning "CLAUDE.md trip-ups are not in ascending numeric order (look for misnumbered appends)"
 fi
 
 # ===========================================================
