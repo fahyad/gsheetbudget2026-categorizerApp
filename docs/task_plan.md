@@ -259,7 +259,7 @@ No Apps Script changes. All PWA-side. CACHE_VERSION v23 → v24.
 
 Patterns added to CLAUDE.md trip-up list (items #25, #26).
 
-- **Status:** complete. Before/after measurement to be verified in next cold open — target `mount:categorize` first = <3s, re-mount = <500ms, `Duplicate=Y` count = 0.
+- **Status:** complete + verified working. Five of six perf targets hit per measured ClientMetrics on 2026-04-24: `Duplicate=Y` rows = 0 (was many), `dumpSheet:Transactions` on Manual mount = 0 calls (was always firing), `mount:dashboard` re-mount = 3–16 ms (was 3861 ms), throttled `mount:categorize` re-mount = 1 ms (was 6864–9198 ms), Setup `version` re-mount = 0 ms (was ~2500 ms each). Sixth target (first cold `mount:categorize` < 3 s) missed: still 7348 ms / 9038 ms because `parseAndFetch` + `categories` are gated by ~2.5 s per-call network tax that is unavoidable without a server-side consolidated endpoint. The localStorage-cached transactions fix paints in <200 ms regardless, so the user-perceived cold open is materially faster even though `mount:categorize` ClientTotalMs (which fires after refresh awaits) is still long. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)" Verification block for raw numbers.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 

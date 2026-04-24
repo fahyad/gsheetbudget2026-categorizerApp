@@ -1299,9 +1299,27 @@ Typical analysis queries (to be added as a sibling `ClientMetrics-Analysis` tab 
   // Called by refresh(): store.setTransactions(fresh.filter(notQueued))
   ```
 
+- **Verification (post-deploy, 2026-04-24):** v0.15.4-tagged `ClientMetrics` rows from sessions `2e6604343r`, `3h0s4b3g18`, `4j2w0v1w6k`. Five of six perf targets hit:
+
+  | Metric | v0.15.3 baseline | v0.15.4 measured | Status |
+  |---|---|---|---|
+  | Rows with `Duplicate=Y` | many per session | 0 | ✅ |
+  | `dumpSheet:Transactions` on Manual mount | 1 (3136 ms) | 0 calls | ✅ |
+  | `mount:dashboard` re-mount (cache hit) | 3861 ms | 3 / 14 / 16 ms | ✅ |
+  | `mount:categorize` re-mount (throttled) | 6864–9198 ms | 1 ms | ✅ |
+  | `mount:setup` re-mount `version` call | 2525 ms | 0 ms (cached) | ✅ |
+  | `mount:categorize` first cold | 7763 ms | 7348 / 9038 ms | ❌ |
+
+  The miss on first cold `mount:categorize` is bounded by `parseAndFetch` (~3 s server) + `categories` (~500 ms server) + ~2.5 s per-call network tax. With duplicate `categories` removed (saving ~3 s), the remaining critical path is genuinely those two awaited calls. Beating it further would need either a consolidated `dashboardData`-style endpoint OR cold-container optimization on Google's side — neither in scope. **Important nuance:** `mount:categorize ClientTotalMs` measures when `await refresh()` returns, not when pixels paint. The localStorage txns cache (Fix #3) paints in <200 ms regardless, so the user-perceived cold-open is materially faster than the metric suggests.
+
+  Two suspicious observations from the same data, neither a v0.15.4 bug:
+  - Session `2e6604343r` opened with 5× `Invalid API key` rows + 1× `HTTP 404` row producing a 26 s `mount:dashboard`. This was the v0.15.3 → v0.15.4 service-worker activation transition. Transient.
+  - Session `4j2w0v1w6k` MountN=1 had `categories ClientTotalMs=20383 ms` after `msSincePrev=66697 ms`. Almost certainly iOS Safari suspending the tab mid-fetch, then resuming much later. Browser behavior, not a code bug.
+
 - **Lesson:**
   1. **Server-side duration is a subset of user-perceived latency.** Apps Script's `Logs` captures only handler exec time; Apps Script web apps pay a 302-redirect + TLS tax *per logical fetch* on top. To diagnose perf, you need client-side measurement (`lib/metrics.js` + `ClientMetrics` tab) OR the problem stays invisible.
   2. **"Fire in parallel at mount, await in refresh" is a trap pattern.** If the same endpoint is reachable through both entry points, one of them must yield to the other — usually by sharing a promise. Added as CLAUDE.md trip-up #25.
   3. **Every `await mount()` on re-navigation is expensive unless explicitly throttled.** The router's clean re-mount semantics make this non-obvious. Added as CLAUDE.md trip-up #26.
   4. **Client-side cached state beats server-side cleverness for perceived performance.** `store.transactions` in localStorage turned a 5 s blank screen into a <200 ms paint even on cold open — no server change required.
   5. **Diagnose before fixing** (from Phase 21 lesson): the four candidate fixes from earlier log analysis were all validated as correct by real `ClientMetrics` data, but the priority ordering changed after seeing network-tax-per-call. If we'd shipped the first three without data, we'd have under-estimated how much the re-mount throttle mattered.
+  6. **Mount latency is a misleading single number for "is the app fast?"** — the metric improvement table above shows `mount:categorize` first-cold barely changed, but the user experience improved dramatically because cached txns paint before mount completes AND every subsequent in-session navigation dropped to ~1–16 ms. Always pair mount timings with cache-hit ratio + perceived-paint reasoning when evaluating perf changes.

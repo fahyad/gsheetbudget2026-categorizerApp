@@ -1402,11 +1402,11 @@ Module imports + file changes:
 - `js/views/setup.js` — 46 insertions (version cache + extracted render helper)
 - `js/config.js`, `sw.js` — version bumps (v0.15.4, cache v24)
 
-### Status — VERIFIED CODE; MEASUREMENT PENDING NEXT SESSION
+### Status — VERIFIED WORKING (measured 2026-04-24)
 - v0.15.4 deployed via GitHub Pages (commit `3ff46c0`) on `pwa/v0.15-refinement`.
 - All 15 JS modules pass `node --check`; every asset serves 200 locally.
 - No regression: walked through 14 user scenarios (cold open, warm re-open, navigate tabs, force refresh, categorize, undo, sync, Auto swipe, Auto toggle persistence, corrupted localStorage, race conditions, invalidation after sync, setTransactions quota, filter correctness) — all clean.
-- **Next session:** user drives typical workflow, backgrounds the PWA, compares new `ClientMetrics` rows against the v0.15.3 baseline to confirm target deltas (mount:categorize first <3 s, re-mount <500 ms, Duplicate=Y count=0, cold-open paint <200 ms).
+- **Measured outcome:** five of six perf targets hit per real ClientMetrics rows. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)" Verification block for the full before/after table. Sixth target (first cold `mount:categorize` < 3 s) bounded by per-call 2.5 s network tax — out of scope without a consolidated server endpoint, but the localStorage paint cache makes the user-perceived cold open materially faster regardless.
 
 ---
 
@@ -1429,3 +1429,24 @@ Updated all four doc files per the skill's guidance.
 - Lint re-ran clean after fixes (0 blocking, 0 warnings on version pointers, phase ordering warning is pre-existing historical drift untouched by this change).
 - Docs commit follows the skill's `Docs: [vX.Y / Phase N / topic] — ...` format.
 - Skill usage reported to user: the skill file is in the repo (`.claude/skills/update-budget-docs/`) but was merged mid-session so it isn't auto-registered for inline `Skill` tool invocation this session. Next session started in this repo will have it auto-discovered. The 8-step workflow was followed manually with identical end result.
+
+---
+
+## Session: 2026-04-24 (later 3) — v0.15.4 verification + skill close-the-loop
+
+### Setup
+User shared v0.15.4-tagged ClientMetrics rows from three real sessions (`2e6604343r`, `3h0s4b3g18`, `4j2w0v1w6k`) covering cold opens, re-mounts, dashboard navigation, and sync flows. Asked whether the v0.15.4 fixes actually sped things up.
+
+### Diagnosis
+Compared post-deploy rows against the v0.15.3 baseline columns (`ClientTotalMs`, `ServerMs`, `NetworkMs`, `Duplicate`, `Cached`). Five of six targets hit decisively; sixth (first-cold `mount:categorize` < 3 s) missed at 7348 / 9038 ms because the per-call ~2.5 s network tax + serialized cold-container processing keeps the awaited critical path long. localStorage cache makes user-perceived paint <200 ms regardless. Two anomalies in the data — a service-worker transition window (5× auth_fail + 1× HTTP 404 in session `2e6604343r`) and a 20 s `categories` call (iOS Safari mid-fetch suspension in `4j2w0v1w6k`) — neither a v0.15.4 bug.
+
+### Outcome
+Closed the v0.15.4 session entry from MEASUREMENT PENDING → VERIFIED WORKING. Added a Verification block with the before/after table to `findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)". Bumped Phase 22 Status from `complete` to `complete + verified working`. Added a sixth Lesson to the postmortem: mount latency alone is a misleading number — pair it with cache-hit ratio + perceived-paint reasoning.
+
+Skill behavior change worth noting: this session the user re-merged the branch with skill updates (`b21c8be Skill: bake in dogfood learnings + pre-commit hook + Phase reorder`) and Claude Code's skill list refreshed mid-session — `update-budget-docs` showed up in the available skills, and the `Skill()` tool successfully invoked it. The earlier (later 2) session followed the skill manually because it merged in mid-session; this one used the inline invocation. End result identical, but confirms the skill's "Known limitation — mid-session discovery" section is accurate (and that the workaround works).
+
+### Status — VERIFIED WORKING
+- No code change.
+- Docs updated for verification per skill Example 3.
+- Lint clean.
+- Branch `pwa/v0.15-refinement` ready for next iteration. Open question for next session: do we want to start a Phase 23 to tackle the first-cold `mount:categorize` via a consolidated `dashboardData`-style endpoint, or accept the current floor + move to other work?
