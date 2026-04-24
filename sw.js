@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v22';
+const CACHE_VERSION = 'v23';
 const CACHE_NAME = 'budget-categorizer-' + CACHE_VERSION;
 
 // Precached on install. Views (js/views/*) and lib (js/lib/*) are NOT

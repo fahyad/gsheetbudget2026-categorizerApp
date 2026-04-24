@@ -10,6 +10,7 @@
 // getDashboardData({ forceRefresh }) on mount; forceRefresh is the ⟳ btn.
 
 import * as api from '../api.js';
+import { recordEvent } from './metrics.js';
 
 const CACHE_KEY = 'budget_dashboard_cache';
 const FETCHED_AT_KEY = 'budget_dashboard_fetched_at';
@@ -167,9 +168,11 @@ export async function getDashboardData({ forceRefresh = false } = {}) {
   if (!forceRefresh) {
     const cached = readCache();
     if (cached && Date.now() - cached.fetchedAt < TTL_MS) {
+      recordEvent('cache-hit:dashboard', { cached: true, note: 'ageMs=' + (Date.now() - cached.fetchedAt) });
       return { data: cached.data, fetchedAt: cached.fetchedAt, fromCache: true };
     }
   }
+  recordEvent('cache-miss:dashboard', { cached: false, note: forceRefresh ? 'forceRefresh' : 'stale-or-empty' });
   try {
     const data = await fetchFresh();
     const fetchedAt = writeCache(data);

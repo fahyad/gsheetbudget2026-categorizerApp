@@ -13,6 +13,7 @@
 //     future "see what I'd suggest for this merchant" debug panel).
 
 import * as api from '../api.js';
+import { recordEvent } from './metrics.js';
 
 const INDEX_KEY = 'budget_suggest_index';
 const FETCHED_AT_KEY = 'budget_suggest_fetched_at';
@@ -117,14 +118,22 @@ function buildIndex(rows) {
  * one network request.
  */
 export async function ensureIndexReady() {
-  if (indexCache) return indexCache;
-  if (ensurePromise) return ensurePromise;
+  if (indexCache) {
+    recordEvent('cache-hit:suggest', { cached: true, note: 'memory' });
+    return indexCache;
+  }
+  if (ensurePromise) {
+    recordEvent('cache-hit:suggest', { cached: true, note: 'in-flight-dedup' });
+    return ensurePromise;
+  }
 
   const cached = readCache();
   if (cached) {
     indexCache = cached;
+    recordEvent('cache-hit:suggest', { cached: true, note: 'localStorage' });
     return indexCache;
   }
+  recordEvent('cache-miss:suggest', { cached: false });
 
   ensurePromise = (async () => {
     try {

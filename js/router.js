@@ -4,9 +4,11 @@
 //
 // The shell passes a root element; the router clears it and hands it to
 // the active view. Views own their DOM subtree. The router also owns
-// tab-bar chrome (active class + pending-count badge on Categorize).
+// tab-bar chrome (active class + pending-count badge on Categorize) and
+// records per-view mount timings for the diagnostics log.
 
 import { store } from './store.js';
+import { noteMount, recordEvent } from './lib/metrics.js';
 
 const routes = {
   '#/categorize': () => import('./views/categorize.js'),
@@ -61,12 +63,22 @@ async function mountFromHash() {
   updateTabBar(hash);
   updateCategorizeBadge();
 
+  noteMount();
+  const t0 = performance.now();
   const mod = await routes[hash]();
+  const tImported = performance.now();
+
   currentView = mod.default;
   try {
     await currentView.mount(rootEl);
+    const tMounted = performance.now();
+    recordEvent('mount:' + hash.replace('#/', ''), {
+      clientTotalMs: tMounted - t0,
+      note: 'import=' + Math.round(tImported - t0) + 'ms,mount=' + Math.round(tMounted - tImported) + 'ms',
+    });
   } catch (e) {
     console.error('mount failed', e);
+    recordEvent('mount:' + hash.replace('#/', ''), { ok: false, errorMsg: e?.message || String(e) });
     rootEl.innerHTML = '<div style="padding:24px;color:#c62828">Failed to load view: ' + (e && e.message || e) + '</div>';
   }
 }
