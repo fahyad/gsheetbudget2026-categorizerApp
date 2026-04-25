@@ -35,7 +35,7 @@
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
 var APP_SCRIPT_VERSION = 'v11.14';
-var APP_SCRIPT_LAST_EDITED = '2026-04-25 00:00 UTC';
+var APP_SCRIPT_LAST_EDITED = '2026-04-25 17:37 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
