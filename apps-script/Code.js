@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.13';
-var APP_SCRIPT_LAST_EDITED = '2026-04-24 01:13 UTC';
+var APP_SCRIPT_VERSION = 'v11.14';
+var APP_SCRIPT_LAST_EDITED = '2026-04-25 00:00 UTC';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -87,6 +87,8 @@ function routeAction_(action, params) {
   if (action === 'dumpSheet')        return handleDumpSheet_(params);
   if (action === 'version')          return handleVersion_(params);
   if (action === 'logClientMetrics') return handleLogClientMetrics_(params);
+  if (action === 'archiveGoal')      return handleArchiveGoal_(params);
+  if (action === 'unarchiveGoal')    return handleUnarchiveGoal_(params);
   return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
 }
 
@@ -244,10 +246,14 @@ function handleCategories_() {
     return jsonResponse_({ success: false, error: 'Setup tab not found' });
   }
 
-  var catRaw = setup.getRange('D2:E100').getValues();
+  // v11.14: read D:F instead of D:E. Col F = Archived? checkbox. Archived
+  // categories are excluded from the PWA dropdown but stay in Setup and
+  // Budget tabs so historical data + rebuilds keep working.
+  var catRaw = setup.getRange('D2:F100').getValues();
   var categories = [];
   for (var c = 0; c < catRaw.length; c++) {
-    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income') {
+    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income'
+        && catRaw[c][2] !== true) {
       categories.push({ main: catRaw[c][0], sub: catRaw[c][1] });
     }
   }
@@ -1052,6 +1058,170 @@ function handleLogClientMetrics_(params) {
   return jsonResponse_({ success: true, count: rows.length });
 }
 
+// ================================================================
+// GOAL ARCHIVE (v11.14)
+// ================================================================
+//
+// archiveGoal: marks a Saving tab row as Achieved or Cancelled, and (when
+// safe) archives the linked sub-category in Setup so it disappears from
+// the PWA categorize dropdown.
+//
+// "When safe" = no OTHER active Saving row links to the same sub-category.
+// E.g., if both "Banff Trip" and "Europe Trip" link to "Travel" and only
+// Banff is being archived, leave Setup's "Travel" archived flag = FALSE
+// because Europe still needs it active.
+//
+// Body shape: { goalName: string, status: 'Achieved' | 'Cancelled' }
+function handleArchiveGoal_(body) {
+  var goalName = (body && body.goalName ? String(body.goalName) : '').trim();
+  var status = (body && body.status ? String(body.status) : 'Achieved').trim();
+
+  if (!goalName) {
+    return jsonResponse_({ success: false, error: 'goalName is required' });
+  }
+  if (status !== 'Achieved' && status !== 'Cancelled') {
+    return jsonResponse_({ success: false, error: 'status must be Achieved or Cancelled' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var saving = ss.getSheetByName('Saving');
+    var setup = ss.getSheetByName('Setup');
+    if (!saving || !setup) {
+      return jsonResponse_({ success: false, error: 'Saving or Setup tab not found' });
+    }
+
+    // Read all goal rows once: A=name, B=linkedCategory, J=status (col 10).
+    // Rows 6..SAVING_MAX_GOAL_ROW (105) — that's 100 rows of 10 cols.
+    var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+    var foundIdx = -1;
+    var linkedCategory = '';
+    for (var r = 0; r < goalRows.length; r++) {
+      var name = String(goalRows[r][0] || '').trim();
+      if (name === goalName) {
+        foundIdx = r;
+        linkedCategory = String(goalRows[r][1] || '').trim();
+        break;
+      }
+    }
+    if (foundIdx === -1) {
+      return jsonResponse_({ success: false, error: 'Goal not found: ' + goalName });
+    }
+
+    // Write status to col J of the matched row.
+    saving.getRange(foundIdx + 6, 10).setValue(status);
+
+    // Decide whether to archive the linked sub-category in Setup col F.
+    // Skip if linkedCategory is empty, or if any OTHER active goal links to it.
+    var categoryArchived = false;
+    if (linkedCategory) {
+      var hasOtherActive = false;
+      for (var r2 = 0; r2 < goalRows.length; r2++) {
+        if (r2 === foundIdx) continue;
+        var otherName = String(goalRows[r2][0] || '').trim();
+        if (!otherName) continue;
+        var otherLinked = String(goalRows[r2][1] || '').trim();
+        var otherStatus = String(goalRows[r2][9] || '').trim();
+        var otherIsActive = (otherStatus === '' || otherStatus === 'Active');
+        if (otherLinked === linkedCategory && otherIsActive) {
+          hasOtherActive = true;
+          break;
+        }
+      }
+
+      if (!hasOtherActive) {
+        var setupRows = setup.getRange('D2:F100').getValues();
+        for (var s = 0; s < setupRows.length; s++) {
+          var sub = String(setupRows[s][1] || '').trim();
+          if (sub === linkedCategory) {
+            setup.getRange(s + 2, 6).setValue(true);
+            categoryArchived = true;
+            break;
+          }
+        }
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      goal: { name: goalName, linkedCategory: linkedCategory, status: status },
+      categoryArchived: categoryArchived
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// unarchiveGoal: reverse archiveGoal. Sets Saving row status to Active and
+// clears the linked sub-category's Setup col F. Permissive — clears the
+// flag regardless of other goals.
+//
+// Body shape: { goalName: string }
+function handleUnarchiveGoal_(body) {
+  var goalName = (body && body.goalName ? String(body.goalName) : '').trim();
+  if (!goalName) {
+    return jsonResponse_({ success: false, error: 'goalName is required' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var saving = ss.getSheetByName('Saving');
+    var setup = ss.getSheetByName('Setup');
+    if (!saving || !setup) {
+      return jsonResponse_({ success: false, error: 'Saving or Setup tab not found' });
+    }
+
+    var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+    var foundIdx = -1;
+    var linkedCategory = '';
+    for (var r = 0; r < goalRows.length; r++) {
+      var name = String(goalRows[r][0] || '').trim();
+      if (name === goalName) {
+        foundIdx = r;
+        linkedCategory = String(goalRows[r][1] || '').trim();
+        break;
+      }
+    }
+    if (foundIdx === -1) {
+      return jsonResponse_({ success: false, error: 'Goal not found: ' + goalName });
+    }
+
+    saving.getRange(foundIdx + 6, 10).setValue('Active');
+
+    var categoryUnarchived = false;
+    if (linkedCategory) {
+      var setupRows = setup.getRange('D2:F100').getValues();
+      for (var s = 0; s < setupRows.length; s++) {
+        var sub = String(setupRows[s][1] || '').trim();
+        if (sub === linkedCategory) {
+          setup.getRange(s + 2, 6).setValue(false);
+          categoryUnarchived = true;
+          break;
+        }
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      goal: { name: goalName, linkedCategory: linkedCategory, status: 'Active' },
+      categoryUnarchived: categoryUnarchived
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /**
  * Inserts an activity log entry at row 2 (newest first). Also mirrors to
  * console.log/warn/error for Cloud Logging visibility (Apps Script → Executions).
@@ -1168,6 +1338,20 @@ function summarizeResult_(action, parsed) {
       if (parsed.category) {
         return parsed.category.main + ' > ' + parsed.category.sub +
           ', +' + (parsed.budgetRowsAdded || 0) + ' budget rows';
+      }
+      return '';
+    }
+    if (action === 'archiveGoal') {
+      if (parsed.goal) {
+        return parsed.goal.name + ' → ' + parsed.goal.status +
+          (parsed.categoryArchived ? ' (cat archived: ' + parsed.goal.linkedCategory + ')' : '');
+      }
+      return '';
+    }
+    if (action === 'unarchiveGoal') {
+      if (parsed.goal) {
+        return parsed.goal.name + ' → Active' +
+          (parsed.categoryUnarchived ? ' (cat unarchived: ' + parsed.goal.linkedCategory + ')' : '');
       }
       return '';
     }
@@ -1678,9 +1862,19 @@ function buildWorkbook() {
     payDates.push(new Date(payDateArrays[p][0], payDateArrays[p][1], payDateArrays[p][2]));
   }
 
-  setup.getRange('A1:E1')
-    .setValues([['Period Start', 'Period End', 'Period Label', 'Main Category', 'Sub Category']])
+  // v11.14: extended to A1:F1 — col F holds the Archived? checkbox per
+  // sub-category. Archived rows are filtered from PWA dropdown but kept
+  // in Setup so historical Budget rebuilds preserve their data.
+  setup.getRange('A1:F1')
+    .setValues([['Period Start', 'Period End', 'Period Label', 'Main Category', 'Sub Category', 'Archived?']])
     .setFontWeight('bold').setBackground(HDR_BG);
+
+  // Apply checkbox validation to col F for the full sub-category range.
+  var archivedRule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .setAllowInvalid(false)
+    .build();
+  setup.getRange('F2:F100').setDataValidation(archivedRule);
 
   var periodValues = [];
   for (var i = 0; i < 26; i++) {
@@ -1824,6 +2018,19 @@ function updateWorkbook() {
   if (trimmedCount > 0) {
     console.log('cleanupSetupWhitespace_: trimmed ' + trimmedCount + ' Setup category cell(s)');
   }
+
+  // --- v11.14: ensure Setup col F (Archived?) header + checkbox validation ---
+  // Idempotent — running on a sheet that already has it just re-applies the
+  // same value/validation. Existing checkbox state is preserved (we only
+  // touch the header cell + validation rule, not the data cells).
+  if (setup.getRange('F1').getValue() !== 'Archived?') {
+    setup.getRange('F1').setValue('Archived?').setFontWeight('bold').setBackground(HDR_BG);
+  }
+  var archivedCheckboxRule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .setAllowInvalid(false)
+    .build();
+  setup.getRange('F2:F100').setDataValidation(archivedCheckboxRule);
 
   // (v11.0: Pending tab is no longer created or maintained. Use
   // "Migrate from Pending (one-time)" menu item to migrate existing data.)
@@ -2215,9 +2422,9 @@ function buildSavingTab_(saving, ss) {
   saving.clear();
   saving.setTabColor('#a4c2f4'); // light blue
 
-  // Hide unused columns past I.
-  if (saving.getMaxColumns() > 9) {
-    saving.hideColumns(10, saving.getMaxColumns() - 9);
+  // Hide unused columns past J (v11.14: added Status column).
+  if (saving.getMaxColumns() > 10) {
+    saving.hideColumns(11, saving.getMaxColumns() - 10);
   }
 
   // Column widths.
@@ -2226,10 +2433,11 @@ function buildSavingTab_(saving, ss) {
   saving.setColumnWidth(3, 110); // C: Target Amount
   saving.setColumnWidth(4, 130); // D: Target Period
   saving.setColumnWidth(5, 130); // E: Currently Saved
-  saving.setColumnWidth(6, 100); // F: Periods Remaining
-  saving.setColumnWidth(7, 130); // G: Per-Period Need
-  saving.setColumnWidth(8, 120); // H: On Track?
-  saving.setColumnWidth(9, 250); // I: Notes
+  saving.setColumnWidth(6, 130); // F: Allocated This Period
+  saving.setColumnWidth(7, 110); // G: Periods Remaining
+  saving.setColumnWidth(8, 140); // H: Needed Future Periods
+  saving.setColumnWidth(9, 220); // I: Notes
+  saving.setColumnWidth(10, 110); // J: Status (v11.14)
 
   applySavingStructure_(saving, ss);
 
@@ -2245,7 +2453,8 @@ function buildSavingTab_(saving, ss) {
 function refreshSavingTab_(saving, ss) {
   // Don't clear — we'd nuke user goals. Just re-apply structure.
   // Existing formulas in E-H get overwritten, but they're identical to
-  // what they were, so net no effect.
+  // what they were, so net no effect. v11.14: col J Status user-entered,
+  // preserved across refresh (we never write into J6+).
   applySavingStructure_(saving, ss);
 
   // Ensure column widths (in case user resized).
@@ -2254,10 +2463,11 @@ function refreshSavingTab_(saving, ss) {
   saving.setColumnWidth(3, 110);
   saving.setColumnWidth(4, 130);
   saving.setColumnWidth(5, 130);
-  saving.setColumnWidth(6, 100);
-  saving.setColumnWidth(7, 130);
-  saving.setColumnWidth(8, 120);
-  saving.setColumnWidth(9, 250);
+  saving.setColumnWidth(6, 130);
+  saving.setColumnWidth(7, 110);
+  saving.setColumnWidth(8, 140);
+  saving.setColumnWidth(9, 220);
+  saving.setColumnWidth(10, 110); // v11.14: Status
 
   saving.setFrozenRows(5);
 
@@ -2272,7 +2482,11 @@ function refreshSavingTab_(saving, ss) {
  */
 function applySavingStructure_(saving, ss) {
   // --- Row 1: title bar ---
-  var titleRange = saving.getRange('A1:I1');
+  // v11.14: widened to A1:J1 for the new Status column.
+  // Unmerge first in case the previous schema's A1:I1 merge is still present —
+  // re-merging across a different range without unmerging throws.
+  var titleRange = saving.getRange('A1:J1');
+  try { titleRange.breakApart(); } catch (e) { /* nothing to unmerge */ }
   saving.getRange('A1').setValue('SAVING GOALS — ' + BUDGET_YEAR + ' BUDGET YEAR');
   titleRange.merge()
     .setBackground(SAVING_TITLE_BG)
@@ -2294,8 +2508,8 @@ function applySavingStructure_(saving, ss) {
     .setFontWeight('bold')
     .setFontColor('#1a237e')
     .setHorizontalAlignment('center');
-  // Cols G-I in row 2 are blank — make them visually unobtrusive.
-  saving.getRange('G2:I2').setBackground('#fafafa');
+  // Cols G-J in row 2 are blank — make them visually unobtrusive.
+  saving.getRange('G2:J2').setBackground('#fafafa');
 
   // --- Row 3: dashboard values ---
   // B3 (Current Period) is the helper cell referenced by all per-row
@@ -2322,21 +2536,40 @@ function applySavingStructure_(saving, ss) {
         'INDEX(PayPeriods_Label,MATCH(TODAY(),PayPeriods_Start,1))),' +
       '"(out of range)")'
   );
-  saving.getRange('C3').setFormula('=COUNTA(A6:A' + lastGoalRow + ')');
-  // D3 now = Currently Saved total (sum of col E). Previously was
-  // Per-Period Need total from col G — column G is now Periods Remaining.
-  saving.getRange('D3').setFormula('=SUM(E6:E' + lastGoalRow + ')');
-  // E3 now = Needed Future total (sum of col H). Previously was
-  // Currently Saved — now rendered in D3 instead.
-  saving.getRange('E3').setFormula('=SUM(H6:H' + lastGoalRow + ')');
-  saving.getRange('F3').setFormula('=SUM(C6:C' + lastGoalRow + ')');
+  // v11.14: dashboard sums filter out Achieved + Cancelled goals.
+  // Empty Status (existing rows pre-v11.14) counts as Active by virtue of
+  // the COUNTIFS/SUMIFS "<>Achieved" + "<>Cancelled" filter — backward-compat.
+  // Filter range: J6:J<lastGoalRow>.
+  saving.getRange('C3').setFormula(
+    '=COUNTIFS(A6:A' + lastGoalRow + ',"<>",' +
+                  'J6:J' + lastGoalRow + ',"<>Achieved",' +
+                  'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('D3').setFormula(
+    '=SUMIFS(E6:E' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('E3').setFormula(
+    '=SUMIFS(H6:H' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('F3').setFormula(
+    '=SUMIFS(C6:C' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
   saving.getRange('A3:F3').setHorizontalAlignment('center').setFontSize(11);
   saving.getRange('D3').setNumberFormat('$#,##0.00');
   saving.getRange('E3').setNumberFormat('$#,##0.00');
   saving.getRange('F3').setNumberFormat('$#,##0.00');
 
   // --- Row 4: separator (light gray bar) ---
-  saving.getRange('A4:I4').setBackground('#fafafa');
+  saving.getRange('A4:J4').setBackground('#fafafa');
   saving.setRowHeight(4, 8);
 
   // --- Row 5: column headers ---
@@ -2346,10 +2579,11 @@ function applySavingStructure_(saving, ss) {
   // convey the same information and stay stable when the user allocates
   // "the right amount" for the current period. Status indicator may return
   // as a dashboard feature later.
-  saving.getRange('A5:I5').setValues([[
+  // v11.14: added Status column (J).
+  saving.getRange('A5:J5').setValues([[
     'Goal Name', 'Linked Category', 'Target', 'Target Period',
     'Currently Saved', 'Allocated This Period', 'Periods Remaining',
-    'Needed Future Periods', 'Notes'
+    'Needed Future Periods', 'Notes', 'Status'
   ]])
     .setBackground(SAVING_HDR_BG)
     .setFontWeight('bold')
@@ -2425,26 +2659,50 @@ function applySavingStructure_(saving, ss) {
     saving.getRange('D6:D' + lastGoalRow).setDataValidation(periodRule);
   }
 
-  // --- Conditional formatting cleanup (v11.11) ---
-  // The previous On Track? column (column H, text values DONE/ON PACE/etc.)
-  // had 6 CF rules. Column H is now Needed Future Periods (currency), so
-  // those text-based rules are stale. Strip any rule that touches column H;
-  // no new CF added for v11.11 (status indicator may return on a future
-  // dashboard).
+  // --- v11.14: Col J Status dropdown ---
+  // Three states: Active (default; empty also = Active for backward compat),
+  // Achieved, Cancelled. Both non-Active values hide the goal from active
+  // dashboard sums + the PWA Goal cards but preserve the row for history.
+  // setAllowInvalid(true) so blank cells don't get flagged red — empty IS
+  // valid (treated as Active downstream).
+  var statusRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Active', 'Achieved', 'Cancelled'], true)
+    .setAllowInvalid(true)
+    .build();
+  saving.getRange('J6:J' + lastGoalRow).setDataValidation(statusRule);
+
+  // --- Conditional formatting (v11.14) ---
+  // 1. Strip any rule that touches col 8 (H, legacy On Track? column from
+  //    pre-v11.11) or col 10 (J, our own — re-applied each refresh).
+  // 2. Add a new rule that grays out + italicizes archived rows so they
+  //    visually fade compared to active goals. Rule formula uses $J6 with
+  //    relative row — when applied to range A6:J<last>, Sheets evaluates
+  //    per-row against that row's J cell.
   var allRules = saving.getConditionalFormatRules();
   var keepRules = [];
   for (var k = 0; k < allRules.length; k++) {
     var ranges = allRules[k].getRanges();
-    var touchesH = false;
+    var touchesHorJ = false;
     for (var rg = 0; rg < ranges.length; rg++) {
-      if (ranges[rg].getColumn() === 8) { touchesH = true; break; }
+      var col = ranges[rg].getColumn();
+      if (col === 8 || col === 10) { touchesHorJ = true; break; }
     }
-    if (!touchesH) keepRules.push(allRules[k]);
+    if (!touchesHorJ) keepRules.push(allRules[k]);
   }
+
+  var archivedCfRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=OR($J6="Achieved",$J6="Cancelled")')
+    .setBackground('#f1f3f4')
+    .setFontColor('#9aa0a6')
+    .setItalic(true)
+    .setRanges([saving.getRange('A6:J' + lastGoalRow)])
+    .build();
+  keepRules.push(archivedCfRule);
   saving.setConditionalFormatRules(keepRules);
 
   // --- Center-align select columns for visual consistency ---
   saving.getRange('C6:H' + lastGoalRow).setHorizontalAlignment('center');
+  saving.getRange('J6:J' + lastGoalRow).setHorizontalAlignment('center');
 }
 
 // ================================================================
