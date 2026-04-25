@@ -920,6 +920,103 @@ header h1,
   max-width: 60%;
 }
 
+/* v0.16: Goal action buttons (Achieved / Cancelled, in expanded card) */
+.goal-card.expanded .goal-details { max-height: 380px; }
+.goal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule);
+}
+.goal-action-btn {
+  flex: 1;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+.goal-action-btn:disabled { opacity: 0.4; cursor: wait; }
+.goal-action-btn:active:not(:disabled) { background: var(--bg-selected); }
+.goal-action-btn.achieved { border-color: #15803D; color: #15803D; }
+.goal-action-btn.cancelled { border-color: var(--muted); color: var(--muted); }
+.goal-action-btn.restore {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* v0.16: Archived goals section */
+.archived-section { margin-top: 12px; }
+.archived-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: transparent;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+}
+.archived-header .left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.archived-header .toggle-glyph {
+  width: 14px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--muted);
+}
+.archived-count {
+  font-size: 12px;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+.archived-goal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.archived-goal:last-child { border-bottom: none; }
+.archived-goal-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.archived-goal-name {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.archived-goal-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.archived-goal-status.achieved { color: #15803D; background: #dcfce7; }
+.archived-goal-status.cancelled { color: var(--muted-2); background: var(--rule); }
+
 /* ============================== SETUP ================================ */
 
 #config-section {

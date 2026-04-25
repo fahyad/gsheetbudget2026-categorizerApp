@@ -9,9 +9,10 @@
 //     and a 1px progress bar. Colors: black (positive), amber (zero), red (over).
 //   - Saving Goals section: one row per goal; tap to expand details.
 
-import { showError } from '../ui.js';
+import { showError, showSuccess } from '../ui.js';
 import { allPeriods, currentPeriod } from '../periods.js';
-import { getDashboardData, formatCurrency } from '../lib/budget.js';
+import { getDashboardData, formatCurrency, invalidateDashboardCache } from '../lib/budget.js';
+import { archiveGoal, unarchiveGoal } from '../api.js';
 
 const TEMPLATE = `
   <section id="dashboard-section">
@@ -32,7 +33,9 @@ let selectedPeriodIdx = null;    // number | null (null = sheet-current)
 let cachedData = null;
 let refreshInFlight = false;
 const expandedGroups = {};       // main name -> bool
-let expandedGoalIdx = null;      // which goal card is expanded
+let expandedGoalIdx = null;      // which active goal card is expanded
+let archivedSectionOpen = false; // v0.16: "Show archived" toggle state
+let goalActionInFlight = null;   // v0.16: name of goal currently archiving/unarchiving
 
 // DOM refs.
 let periodBarHost, body;
@@ -266,19 +269,30 @@ function renderBody() {
     body.appendChild(empty);
   }
 
-  // Goals
+  // Goals — v0.16: split active vs archived (Achieved/Cancelled). Archived
+  // goals are tucked behind a collapsible toggle so the main view stays
+  // focused on what's still being saved toward.
+  const activeGoals = goals.filter(g => g.status === 'Active');
+  const archivedGoals = goals.filter(g => g.status !== 'Active');
+
   const eyebrow = document.createElement('div');
   eyebrow.className = 'eyebrow';
   eyebrow.textContent = 'Saving Goals';
   body.appendChild(eyebrow);
 
-  if (goals.length === 0) {
+  if (activeGoals.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
-    empty.innerHTML = '<p>No saving goals yet.</p>';
+    empty.innerHTML = archivedGoals.length > 0
+      ? '<p>No active goals.</p>'
+      : '<p>No saving goals yet.</p>';
     body.appendChild(empty);
   } else {
-    goals.forEach((g, i) => body.appendChild(renderGoal(g, i)));
+    activeGoals.forEach((g, i) => body.appendChild(renderGoal(g, i)));
+  }
+
+  if (archivedGoals.length > 0) {
+    body.appendChild(renderArchivedSection(archivedGoals));
   }
 
   const tail = document.createElement('div');
@@ -390,7 +404,10 @@ function renderSub(c) {
 function renderGoal(g, idx) {
   const wrap = document.createElement('div');
   wrap.className = 'goal-card' + (expandedGoalIdx === idx ? ' expanded' : '');
-  wrap.addEventListener('click', () => {
+  wrap.addEventListener('click', (e) => {
+    // Don't toggle expansion if a goal-action button was the click target —
+    // the button's own handler runs to completion + re-renders.
+    if (e.target.closest('.goal-action-btn')) return;
     expandedGoalIdx = expandedGoalIdx === idx ? null : idx;
     renderBody();
   });
@@ -455,9 +472,140 @@ function renderGoal(g, idx) {
     r.classList.add('goal-notes');
     details.appendChild(r);
   }
+
+  // v0.16: action row for archive operations. Only renders inside the
+  // expanded card so it can't be hit by accident from the collapsed list.
+  const actions = document.createElement('div');
+  actions.className = 'goal-actions';
+  actions.appendChild(makeActionButton('Mark achieved', 'achieved', () => doArchive(g.name, 'Achieved')));
+  actions.appendChild(makeActionButton('Mark cancelled', 'cancelled', () => doArchive(g.name, 'Cancelled')));
+  details.appendChild(actions);
+
   wrap.appendChild(details);
 
   return wrap;
+}
+
+function makeActionButton(label, kind, onClick) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'goal-action-btn ' + kind;
+  btn.textContent = label;
+  btn.disabled = goalActionInFlight !== null;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+async function doArchive(goalName, status) {
+  const verb = status === 'Achieved' ? 'mark achieved' : 'mark cancelled';
+  if (!confirm(`${capitalize(verb)} "${goalName}"?\n\nThis hides the goal from the active list. The historical Budget rows and transactions are preserved. You can unarchive later.`)) return;
+  if (goalActionInFlight) return;
+
+  goalActionInFlight = goalName;
+  renderBody();
+  try {
+    const res = await archiveGoal(goalName, status);
+    invalidateDashboardCache();
+    expandedGoalIdx = null;
+    showSuccess(`Archived "${goalName}"${res.categoryArchived ? ` (category "${res.goal.linkedCategory}" hidden from dropdown)` : ''}`);
+    await load({ forceRefresh: true });
+  } catch (err) {
+    showError('Archive failed: ' + (err.message || String(err)));
+  } finally {
+    goalActionInFlight = null;
+    renderBody();
+  }
+}
+
+async function doUnarchive(goalName) {
+  if (!confirm(`Restore "${goalName}" to Active?`)) return;
+  if (goalActionInFlight) return;
+
+  goalActionInFlight = goalName;
+  renderBody();
+  try {
+    const res = await unarchiveGoal(goalName);
+    invalidateDashboardCache();
+    showSuccess(`Restored "${goalName}"${res.categoryUnarchived ? ` (category "${res.goal.linkedCategory}" back in dropdown)` : ''}`);
+    await load({ forceRefresh: true });
+  } catch (err) {
+    showError('Unarchive failed: ' + (err.message || String(err)));
+  } finally {
+    goalActionInFlight = null;
+    renderBody();
+  }
+}
+
+function capitalize(s) {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function renderArchivedSection(archivedGoals) {
+  const wrap = document.createElement('div');
+  wrap.className = 'archived-section';
+
+  const header = document.createElement('div');
+  header.className = 'archived-header';
+  header.addEventListener('click', () => {
+    archivedSectionOpen = !archivedSectionOpen;
+    renderBody();
+  });
+
+  const left = document.createElement('div');
+  left.className = 'left';
+  const glyph = document.createElement('span');
+  glyph.className = 'toggle-glyph';
+  glyph.textContent = archivedSectionOpen ? '−' : '+';
+  const lbl = document.createElement('span');
+  lbl.textContent = 'Archived';
+  left.appendChild(glyph);
+  left.appendChild(lbl);
+
+  const count = document.createElement('div');
+  count.className = 'archived-count';
+  count.textContent = `${archivedGoals.length} ${archivedGoals.length === 1 ? 'goal' : 'goals'}`;
+
+  header.appendChild(left);
+  header.appendChild(count);
+  wrap.appendChild(header);
+
+  if (archivedSectionOpen) {
+    archivedGoals.forEach(g => wrap.appendChild(renderArchivedGoal(g)));
+  }
+  return wrap;
+}
+
+function renderArchivedGoal(g) {
+  const row = document.createElement('div');
+  row.className = 'archived-goal';
+
+  const left = document.createElement('div');
+  left.className = 'archived-goal-left';
+  const name = document.createElement('span');
+  name.className = 'archived-goal-name';
+  name.textContent = g.name;
+  const status = document.createElement('span');
+  status.className = 'archived-goal-status ' + (g.status === 'Achieved' ? 'achieved' : 'cancelled');
+  status.textContent = g.status;
+  left.appendChild(name);
+  left.appendChild(status);
+
+  const restore = document.createElement('button');
+  restore.type = 'button';
+  restore.className = 'goal-action-btn restore';
+  restore.textContent = 'Restore';
+  restore.disabled = goalActionInFlight !== null;
+  restore.addEventListener('click', (e) => {
+    e.stopPropagation();
+    doUnarchive(g.name);
+  });
+
+  row.appendChild(left);
+  row.appendChild(restore);
+  return row;
 }
 
 function detailRow(label, value) {

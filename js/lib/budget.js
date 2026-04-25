@@ -18,7 +18,8 @@ const TTL_MS = 10 * 60 * 1000;
 
 // Layouts match apps-script/Code.js (rebuildBudgetInternal_ / rebuildSavingInternal_).
 const BUDGET_RANGE = 'A1:F215';
-const SAVING_RANGE = 'A1:I105';
+// v0.16: extended to col J for the new Status column (Apps Script v11.14).
+const SAVING_RANGE = 'A1:J105';
 
 const currencyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -132,10 +133,14 @@ function parseDashboard(budgetRows, savingRows) {
 
   const savingGoals = [];
   // Sheet rows 6+ (array index 5+) — name in col A; blank = empty slot.
+  // v0.16: row[9] is Status (col J). Empty/missing = Active (backward compat
+  // with rows created before v11.14 added the column).
   for (let i = 5; i < savingRows.length; i++) {
     const row = savingRows[i];
     const name = String(row[0] ?? '').trim();
     if (!name) continue;
+    const rawStatus = String(row[9] ?? '').trim();
+    const status = rawStatus || 'Active';
     savingGoals.push({
       name,
       linkedCategory: String(row[1] ?? '').trim(),
@@ -146,6 +151,7 @@ function parseDashboard(budgetRows, savingRows) {
       periodsRemaining: parseInt(row[6], 10) || 0,
       neededFuturePeriods: parseCurrency(row[7]),
       notes: String(row[8] ?? '').trim(),
+      status,
     });
   }
 

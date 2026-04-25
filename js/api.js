@@ -86,3 +86,15 @@ export async function dumpSheet(tab, range) {
   if (range) params.range = range;
   return request('dumpSheet:' + tab, buildUrl('dumpSheet', params));
 }
+
+// v0.16: archive a saving goal as Achieved or Cancelled. Server flips the
+// Saving row's Status column AND (when no other Active goal shares the
+// linkedCategory) flips Setup col F so the PWA dropdown hides it.
+export async function archiveGoal(goalName, status) {
+  return request('archiveGoal', buildUrl('archiveGoal', { goalName, status }));
+}
+
+// v0.16: reverse archiveGoal — Status=Active, Setup col F=FALSE permissively.
+export async function unarchiveGoal(goalName) {
+  return request('unarchiveGoal', buildUrl('unarchiveGoal', { goalName }));
+}
