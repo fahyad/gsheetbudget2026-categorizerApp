@@ -2,9 +2,9 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.13 — at `apps-script/Code.js`, deployed via `cd apps-script && ./deploy.sh "..."`. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.13 adds `_elapsedMs` echo + `logClientMetrics` endpoint + auto-created `ClientMetrics` tab.
+> **Apps Script:** v11.14 — at `apps-script/Code.js`, deployed @39 via `./deploy.sh` on 2026-04-25 17:37 MDT. NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.14 adds Setup col F (`Archived?` checkbox) + Saving col J (`Status` dropdown) + `archiveGoal`/`unarchiveGoal` endpoints + filtered dashboard SUMIFS/COUNTIFS. v11.13 (echoes `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) is the prior baseline.
 >
-> **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign + iOS safe-area fix + Savings/Goals dedup + client metrics pipeline. On branch `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). Neither has been merged to `main`. GitHub Pages currently serving from the active refinement branch for preview. `.nojekyll` at repo root is required — don't delete.
+> **PWA:** v0.16 (cache v25) — goal archive UI on top of v0.15.4's cold-start-optimized Minimal Monochrome shell. Active vs archived split, Mark achieved / Mark cancelled / Restore buttons, archived-collapsible at bottom. Branch `pwa/v0.16-goal-archive` (off `main`, which carries v0.15.4 + v11.13). PR [#3](https://github.com/fahyad/gsheetbudget2026-categorizerApp/pull/3) open. Pages source needs to be flipped to this branch for preview, or wait for merge to main.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -1450,3 +1450,83 @@ Skill behavior change worth noting: this session the user re-merged the branch w
 - Docs updated for verification per skill Example 3.
 - Lint clean.
 - Branch `pwa/v0.15-refinement` ready for next iteration. Open question for next session: do we want to start a Phase 23 to tackle the first-cold `mount:categorize` via a consolidated `dashboardData`-style endpoint, or accept the current floor + move to other work?
+
+---
+
+## Session: 2026-04-25 — Goal archive workflow (v11.14 + PWA v0.16)
+
+### Setup
+User asked: "how can we best archive/finish savings goals" — describing the full lifecycle (create goal → save up → spend → time period passes) and wanting to remove finished goals from active budgeting while preserving historical data for "if we decide down the line to have historic analysis." Open-ended design question, not a bug fix.
+
+### Design
+Mapped the data flow first. Found the critical contract: `rebuildBudgetInternal_` (line 2808) reads `Setup!D2:E100` and rebuilds Budget rows for every (period × category) combo on the next refresh. If a category vanishes from that range, its 26 periods of historical Budget rows are silently lost on next rebuild because the `budgetedMap` only writes back rows for categories the loop iterates. Therefore: archive cannot mean delete; archive must be a forward-input filter only.
+
+Two-flag model proposed and reviewed against the actual code:
+- **`Setup!F` (Archived?)** — boolean, filters PWA dropdown via `handleCategories_`.
+- **`Saving!J` (Status)** — `Active` / `Achieved` / `Cancelled`, drives Saving dashboard sums + PWA Goal cards. Empty = Active for backward compat.
+- **`archiveGoal` / `unarchiveGoal`** endpoints flip both atomically. Linked-category archive in Setup is conditional on no other Active goal sharing the sub.
+
+User asked for a review pass to make sure nothing breaks before final plan. Verified ten integration points against `Code.js`:
+- `rebuildBudgetInternal_` keeps unfiltered iteration ✓ (history preserved).
+- `handleAddCategory_` duplicate check naturally blocks re-adding archived names ✓.
+- `handleCategorize_` validates against full `E2:E100` — late transactions can still be assigned via API ✓.
+- Saving widening 9→10 cols touches `lib/budget.js` SAVING_RANGE + `parseDashboard` row indexing ✓.
+- `setNamedRanges_` prefix-based deletion is untouched — no new named range required ✓.
+- Empty Status counts as Active via SUMIFS/COUNTIFS `<>"Achieved"` filter — no migration needed ✓.
+
+### Implementation
+Three commits on `pwa/v0.16-goal-archive`:
+
+1. **`5c331f1` — Docs: Phase 23 plan**: appended Phase 23 section to `docs/task_plan.md` covering schema, endpoints, PWA UI, intentional non-changes, and phased commit plan.
+
+2. **`41573f7` — Apps Script v11.14**:
+   - `Setup!F` checkbox header + validation in `buildWorkbook` AND idempotent re-application in `updateWorkbook`.
+   - `Saving!J` widening: `applySavingStructure_` widened title bar (`A1:I1` → `A1:J1`, with `breakApart()` guard for the existing merge), header (`A5:J5`) with new `Status` column, dashboard SUMIFS/COUNTIFS conversion (C3/D3/E3/F3), col J data validation (`requireValueInList(['Active','Achieved','Cancelled'], true)`), CF rule for archived rows (gray bg + italic).
+   - `handleCategories_` reads `D2:F100` and skips archived rows.
+   - New `handleArchiveGoal_` + `handleUnarchiveGoal_` endpoints, locked via `LockService.getScriptLock(10000)` per existing pattern. `summarizeResult_` extended for Logs tab visibility.
+   - `routeAction_` + version constant bumped to v11.14.
+
+3. **`235f8ec` — PWA v0.16 (cache v25)**:
+   - `lib/budget.js` SAVING_RANGE → `'A1:J105'`; `parseDashboard` extracts `row[9]` as status.
+   - `api.js`: `archiveGoal(name, status)` and `unarchiveGoal(name)` wrappers.
+   - `views/dashboard.js`: split `goals` into `activeGoals` + `archivedGoals`. New `Mark achieved` / `Mark cancelled` buttons inside the expanded goal card (with `e.target.closest('.goal-action-btn')` guard so the click doesn't bubble to the card-toggle handler). Confirm dialog before action; `goalActionInFlight` lock so concurrent taps don't race. New `renderArchivedSection` collapsible at the bottom showing archived goals with status badge + Restore button. Cache invalidated and view force-refreshed after every action.
+   - `css/style.css`: `.goal-actions`, `.goal-action-btn` (with `.achieved` / `.cancelled` / `.restore` variants), `.archived-section` + `.archived-header` + `.archived-goal-name` / `-status` styles. Reused existing `--green` / `--muted` tokens.
+   - `sw.js` CACHE_VERSION v24 → v25; `config.js` APP_VERSION v0.15.4 → v0.16.
+
+PR [#3](https://github.com/fahyad/gsheetbudget2026-categorizerApp/pull/3) opened.
+
+### Deploy
+User asked how to authorize me to run clasp. Confirmed: clasp 3.3.0 already installed locally + `~/.clasprc.json` auth tokens already present (dated Apr 24) + `.clasp.json` was committed to the repo, so no handoff needed. Asked before deploying (production push, hard to reverse). User confirmed; ran `cd apps-script && ./deploy.sh "v11.14 — goal archive workflow"`. Output:
+```
+→ Version v11.14  (last edited 2026-04-25 17:37 MDT)
+Pushed 2 files at 5:37:20 PM.
+Deployed AKfycbw2EbHNk_...kBjyQ @39
+```
+Auto-bumped Code.js timestamp + VERSION.txt. Committed + pushed bump (`5cf3783`). Verified endpoint reachable via `?action=version` (returned `Invalid API key` — expected with no key, confirms server up).
+
+### Status — DEPLOYED, AWAITING UPDATE SCRIPT
+- v11.14 live at deployment @39 (commit `5cf3783`). PWA v0.16 ready on `pwa/v0.16-goal-archive`.
+- **User next steps:**
+  1. Open the spreadsheet → Budget Tools → Update Script. This applies Setup col F + Saving col J + new dashboard formulas + CF to the live sheet. Without it the new endpoints work but the schema is stale.
+  2. Verify via test goal: create "TestArchive" → expand card → Mark achieved → confirm: hidden from active list, lands in Archived (1) section, Setup col F = TRUE, sub-category vanishes from PWA dropdown, Saving row grayed+italic in sheet. Restore reverses everything.
+  3. Optionally: switch GitHub Pages source to `pwa/v0.16-goal-archive` for preview, or merge PR #3.
+- Trip-up #27 added to `CLAUDE.md` capturing the rebuildBudgetInternal_ contract that's easy to "fix" wrong.
+
+---
+
+## Session: 2026-04-25 (later) — Docs sync for v11.14 + v0.16
+
+### Setup
+User asked "update .md files" after the v11.14 + v0.16 deploy + push. Standard end-of-feature documentation pass.
+
+### Fix
+Followed `update-budget-docs` skill workflow manually (skill present in repo but not auto-registered this session — same dynamic the v0.15.4 docs sync hit).
+- **CLAUDE.md**: bumped Current versions to v11.14 + v0.16 (cache v25); updated Saving tab layout from 9 → 10 cols with new Status section; bumped Service worker to v25; appended v0.16 entry to Deploy sequence history; refreshed Current branch state for `pwa/v0.16-goal-archive` + post-merge `main` reality; updated `lib/budget.js` File map row to A1:J105; added trip-up #27 (Setup col F is forward-input filter only, not historical-rebuild filter).
+- **docs/task_plan.md**: bumped Current State to v11.14 + v0.16. Updated Phase 23 Status from "in progress" to "deployed @39 + PWA v0.16 pushed; user must run Update Script". Added the trip-up cross-reference line.
+- **docs/findings.md**: refreshed header pointer to mention v11.14 + v0.16 + new section. Appended new architecture section "Goal Archive Workflow (v11.14 + v0.16)" — covers motivation (rebuild contract), schema additions, dashboard formula conversion, CF rules, endpoints (with shared-category guard), PWA changes, intentional non-changes, backward compatibility, and the durable lesson about forward-vs-backward filtering.
+- **docs/progress.md**: refreshed Current State callout for v11.14 + v0.16. Appended v0.16 session entry above this one capturing design + implementation + deploy.
+
+### Status — DOCS COMPLETE
+- All four .md files updated per skill conventions.
+- Trip-up #27 cross-referenced in CLAUDE.md and findings.md (link target: "Goal Archive Workflow (v11.14 + v0.16)").
+- Awaiting end-to-end verification (Update Script + test-goal lifecycle) from the user — that will close out Phase 23 from "deployed" to "complete + verified working".

@@ -5,8 +5,8 @@
 2. Transaction categorizer system: Apps Script email parser + GitHub Pages PWA for categorizing Scotiabank infoalert transactions on phone.
 
 ## Current State (April 2026)
-- **Apps Script:** v11.13 — every response now echoes `_elapsedMs` so the client can split server-exec vs. network/cold-container time; new `logClientMetrics` action appends client-side perf records to a dedicated `ClientMetrics` tab (auto-created). No breaking changes to existing endpoints. v11.12 fixed the Budget `#REF!` cascade via `rebuildBudgetInternal_` delegation; v11.9–v11.11 were Saving tab shakedown. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.15.4 (cache v24) — cold-start optimization informed by v0.15.3 ClientMetrics data. Four fixes landed after confirming real-session measurements: dedupe `categories` by sharing mount's promise with `refresh()`, defer `ensureIndexReady()` until first Auto-tab tap, persist `store.transactions` to localStorage for instant cold-open paint, throttle silent re-mount `refresh()` to once per 60s (Parse pill always forces fresh). Also cached `version` response per Setup module lifetime. Layered on v0.15.3 (Minimal Monochrome redesign + iOS safe-area + Savings/Goals dedup + metrics pipeline) and v0.12 → v0.14 (hash router, lazy views, dashboard, auto-suggest). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). `main` at v0.11 — not merged yet. GitHub Pages serves from the feature branch for preview.
+- **Apps Script:** v11.14 — goal archive workflow. Setup col F (`Archived?` checkbox) + Saving col J (`Status`: Active/Achieved/Cancelled). Two new endpoints `archiveGoal` + `unarchiveGoal` flip both flags atomically; linked-category archive only fires when no other active goal shares the sub. Saving dashboard sums now use `SUMIFS`/`COUNTIFS` filtered to non-Achieved + non-Cancelled. `handleCategories_` reads D:F and skips archived rows. **Critical contract preserved:** `rebuildBudgetInternal_` keeps reading full `D2:E100` so historical Budget rows for archived categories are rebuilt with their preserved Budgeted values. v11.13 (echoes `_elapsedMs` + `logClientMetrics` endpoint + `ClientMetrics` tab) is the prior baseline. Full postmortems in `docs/findings.md`.
+- **PWA:** v0.16 (cache v25) — goal archive UI. Active goals expose Mark achieved + Mark cancelled inside the expanded card; archived goals tuck into a collapsible Archived (N) section with Restore. `lib/budget.js` SAVING_RANGE widened to `A1:J105`; goal objects carry `status` (empty = `'Active'`). New `api.archiveGoal/unarchiveGoal` wrappers. Layered on v0.15.4 (cold-start optimization), v0.15.3 (Minimal Monochrome redesign + iOS safe-area + Savings/Goals dedup + metrics pipeline) and v0.12 → v0.14 (hash router, lazy views, dashboard, auto-suggest). Branch: `pwa/v0.16-goal-archive` (off `main`, which now carries v0.15.4 + v11.13). PR [#3](https://github.com/fahyad/gsheetbudget2026-categorizerApp/pull/3) open.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -262,39 +262,15 @@ Patterns added to CLAUDE.md trip-up list (items #25, #26).
 - **Status:** complete + verified working. Five of six perf targets hit per measured ClientMetrics on 2026-04-24: `Duplicate=Y` rows = 0 (was many), `dumpSheet:Transactions` on Manual mount = 0 calls (was always firing), `mount:dashboard` re-mount = 3–16 ms (was 3861 ms), throttled `mount:categorize` re-mount = 1 ms (was 6864–9198 ms), Setup `version` re-mount = 0 ms (was ~2500 ms each). Sixth target (first cold `mount:categorize` < 3 s) missed: still 7348 ms / 9038 ms because `parseAndFetch` + `categories` are gated by ~2.5 s per-call network tax that is unavoidable without a server-side consolidated endpoint. The localStorage-cached transactions fix paints in <200 ms regardless, so the user-perceived cold open is materially faster even though `mount:categorize` ClientTotalMs (which fires after refresh awaits) is still long. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)" Verification block for raw numbers.
 
 ### Phase 23: Goal Archive Workflow (Apps Script v11.14 + PWA v0.16)
+A goal's full lifecycle was open-ended: create → save → spend → done, with no clean way to mark a goal finished. User wanted to retire goals (Achieved or Cancelled) without losing the historical Budget rows, Transactions, or Saving record for later analysis. Implemented as a soft-archive: forward-input filters (PWA dropdown, dashboard sums, Goal cards) hide archived goals, but historical reconstruction paths (`rebuildBudgetInternal_`, Transactions strings, named-range queries) read the full unfiltered data. See `docs/findings.md` "Goal Archive Workflow Design + Contract (v11.14 + v0.16)" for the architectural detail.
 
-**Problem.** A goal's full lifecycle is: create → save toward it → spend → done. Today the system has no clean "done" state — finished goals clutter the Saving dashboard, the PWA Goal cards, and the categorize dropdown forever. User wants to mark a goal Achieved or Cancelled while preserving all historical data (Budget rows, Transactions records) for later analysis.
+Schema additions: `Setup!F` = `Archived?` checkbox per sub-category, `Saving!J` = `Status` dropdown (`Active` / `Achieved` / `Cancelled`; empty = Active for backward compat). Saving dashboard sums (C3/D3/E3/F3) flipped from `SUM`/`COUNTA` to `SUMIFS`/`COUNTIFS` filtered against col J. Two new endpoints `archiveGoal` / `unarchiveGoal` flip both flags atomically — linked-category Setup write is conditional on no other active goal sharing the sub. PWA dashboard exposes Mark achieved / Mark cancelled inside expanded goal card + collapsible Archived (N) section with Restore.
 
-**Design — three-state status + flag pair.**
-- **Saving tab** gets a new column J `Status` with values `Active` (default; empty = Active for backward compat) | `Achieved` | `Cancelled`. Both non-Active states behave identically for filtering — the label captures intent for future analysis.
-- **Setup tab** gets a new column F `Archived?` (boolean checkbox). Pure flag; no formula.
-- An **`archiveGoal` endpoint** atomically flips both: sets the Saving row's Status, and conditionally sets Setup col F = TRUE *only if no other Active Saving row links to that category* (so shared linked-categories — e.g. two goals using "Savings > Travel" — stay live for the active goal).
-- **`unarchiveGoal`** is the mirror: sets Status = Active, sets Setup col F = FALSE unconditionally.
+- **v11.14 + v0.16 (deploy):** Apps Script deployed @39 (commit `5cf3783`) on 2026-04-25 17:37 MDT. PWA pushed to `pwa/v0.16-goal-archive`. PR [#3](https://github.com/fahyad/gsheetbudget2026-categorizerApp/pull/3) open.
 
-**What is preserved (the critical contract).** `rebuildBudgetInternal_` keeps reading the full `D2:E100` range — archived categories continue to get rebuilt Budget rows for all 26 periods with their preserved Budgeted values. `Budgeted`, `Spent`, `Available` formulas keep working. Transactions strings are never rewritten. The Saving tab row remains in place. Historical analysis can query any of these tabs by category name and find complete data.
+Patterns added to CLAUDE.md trip-up list (item #27).
 
-**What is hidden.**
-- PWA dropdown (`?action=categories`) filters out rows where Setup col F = TRUE.
-- Saving tab dashboard sums (rows 3 cols C/D/E/F) use `SUMIFS` / `COUNTIFS` filtered to non-Achieved + non-Cancelled rows.
-- PWA Goal cards filter to Active only (with a "Show archived (N)" toggle for history view).
-- PWA Dashboard's Budget category section already de-dups goal-linked subs via `linkedSubs`; that logic auto-extends to archived goals because the goal is still in the parsed list.
-
-**What is intentionally NOT hidden (v1).**
-- Transactions tab data validation dropdown still points at `Setup!E2:E100` (full list). A user manually editing the Transactions tab can still pick an archived category. Power-user concession; can tighten in a future phase.
-- Saving tab "Linked Category" dropdown still allows picking archived sub-categories for new goals. Edge case only matters for goals you create after archiving.
-
-**Edge cases verified safe.**
-- `handleAddCategory_`'s duplicate check (case-insensitive on `E2:E100`) blocks re-adding an archived name → user must unarchive instead. Natural protection.
-- `handleCategorize_` validates against `E2:E100` (full list), so late-arriving transactions for archived categories CAN still be assigned via API direct call — useful escape hatch.
-- `setNamedRanges_` prefix-based deletion (`CategoryList`, etc.) is untouched — no new named range required.
-- Saving tab widening from 9 → 10 cols requires updating `lib/budget.js` SAVING_RANGE constant + `parseDashboard` row indexing. Empty Status (col J on existing rows) treated as Active — no migration needed.
-
-**Phase 23 commits.**
-1. **Apps Script v11.14** (`apps-script/Code.js` + `VERSION.txt`): Setup col F + Saving col J schema; `handleCategories_` filter; `archiveGoal` + `unarchiveGoal` endpoints; dashboard SUMIFS conversion; CF for archived rows. Deploy via `cd apps-script && ./deploy.sh "v11.14 — goal archive"`.
-2. **PWA v0.16** (cache v25): SAVING_RANGE → `'A1:J105'`; `parseDashboard` reads status field; `api.archiveGoal/unarchiveGoal` wrappers; dashboard goal-card Achieved/Cancelled buttons + active-goal filtering; "Show archived" expandable section.
-3. **Verify on a test goal**: create "TestArchive" goal → mark achieved → confirm (a) hidden from active Goals card list, (b) hidden from PWA categorize dropdown, (c) Setup col F = TRUE, (d) Budget rows still present in past periods, (e) Saving tab row still present with Status=Achieved, (f) "Show archived" toggle reveals it, (g) `unarchiveGoal` reverses everything.
-
-- **Status:** in progress (planned 2026-04-25).
+- **Status:** deployed; awaiting user to run Update Script in the spreadsheet to apply Setup col F + Saving col J + new dashboard formulas + CF rule. End-to-end verification (create test goal → archive → restore) pending.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 

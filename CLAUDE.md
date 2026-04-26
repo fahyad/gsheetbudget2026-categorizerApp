@@ -27,8 +27,8 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - `js/config.js` → `DEFAULT_API_URL` (the URL embeds this ID)
 
 ## Current versions
-- **Apps Script:** v11.13 — `doGet`/`doPost` now echo `_elapsedMs` in every response (lets the client compute network-vs-server split in its diagnostics log), plus new `logClientMetrics` action that batches into a dedicated `ClientMetrics` tab. No breaking changes; the deployment URL is unchanged. v11.12 fixed the Budget `#REF!` cascade by delegating to `rebuildBudgetInternal_`; v11.9–v11.11 were the Saving tab shakedown.
-- **PWA:** v0.15.4 (cache v24) — cold-start optimization informed by the v0.15.3 metrics pipeline. Four fixes landed after confirming in the `ClientMetrics` tab that duplicate `categories` calls cost ~3s/mount, re-mounts paid the full tax, and every fetch paid ~2.5s network overhead (not just the first). Layered on top of v0.15.3 (redesign + safe-area + dedup + metrics pipeline) and the v0.12–v0.14 work (hash router, lazy views, dashboard, auto-suggest swipe deck). See "PWA architecture" below. Currently on branch `pwa/v0.15-refinement` (branched off `claude/read-markdown-context-v1c5T`, which carries v0.14). `main` still at v0.11 + v11.12 — not merged yet.
+- **Apps Script:** v11.14 — goal archive workflow. Setup col F (`Archived?` checkbox) and Saving col J (`Status` dropdown: Active / Achieved / Cancelled). Two new endpoints `archiveGoal` + `unarchiveGoal` flip both flags atomically; linked-category archiving in Setup is conditional on no other active goal sharing the sub-category. Saving dashboard sums (C3/D3/E3/F3) converted from `SUM`/`COUNTA` to `SUMIFS`/`COUNTIFS` filtered against col J. `handleCategories_` reads D:F and skips archived rows so the PWA dropdown hides them. **Critical contract preserved:** `rebuildBudgetInternal_` keeps reading the full `D2:E100` (not filtered) so historical Budget rows for archived categories continue to be rebuilt — see trip-up #27. Layered on v11.13 (`_elapsedMs` echo + `logClientMetrics` endpoint + `ClientMetrics` tab). v11.12 fixed the Budget `#REF!` cascade by delegating to `rebuildBudgetInternal_`; v11.9–v11.11 were the Saving tab shakedown.
+- **PWA:** v0.16 (cache v25) — goal archive UI. Active goals get `Mark achieved` + `Mark cancelled` buttons inside the expanded card; archived goals collapse into a `Archived (N)` toggle at the bottom with `Restore` per row. Cache-invalidate + force-refresh after each action. `lib/budget.js` SAVING_RANGE widened to `A1:J105`; parsed goal objects now carry `status` (empty = `'Active'` for backward compat). New `api.archiveGoal/unarchiveGoal` wrappers. `linkedSubs` dedup in the Budget category section already covers archived goals — they were already in the goals list. Layered on v0.15.4 (cold-start optimization), v0.15.3 (redesign + safe-area + dedup + metrics pipeline), and the v0.12–v0.14 work (hash router, lazy views, dashboard, auto-suggest swipe deck).
 
 ## Common commands
 
@@ -91,10 +91,11 @@ PWA reads Transactions where Category="" AND Timestamp is set. Categorize action
 
 **Categorization rule:** PWA only sees rows where `Category=""` AND `Timestamp` is set. Manual rows (Timestamp blank) are invisible to PWA — by design, they're already categorized.
 
-**Saving tab layout (v11.11+):** 9 columns A-I, dashboard at rows 1-3, header at row 5, goals at rows 6-105 (up to 100 goals).
+**Saving tab layout (v11.14+):** 10 columns A-J, dashboard at rows 1-3, header at row 5, goals at rows 6-105 (up to 100 goals).
 - A: Goal Name | B: Linked Category (dropdown) | C: Target | D: Target Period (dropdown)
-- E-H: computed (Currently Saved, Allocated This Period, Periods Remaining, Needed Future Periods — all currency/integer, no CF)
+- E-H: computed (Currently Saved, Allocated This Period, Periods Remaining, Needed Future Periods — all currency/integer)
 - I: Notes
+- **J: Status (v11.14+)** — dropdown `Active` / `Achieved` / `Cancelled`. Empty cell = treated as `Active` for backward compat with rows created before v11.14. Dashboard sums in row 3 (C3/D3/E3/F3) filter via `SUMIFS`/`COUNTIFS` `<>"Achieved" AND <>"Cancelled"`. CF rule on `A6:J<last>` grays + italicizes rows where Status is Achieved or Cancelled.
 - Dashboard B3 has the "current period" INDEX+MATCH (match_type=1) that all per-row formulas reference. Don't move it; don't replace with XLOOKUP-over-multiplied-booleans (see trip-up #11).
 - Column H's "Needed Future Periods" is adaptive: when F (Allocated This Period) > 0, divides by (G - 1) so the value stays constant when user budgets the previously-shown amount. When F = 0, divides by G. Previous static formula caused confusing user-facing drift from $222 → $209 after allocation.
 - Tab gets created automatically by Update Script if missing — no migration step needed.
@@ -172,7 +173,7 @@ js/
 
 **Tab-bar (v0.12.2+):** bottom-fixed, always visible. Active tab has a thick top accent bar + warm-gray fill + uppercase bold label. Stacks at `var(--tab-bar-total) = 72px + env(safe-area-inset-bottom)`.
 
-**Service worker (v24):** precaches the shell (`app.js`, `router.js`, `ui.js`, `config.js`, `api.js`, `store.js`, `periods.js`, `index.html`, `style.css`, `manifest.json`). Lazy view + lib modules under `/js/views/` and `/js/lib/` are served via stale-while-revalidate. `script.google.com` requests bypass the SW entirely (so `sendBeacon` flushes to the metrics endpoint aren't cached). Bump `CACHE_VERSION` on every PWA release.
+**Service worker (v25):** precaches the shell (`app.js`, `router.js`, `ui.js`, `config.js`, `api.js`, `store.js`, `periods.js`, `index.html`, `style.css`, `manifest.json`). Lazy view + lib modules under `/js/views/` and `/js/lib/` are served via stale-while-revalidate. `script.google.com` requests bypass the SW entirely (so `sendBeacon` flushes to the metrics endpoint aren't cached). Bump `CACHE_VERSION` on every PWA release.
 
 **State:** `store.js` is still a singleton loaded once in the shell. No pub/sub — cross-view signaling is two explicit calls: `categorize.js` calls `invalidateDashboardCache()` + `invalidateSuggestIndex()` after successful `batchCategorize`. Two callers; revisit if it grows.
 
@@ -187,17 +188,17 @@ js/
 - ✅ **v0.15.2** — dashboard category/goal dedup (Savings main was showing sub-categories that also appear as Saving Goal cards; now filtered out via `linkedCategory` match).
 - ✅ **v0.15.3** — client metrics pipeline + Apps Script v11.13 (`_elapsedMs` echo + `logClientMetrics` endpoint + `ClientMetrics` tab).
 - ✅ **v0.15.4** — cold-start optimization. ClientMetrics data from v0.15.3 confirmed three issues and contradicted one assumption: duplicate `categories` is real (~3s/mount, flagged `Duplicate=Y`), suggest-index warmup is 3.1s (could defer), re-mounts pay full tax, BUT network overhead isn't front-loaded — every call pays ~2.5s of 302-redirect/TLS/queue regardless of warmth. Four fixes: share mount's categoriesPromise so refresh() doesn't fire a second identical call; defer `ensureIndexReady()` until first Auto-tab activation; persist `store.transactions` to localStorage for instant cold-open paint; throttle silent re-mount `refresh()` to once per 60s (Parse pill always forces fresh). Also cached the `version` response per Setup module lifetime.
+- ✅ **v0.16** + **Apps Script v11.14** — goal archive workflow. Setup col F = `Archived?` checkbox; Saving col J = `Status` (Active/Achieved/Cancelled). New `archiveGoal`/`unarchiveGoal` endpoints flip both atomically (linked-category archive only fires when no other active goal shares the sub). PWA dashboard exposes Mark achieved / Mark cancelled inside expanded goal card + Archived (N) collapsible at the bottom with Restore. `rebuildBudgetInternal_` deliberately untouched — it keeps reading full `D2:E100` so archived categories continue to get historical Budget rows rebuilt with their preserved Budgeted values.
 
 Detailed plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.md`.
 
 ### Current branch state
-- **Active branch:** `pwa/v0.15-refinement` — carries v0.15.0 → v0.15.3 + Apps Script v11.13. Branched from `claude/read-markdown-context-v1c5T` (which has v0.12 → v0.14).
-- **Parent branch:** `claude/read-markdown-context-v1c5T` — still pushed to origin, not merged.
-- **`main`** still at v0.11 + v11.12 Apps Script. Not merged yet.
-- **GitHub Pages Source:** currently pointed at the feature branch for preview (Settings → Pages → Source). When merging to main, flip the source back to `main`.
+- **Active branch:** `pwa/v0.16-goal-archive` — carries v0.16 PWA + Apps Script v11.14. Branched off `main`. Apps Script v11.14 was deployed @39 to the production URL on 2026-04-25 17:37 MDT. PR [#3](https://github.com/fahyad/gsheetbudget2026-categorizerApp/pull/3) open.
+- **`main`** carries v0.15.4 PWA + v11.13 Apps Script (merged from `pwa/v0.15-refinement` in commit `557a032`).
+- **GitHub Pages Source:** Settings → Pages → Source. Flip to `pwa/v0.16-goal-archive` for preview, or merge to main and serve from `main`.
 - **`.nojekyll`** at repo root is required — without it Pages runs Jekyll by default and the deploy times out at `updating_pages` even when the build "succeeds". Keep it committed.
-- **Apps Script deploy:** `./deploy.sh` must run on your machine (the sandbox has no `clasp`). The script bumps `VERSION.txt` + `APP_SCRIPT_LAST_EDITED` locally, then pushes + creates a new version bound to the same production deployment ID. Never use plain `clasp deploy` — it mints a new URL.
-- **PR:** not opened (user manages PRs manually).
+- **Apps Script deploy:** `./deploy.sh` runs on the user's Mac via the local clasp install + `~/.clasprc.json` auth. The script bumps `VERSION.txt` + `APP_SCRIPT_LAST_EDITED` locally, then pushes + creates a new version bound to the same production deployment ID. Never use plain `clasp deploy` — it mints a new URL.
+- **User action pending after v11.14 deploy:** open the spreadsheet → Budget Tools → Update Script. This applies Setup col F (Archived? checkbox) + Saving col J (Status dropdown) + new dashboard SUMIFS formulas + the gray-out CF rule to the live sheet. Without it the new endpoints work but the schema is stale.
 
 ## File map
 
@@ -205,7 +206,7 @@ Detailed plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.
 |------|---------|
 | `index.html` | PWA entry. `<header>` exists but is hidden via CSS; `<main id="view-root">` + `<nav id="tab-bar">` (3 tabs) + `#error-toast`. Viewport has `viewport-fit=cover` for iOS safe-area. |
 | `.nojekyll` | Empty marker. Opts out of GitHub Pages' default Jekyll build — required. |
-| `sw.js`, `manifest.json` | Service worker (`CACHE_VERSION` v23) + PWA manifest |
+| `sw.js`, `manifest.json` | Service worker (`CACHE_VERSION` v25) + PWA manifest |
 | `css/style.css` | Single stylesheet, Minimal Monochrome tokens in `:root`. `--tab-bar-total` drives bottom-fixed stacking. Period bar + setup section use `env(safe-area-inset-top)` to cover the iOS Dynamic Island. |
 | `js/app.js` | Shell (~40 LOC). Version label, settings-btn routing (kept for back-compat; button hidden), beforeunload, store.loadCache(), hands off to router. |
 | `js/router.js` | Hashchange router + lazy view imports + mount/unmount lifecycle; records `mount:<route>` timing events into the metrics pipeline; owns tab-bar active-class and the `Categorize (N)` pending-count badge. |
@@ -214,7 +215,7 @@ Detailed plan history: `/root/.claude/plans/let-s-discuss-layout-of-nifty-moore.
 | `js/api.js` | Fetch wrapper around Apps Script endpoints (including `dumpSheet(tab, range)`). Every call flows through `lib/metrics.recordStart/recordComplete`. Reads `data._elapsedMs` to populate server-timing metrics. |
 | `js/store.js` | In-memory + localStorage state: transactions, categories, syncQueue, lastCategorized. |
 | `js/periods.js` | Client-side pay-period math: `currentPeriod`, `periodForTimestamp`, `allPeriods`. |
-| `js/lib/budget.js` | Dashboard data layer. Two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:I105), `parseCurrency` → numbers, `formatCurrency` via `Intl.NumberFormat`, 10-min TTL in localStorage, `invalidateDashboardCache()`. Emits `cache-hit:dashboard` / `cache-miss:dashboard` events. |
+| `js/lib/budget.js` | Dashboard data layer. Two parallel `dumpSheet` calls (Budget A1:F215 + Saving A1:J105), `parseCurrency` → numbers, `formatCurrency` via `Intl.NumberFormat`, 10-min TTL in localStorage, `invalidateDashboardCache()`. Emits `cache-hit:dashboard` / `cache-miss:dashboard` events. Goal objects carry `status` field (v0.16). |
 | `js/lib/suggest.js` | Auto-suggest engine. `normalizeMerchant()` (6 regex rules, unit-tested against 17 patterns), `ensureIndexReady` fetches Transactions + builds `{normMerchant: {category: count}}`, `suggest(merchant, {threshold=0.70})`, `invalidateSuggestIndex()`. 1-hr cache TTL. Emits cache-hit/miss events with source (memory / in-flight-dedup / localStorage). |
 | `js/lib/swipe.js` | Vanilla touch factory. `attachSwipe(translateEl, { revealEl, onLeft, onRight, threshold=0.40 })`. Abort on vertical-dominant first move; short tap falls through to click. |
 | `js/lib/metrics.js` | **NEW (v0.15.3)** — client-side diagnostics pipeline. Session id + 50-entry buffer + in-flight tracking + `sendBeacon` flush to `logClientMetrics` on visibility-hidden + pagehide. Records every API call + view mounts + cache decisions. Exposes `window.__apiStats` / `__apiStats_session` / `__apiStatsFlush()` for Safari remote DevTools. |
@@ -296,6 +297,8 @@ These are real-data quirks visible via `dumpSheet`. Don't be confused by them.
 25. **Any PWA call fired from `mount()` AND awaited inside `refresh()` causes a duplicate roundtrip (v0.15.4).** ClientMetrics confirmed `fetchCategories` was firing twice per mount — once background from `mount()`, once awaited inside `refresh()` — paying the ~2.5s Apps Script network tax twice. The bug class is "two entry points, both want the same data, neither knows about the other." Fix: store the mount's promise in a module variable (`categoriesPromise`) and have `refresh()` await it instead of firing a second identical call. User-initiated refreshes (Parse pill + empty-state Refresh button) opt into a fresh fetch via `refresh({ force: true })`. If you ever add a third entry point, share the promise too. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)".
 
 26. **PWA view re-mounts are not free — `await refresh()` on every mount pays the full cold tax.** Navigating Categorize → Dashboard → Categorize triggers a router re-mount that re-fires all awaited API calls. With each call paying ~2.5s of network overhead regardless of container warmth, re-mounts previously cost 6-9s every time. Fix in `views/categorize.js`: `refresh()` takes `{ force: false }` by default and no-ops if the last successful run was <60s ago AND didInitialRefresh is true. User-initiated Parse always bypasses the throttle. See `docs/findings.md` "Cold-Start Perf Findings + Fix (v0.15.4)".
+
+27. **Setup col F `Archived?` is a PWA-dropdown filter only — it must NOT exclude categories from `rebuildBudgetInternal_` (v11.14).** `handleCategories_` reads D:F and skips rows where col F is TRUE — that's correct, the PWA dropdown should hide archived categories. But `rebuildBudgetInternal_` deliberately keeps reading the full `D2:E100` and rebuilding rows for ALL non-Income categories. Reason: the rebuild wipes the Budget tab clean and writes per-(period, category) rows back; `budgetedMap` preserves Budgeted amounts by name, but rows for categories NOT iterated are lost forever. If a future "cleanup" tries to filter archived from the rebuild, every historical period's Budget rows for archived categories — and the user's spending data scaffolding — vanishes. The contract is: archive flag affects FUTURE inputs (PWA dropdown, dashboard sums), never historical reconstruction. See `docs/findings.md` "Goal Archive Workflow Design + Contract (v11.14 + v0.16)".
 
 ## When in doubt
 - Check `docs/task_plan.md` for current state

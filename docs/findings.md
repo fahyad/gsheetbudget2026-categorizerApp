@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.13 Apps Script** (echoes `_elapsedMs` + `logClientMetrics` endpoint, ClientMetrics tab) + **v0.15.4 PWA** (Minimal Monochrome redesign + cold-start optimizations) on branch `pwa/v0.15-refinement`; `main` still at v0.11 + v11.12. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
+> Reference document. Sections describe the system as it currently exists: **v11.14 Apps Script** (goal archive workflow on top of the v11.13 metrics pipeline) + **v0.16 PWA** (goal archive UI on top of the v0.15.4 Minimal Monochrome redesign + cold-start optimizations) on branch `pwa/v0.16-goal-archive`; `main` carries v0.15.4 + v11.13. Single-ledger architecture + Saving tab with adaptive per-period formula + per-goal Status column. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". v11.14 + v0.16 goal archive workflow is in "Goal Archive Workflow (v11.14 + v0.16)".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1323,3 +1323,85 @@ Typical analysis queries (to be added as a sibling `ClientMetrics-Analysis` tab 
   4. **Client-side cached state beats server-side cleverness for perceived performance.** `store.transactions` in localStorage turned a 5 s blank screen into a <200 ms paint even on cold open — no server change required.
   5. **Diagnose before fixing** (from Phase 21 lesson): the four candidate fixes from earlier log analysis were all validated as correct by real `ClientMetrics` data, but the priority ordering changed after seeing network-tax-per-call. If we'd shipped the first three without data, we'd have under-estimated how much the re-mount throttle mattered.
   6. **Mount latency is a misleading single number for "is the app fast?"** — the metric improvement table above shows `mount:categorize` first-cold barely changed, but the user experience improved dramatically because cached txns paint before mount completes AND every subsequent in-session navigation dropped to ~1–16 ms. Always pair mount timings with cache-hit ratio + perceived-paint reasoning when evaluating perf changes.
+
+---
+
+## Goal Archive Workflow (v11.14 + v0.16)
+
+### Goal Archive Workflow Design + Contract (v11.14 + v0.16)
+
+#### Motivation
+
+The Saving tab's full-cycle workflow stops mid-loop. User creates a goal (e.g., "Banff trip $2000 by Jul"), saves toward it bi-weekly, then takes the trip and categorizes the spending. After that, the goal sits in the active Saving tab dashboard forever, the linked sub-category clutters the PWA categorize dropdown, and the Goals card on the dashboard keeps showing it as if there's still saving to do. The user wanted a way to mark a goal "done" while preserving every byte of historical data — Budget rows, Transactions, Saving tab record — so a future analytics view can reconstruct exactly what happened.
+
+The naive answer ("delete the category") is wrong: `rebuildBudgetInternal_` regenerates Budget rows from `Setup!D2:E100` on every refresh, so a deleted category vanishes from all 26 periods of historical data. The right answer is a soft-archive pattern: hide from FORWARD-looking inputs (PWA dropdown, dashboard sums, Goals card), preserve in all BACKWARD-looking views (rebuild iteration, Transactions strings, Saving rows).
+
+#### Schema additions
+
+Two columns + nothing else changes structurally:
+
+- **`Setup!F` (Archived?)** — boolean checkbox per sub-category. Default blank/FALSE = active. Header `Archived?` written by `buildSetupTab`-style code in `buildWorkbook` and idempotently re-applied by `updateWorkbook`. No new named range — `CategoryList` (`E2:E100`) is unchanged.
+- **`Saving!J` (Status)** — dropdown per goal row. Three values: `Active` (default; empty cell also treated as Active for backward compat), `Achieved`, `Cancelled`. Both non-Active values behave identically for filtering — the label just records intent for future analysis. Data validation: `requireValueInList(['Active', 'Achieved', 'Cancelled'], true)` with `setAllowInvalid(true)` so blank cells aren't flagged.
+
+The Saving tab title bar widens from `A1:I1` → `A1:J1`. Implementation gotcha worth noting: when `applySavingStructure_` runs against an existing v11.13 sheet, the old `A1:I1` merge is still present — calling `merge()` on a different range without unmerging throws. Fixed with a `try { titleRange.breakApart(); } catch (e) {}` guard before re-merging. Idempotent on fresh sheets too.
+
+#### Dashboard formula conversion
+
+The four Saving tab dashboard cells in row 3 (C3 = total goal count, D3 = currently saved sum, E3 = needed future sum, F3 = target sum) flipped from `SUM`/`COUNTA` to `SUMIFS`/`COUNTIFS` filtered against col J. Pattern:
+
+```
+C3: =COUNTIFS(A6:A105,"<>",J6:J105,"<>Achieved",J6:J105,"<>Cancelled")
+D3: =SUMIFS(E6:E105,A6:A105,"<>",J6:J105,"<>Achieved",J6:J105,"<>Cancelled")
+```
+
+Empty Status (existing rows pre-v11.14) counts as Active because `<>"Achieved"` AND `<>"Cancelled"` matches blank. No data migration; no behaviour change for existing users until they explicitly mark a goal Archived.
+
+#### CF for archived rows
+
+One new conditional formatting rule on `A6:J<last>`:
+```
+=OR($J6="Achieved",$J6="Cancelled")  →  background #f1f3f4 + font color #9aa0a6 + italic
+```
+
+`$J6` with relative row evaluates per-row when the rule is applied to a multi-row range — Sheets' standard CF behaviour. The cleanup pass at the start of `applySavingStructure_` strips any rule touching col 8 (legacy On Track? from pre-v11.11) AND col 10 (J, our own — re-applied each run) before adding the new one, so re-running Update Script doesn't accumulate duplicate rules.
+
+#### Endpoints — atomic two-flag flip with shared-category guard
+
+**`archiveGoal({ goalName, status })`** — body shape `{ goalName: string, status: 'Achieved' | 'Cancelled' }`. Locked via `LockService.getScriptLock(10000)` per the existing concurrency convention.
+
+1. Read `Saving!A6:J105` once (100 rows × 10 cols, single batch read).
+2. Find row by `name === goalName`. Set its col J to `status`.
+3. Read the row's linkedCategory (col B).
+4. **Shared-category check:** scan the same data for any OTHER row where `linkedCategory` matches AND status is empty/Active AND name is non-blank. If found, skip the Setup write — another active goal still needs that sub-category in the PWA dropdown.
+5. If no other active goal uses it, find the Setup row by `E === linkedCategory` and set `F` to `TRUE`.
+6. Return `{ success, goal: {name, linkedCategory, status}, categoryArchived: bool }`.
+
+**`unarchiveGoal({ goalName })`** — mirror, but permissive: always sets Setup col F to FALSE (we don't have a notion of "this category should stay archived even though no active goal links it"). Status set to `Active`.
+
+Both endpoints log via `summarizeResult_` extension so the Logs tab shows `Banff Trip → Achieved (cat archived: Travel)` etc.
+
+#### What the PWA changes
+
+- `lib/budget.js` SAVING_RANGE: `A1:I105` → `A1:J105`. `parseDashboard` extracts `row[9]` as `status`; empty/missing falls back to `'Active'`.
+- `api.js`: thin `archiveGoal(name, status)` and `unarchiveGoal(name)` wrappers around the two endpoints.
+- `views/dashboard.js`: split `goals` array into `activeGoals` (`status === 'Active'`) and `archivedGoals` (everything else). Active goals render unchanged plus two new buttons inside the expanded card (Mark achieved / Mark cancelled). Archived goals tuck into a collapsible `Archived (N)` section at the bottom — each row shows name + status badge + Restore button. After every archive/unarchive, `invalidateDashboardCache()` runs and the view force-refreshes so the new state is visible.
+- `linkedSubs` Set in dashboard.js (which dedups the Budget category section against goal-linked subs) already covered all goals (active + archived) because we never filtered before the dedup. Archived goals' linked categories continue to be hidden from the Budget category cards. No change needed there.
+- `css/style.css`: `.goal-actions`, `.goal-action-btn` (with `.achieved`, `.cancelled`, `.restore` variants), `.archived-section` + `.archived-header` + `.archived-goal` styles. Reuses existing color tokens (`--green` for Achieved, `--muted` family for everything else).
+- `sw.js`: `CACHE_VERSION` v24 → v25 so service-worker-backed installs pull fresh JS.
+- `config.js`: `APP_VERSION` v0.15.4 → v0.16.
+
+#### What is intentionally NOT changed
+
+- **`rebuildBudgetInternal_` reads full `D2:E100` (line 2808)** — unchanged. Filtering archived would cause `budget.clear()` followed by a rebuild loop that omits archived categories' rows entirely. `budgetedMap` preserves user-entered amounts BY KEY, but only writes back rows for categories the loop iterates. Filtering = silent history loss. The contract is forward-only filtering. This was a deliberate trade-off — promoted to CLAUDE.md trip-up #27 specifically to prevent a future "cleanup pass" from breaking it.
+- **`handleCategorize_` validates against full `E2:E100`** — late-arriving transactions can still be categorized to archived sub-categories via API direct call. PWA dropdown won't offer them, but the escape hatch exists if needed.
+- **Transactions tab data validation still points at full `E2:E100`** — a user manually editing the Transactions tab can pick an archived category. Power-user concession; can tighten in a future iteration via a derived helper column on Setup.
+- **Saving tab "Linked Category" dropdown also reads full E:E** — only matters for goals you create AFTER archiving. Edge case; would behave correctly if it happened.
+- **`handleAddCategory_`'s case-insensitive duplicate check (line 467)** blocks re-adding an archived name. User must `unarchiveGoal` to bring it back rather than creating a "Banff Trip 2" with a different name. Natural protection — no extra logic needed.
+
+#### Backward compatibility
+
+Empty `Status` (col J) on existing Saving rows = Active. Empty `Archived?` (col F) on existing Setup rows = not archived. No data migration. `updateWorkbook` (Update Script) applies the schema additively — running it on a v11.13 sheet adds the columns + validations + CF; user data in cols A-I (Saving) and D-E (Setup) is preserved.
+
+#### Lesson
+
+**For soft-delete patterns over a rebuild-from-source data model, the archive flag is a forward-input filter, never a historical-reconstruction filter.** The natural instinct when adding an `Archived?` flag is to filter it everywhere ("be consistent") — but historical rebuilds need the unfiltered data, and Budget rows for archived categories are scaffolding for past-period spent/available numbers. Decide explicitly which surfaces are forward-looking (dropdowns, dashboard sums, Goal cards) and which are historical-reconstruction (rebuilds, named-range queries) — apply the filter only to the former.
