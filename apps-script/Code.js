@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.14';
+var APP_SCRIPT_VERSION = 'v11.15';
 var APP_SCRIPT_LAST_EDITED = '2026-04-25 17:37 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -2910,10 +2910,16 @@ function buildBudgetDashboard_(budget) {
       .setAllowInvalid(false)
       .build();
     budget.getRange('B1').setDataValidation(periodRule);
-    // Default to first period if blank
-    if (!budget.getRange('B1').getValue()) {
-      budget.getRange('B1').setValue('Dec 25 - Jan 20');
-    }
+    // v11.15: always set B1 to the period containing today's date.
+    // Previous behavior was "set to first period only if B1 is blank",
+    // but rebuildBudgetInternal_ calls budget.clear() before this, so
+    // B1 is always blank → reset → user had to re-pick the current
+    // period after every Budget Tools menu action. The PWA Dashboard
+    // reads B1, so the wrong selection silently produced wrong data.
+    // Now the refresh auto-snaps to today. If today is outside the
+    // 26-period range, falls back to the first period.
+    var todayPeriod = currentPeriodLabel_(setup);
+    budget.getRange('B1').setValue(todayPeriod || 'Dec 25 - Jan 20');
   }
 
   // --- Formatting ---
@@ -2990,6 +2996,40 @@ function buildAvailableFormula_(row) {
   return '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
     'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
     '0)+D' + row + '-E' + row;
+}
+
+/**
+ * v11.15: Returns the PayPeriods_Label whose [Start, End] range contains
+ * today's date. Used by buildBudgetDashboard_ to auto-set Budget tab B1
+ * after every menu action (rebuildBudgetInternal_ wipes B1; without this,
+ * it always reset to the first period and the PWA Dashboard rendered the
+ * wrong period's data).
+ *
+ * Returns null if today is outside all 26 periods (caller falls back to
+ * the first period or whatever default is appropriate). Date comparison
+ * normalizes today to midnight (Setup A:B store dates without times).
+ *
+ * @param {Sheet} setup The Setup tab (caller already has it; avoid an
+ *   extra lookup).
+ * @return {string|null}
+ */
+function currentPeriodLabel_(setup) {
+  if (!setup) return null;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  // PayPeriods_Start = A2:A27, PayPeriods_End = B2:B27, PayPeriods_Label = C2:C27
+  var rows = setup.getRange('A2:C27').getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var start = rows[i][0];
+    var end = rows[i][1];
+    var label = rows[i][2];
+    if (!(start instanceof Date) || !(end instanceof Date)) continue;
+    // Inclusive on both ends — periods are date-only and don't overlap.
+    if (today.getTime() >= start.getTime() && today.getTime() <= end.getTime()) {
+      return label;
+    }
+  }
+  return null;
 }
 
 /**
