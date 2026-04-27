@@ -1,6 +1,34 @@
 # CLAUDE.md — Orientation for new sessions
 
-You're in the **2026 Personal Budget + Transaction Categorizer** repo. This file orients you in 60 seconds. Then read `docs/task_plan.md` for current state and `docs/findings.md` for technical reference.
+You're in the **2026 Personal Budget + Transaction Categorizer** repo. This file orients you in 60 seconds.
+
+## 🚦 First thing to do in any new session
+
+**Before reading further, before responding to the user's first request, run these four state checks.** Drift between docs and reality is a real failure mode in this repo (see commit `0a316cc` — production was running v11.14 while every doc said v11.13 because someone deployed without committing).
+
+```bash
+# 1. What's been happening recently
+git log --oneline -10
+
+# 2. Are docs in sync with code? (verifies version pointers across 5 files)
+bash .claude/skills/update-budget-docs/lint.sh
+
+# 3. What's in the working tree right now?
+git status
+
+# 4. Deployed Apps Script version vs repo version (catches the v11.14 class of drift)
+URL="https://script.google.com/macros/s/AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ/exec"
+KEY="<paste from user, PWA localStorage, or Script Properties — see 'Reading the Google Sheet' below>"
+curl -sL "$URL?action=version&apiKey=$KEY" | python3 -m json.tool
+# Then: grep "^var APP_SCRIPT_VERSION" apps-script/Code.js
+# If deployed != repo, STOP and ask the user — someone deployed without committing.
+```
+
+If `STATUS.md` or `WORKING_ON.md` exists at the repo root, read it next — it captures in-flight context (what's mid-flight, what was just decided, what's not yet in long-term docs). It supersedes other docs when present.
+
+**Then read** `docs/task_plan.md` for current state and `docs/findings.md` for technical reference. **Then** ask the user what they want to work on.
+
+**Do not skip these checks** even if the user gives you an immediate task. The 30 seconds spent on state verification prevents 30-minute debugging detours from acting on stale assumptions.
 
 ## What this is
 
