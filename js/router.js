@@ -1,14 +1,26 @@
-// Minimal hash router. Each route is a lazy import of a view module that
-// exports { mount(root), unmount() }. Navigation is via anchor hrefs
-// (#/foo) — zero click handlers, browser back/forward just works.
+// Hash router with PERSISTENT VIEWS (v0.16.0).
 //
-// The shell passes a root element; the router clears it and hands it to
-// the active view. Views own their DOM subtree. The router also owns
-// tab-bar chrome (active class + pending-count badge on Categorize) and
-// records per-view mount timings for the diagnostics log.
+// Each route lazy-imports a view module that exports a default object.
+// The router keeps every view's DOM mounted after its first visit and
+// toggles visibility on tab switches — no re-mount, no re-render, no
+// re-fetch. Tab switches feel instant because there's no work to do.
+//
+// View interface:
+//   - mount(root)            REQUIRED — runs once, on first visit
+//   - onShow()               OPTIONAL — runs on every show after first mount
+//                            (light re-renders from store; no API calls)
+//   - onHide()               OPTIONAL — runs when the view is hidden
+//                            (close modals, pause timers)
+//   - unmount()              IGNORED  — kept for source compat; never called
+//                            now that views persist for the app lifetime
+//
+// Why persistent views: every Apps Script roundtrip is a ~2.5s network
+// tax (cold container + 302 + TLS) per the ClientMetrics data. Tab
+// switches that destroyed the DOM forced a re-render and often a
+// re-fetch — the worst possible UX. Now switches are essentially free.
 
 import { store } from './store.js';
-import { noteMount, recordEvent } from './lib/metrics.js';
+import { recordEvent } from './lib/metrics.js';
 
 const routes = {
   '#/categorize': () => import('./views/categorize.js'),
@@ -18,8 +30,12 @@ const routes = {
 
 const DEFAULT_ROUTE = '#/categorize';
 
-let currentView = null;
+// One entry per visited route, populated lazily on first mount.
+//   { hash: { view, container, mountedAt } }
+const mounted = {};
+
 let rootEl = null;
+let currentHash = null;
 
 export function start(root) {
   rootEl = root;
@@ -29,7 +45,9 @@ export function start(root) {
 
 export function navigate(hash) {
   if (window.location.hash === hash) {
-    // Already on that route — still re-mount (e.g. Settings tapped from setup).
+    // Already on that route — re-show the current view (calls onShow). This
+    // preserves the old "tap Settings while on Setup → refresh" behavior
+    // without doing a full destroy-and-recreate.
     mountFromHash();
     return;
   }
@@ -55,31 +73,84 @@ async function mountFromHash() {
     }
   }
 
-  if (currentView && typeof currentView.unmount === 'function') {
-    try { currentView.unmount(); } catch (e) { console.error('unmount failed', e); }
+  const previousHash = currentHash;
+  currentHash = hash;
+
+  // Hide every container that isn't the active one. Call onHide on the
+  // previously-visible view (if it has one).
+  for (const h of Object.keys(mounted)) {
+    if (h !== hash) {
+      mounted[h].container.hidden = true;
+      if (h === previousHash && typeof mounted[h].view.onHide === 'function') {
+        try { mounted[h].view.onHide(); } catch (e) { console.error('onHide failed', e); }
+      }
+    }
   }
 
-  rootEl.innerHTML = '';
+  if (mounted[hash]) {
+    // Already mounted — show it + run onShow for any cheap state refresh.
+    showExistingView(hash);
+  } else {
+    await mountNewView(hash);
+  }
+
   updateTabBar(hash);
   updateCategorizeBadge();
+}
 
-  noteMount();
+function showExistingView(hash) {
   const t0 = performance.now();
-  const mod = await routes[hash]();
+  const entry = mounted[hash];
+  entry.container.hidden = false;
+  if (typeof entry.view.onShow === 'function') {
+    try { entry.view.onShow(); } catch (e) { console.error('onShow failed', e); }
+  }
+  recordEvent('show:' + hash.replace('#/', ''), {
+    clientTotalMs: Math.round(performance.now() - t0),
+    note: 'cached',
+  });
+}
+
+async function mountNewView(hash) {
+  // First-time visit: lazy-import + create container + mount.
+  const t0 = performance.now();
+  let mod;
+  try {
+    mod = await routes[hash]();
+  } catch (e) {
+    console.error('view import failed', e);
+    recordEvent('mount:' + hash.replace('#/', ''), {
+      ok: false,
+      errorMsg: 'import:' + (e?.message || String(e)),
+    });
+    rootEl.insertAdjacentHTML(
+      'beforeend',
+      '<div style="padding:24px;color:#c62828">Failed to load view: ' + (e && e.message || e) + '</div>'
+    );
+    return;
+  }
   const tImported = performance.now();
 
-  currentView = mod.default;
+  const container = document.createElement('div');
+  container.dataset.viewRoot = hash.replace('#/', '');
+  rootEl.appendChild(container);
+
+  const view = mod.default;
   try {
-    await currentView.mount(rootEl);
+    await view.mount(container);
+    mounted[hash] = { view, container, mountedAt: Date.now() };
     const tMounted = performance.now();
     recordEvent('mount:' + hash.replace('#/', ''), {
-      clientTotalMs: tMounted - t0,
-      note: 'import=' + Math.round(tImported - t0) + 'ms,mount=' + Math.round(tMounted - tImported) + 'ms',
+      clientTotalMs: Math.round(tMounted - t0),
+      note: 'import=' + Math.round(tImported - t0) + 'ms,mount=' + Math.round(tMounted - tImported) + 'ms,first=true',
     });
   } catch (e) {
     console.error('mount failed', e);
-    recordEvent('mount:' + hash.replace('#/', ''), { ok: false, errorMsg: e?.message || String(e) });
-    rootEl.innerHTML = '<div style="padding:24px;color:#c62828">Failed to load view: ' + (e && e.message || e) + '</div>';
+    recordEvent('mount:' + hash.replace('#/', ''), {
+      ok: false,
+      errorMsg: e?.message || String(e),
+    });
+    container.innerHTML = '<div style="padding:24px;color:#c62828">Failed to load view: ' + (e && e.message || e) + '</div>';
   }
 }
 

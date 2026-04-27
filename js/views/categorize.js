@@ -207,6 +207,26 @@ export default {
     await refresh();
   },
 
+  // Persistent-view lifecycle (v0.16.0). The router keeps the DOM mounted
+  // after first visit and calls onShow() each time the user returns to this
+  // tab. renderAll() is cheap (pure DOM updates from store; no API calls)
+  // so this catches any state changes that happened while the user was on
+  // another tab — e.g. saving goal archived, sync removed an item.
+  onShow() {
+    renderAll();
+  },
+
+  // Called when navigating away to another tab. Close any transient UI so
+  // the user returning later doesn't see a half-open modal or dangling
+  // selection.
+  onHide() {
+    closeAddCategoryModal();
+    deselectTransaction();
+    calendarOpen = false;
+  },
+
+  // Kept for source compatibility — no longer called by the router (views
+  // persist for the app lifetime).
   unmount() {
     selectedTimestamp = null;
     calendarOpen = false;

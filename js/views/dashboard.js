@@ -50,10 +50,50 @@ export default {
     await load({ forceRefresh: false });
   },
 
+  // Persistent-view lifecycle (v0.16.0). The router keeps the Dashboard's
+  // DOM mounted after first visit and calls onShow() each time the user
+  // returns. We re-render from cachedData immediately (instant), then —
+  // only if the cache is older than the TTL — kick off a background
+  // refresh so the user eventually sees fresh data without waiting.
+  onShow() {
+    if (cachedData) {
+      renderPeriodBar();
+      renderBody();
+    }
+    if (isCacheStale_()) {
+      load({ forceRefresh: false }).catch(err => console.error('Dashboard background refresh failed', err));
+    }
+  },
+
+  // Hide cleanup — close any open dropdowns so the user returning later
+  // doesn't see a half-open calendar.
+  onHide() {
+    calendarOpen = false;
+  },
+
+  // Kept for source compatibility — no longer called by the router (views
+  // persist for the app lifetime).
   unmount() {
     calendarOpen = false;
   },
 };
+
+// Cache TTL — re-fetch dashboard data in the background if cachedData is
+// older than this. 60s is the sweet spot: tab-switch perceived speed wins
+// for normal use (you don't usually wait 60s between tab switches), but
+// background refresh kicks in when the user returns from a long stay
+// elsewhere. v0.16.0.
+const CACHE_TTL_MS = 60 * 1000;
+
+function isCacheStale_() {
+  if (!cachedData) return true;
+  // getDashboardData returns { data, fetchedAt } — fetchedAt may be on
+  // the wrapper or directly on data depending on the lib's shape. Tolerate
+  // either; treat missing timestamp as fresh enough (no spurious refresh).
+  const t = cachedData.fetchedAt || cachedData._fetchedAt || null;
+  if (!t) return false;
+  return (Date.now() - t) > CACHE_TTL_MS;
+}
 
 // ======================================================================
 // PERIOD BAR (identical shape to categorize.js; right slot shows progress)

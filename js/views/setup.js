@@ -37,8 +37,13 @@ const TEMPLATE = `
   </section>
 `;
 
+// Stash the mount root so onShow() can re-query within it. The router
+// passes the same container on first mount; afterwards the view persists.
+let setupRoot = null;
+
 export default {
   mount(root) {
+    setupRoot = root;
     root.innerHTML = TEMPLATE;
 
     const form = root.querySelector('#config-form');
@@ -57,6 +62,17 @@ export default {
     populateVersionInfo(root);
   },
 
+  // Persistent-view lifecycle (v0.16.0). Returning to Setup re-populates
+  // version info from the in-module cache (no API call). If the user
+  // changed the API key elsewhere (they can't currently — Setup is the
+  // only place — but defensive), the form values stay as they were so
+  // any half-typed input survives the trip.
+  onShow() {
+    if (setupRoot) populateVersionInfo(setupRoot);
+  },
+
+  // Kept for source compatibility — no longer called by the router (views
+  // persist for the app lifetime).
   unmount() {},
 };
 
