@@ -64,8 +64,15 @@ export async function fetchCategories() {
   return request('categories', buildUrl('categories'));
 }
 
-export async function parseAndFetch() {
-  return request('parseAndFetch', buildUrl('parseAndFetch'));
+// v0.17.0: opts.withParse=true forces an inline Gmail scan before reading
+// uncategorized rows. Default (false) is a pure read — the hourly Apps
+// Script trigger (v11.16) keeps the sheet fresh, so callers that don't
+// need real-time Gmail freshness skip the ~1-3 s scan and get the read
+// in ~200 ms server-side. Pass withParse:true from the user's explicit
+// "I want fresh now" actions (Parse pill, empty-state Refresh).
+export async function parseAndFetch({ withParse = false } = {}) {
+  const extra = withParse ? { withParse: '1' } : {};
+  return request('parseAndFetch', buildUrl('parseAndFetch', extra));
 }
 
 export async function batchCategorize(items) {

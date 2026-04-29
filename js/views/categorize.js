@@ -488,7 +488,13 @@ async function refresh({ force = false } = {}) {
 
     // Authoritative uncategorized list, with anything in the syncQueue
     // excluded (those are already queued for server write).
-    const data = await api.parseAndFetch();
+    //
+    // v0.17.0: the Apps Script hourly trigger (v11.16) keeps the sheet
+    // fresh, so default refresh is read-only (~200 ms server vs ~1-3 s
+    // when also scanning Gmail). force=true (Parse pill, empty-state
+    // Refresh) means the user is explicitly asking for "right now"
+    // freshness, so we tell the server to also run the parser.
+    const data = await api.parseAndFetch({ withParse: force });
     const queued = store.getSyncQueueTimestamps();
     store.setTransactions(data.transactions.filter(t => !queued.has(t.timestamp)));
 

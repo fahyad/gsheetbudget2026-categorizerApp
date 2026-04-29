@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.16';
+var APP_SCRIPT_VERSION = 'v11.17';
 var APP_SCRIPT_LAST_EDITED = '2026-04-28 22:36 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -175,13 +175,31 @@ function doPost(e) {
 }
 
 /**
- * parseAndFetch (v11.0 single-ledger): runs email parser, then returns
- * uncategorized transactions from the Transactions tab (where Category is
- * empty AND Timestamp is set). PWA contract is unchanged.
+ * parseAndFetch — returns uncategorized transactions from the Transactions
+ * tab (where Category is empty AND Timestamp is set).
+ *
+ * v11.0 single-ledger: introduced the read against Transactions.
+ * v11.17 Phase 2 of time-driven email parsing: the inline parse step is
+ *   now opt-in via ?withParse=1. The hourly `processInfoAlertsTrigger`
+ *   handles email parsing in the background, so PWA mount-time refresh
+ *   pays just the read cost (~200 ms) instead of also waiting on a
+ *   Gmail scan (~1-3 s).
+ *
+ * Backward compat: callers passing no `withParse` get a read-only response
+ * (parsed: 0). Old PWAs work fine because they never read `data.parsed`.
+ * Force-parse path: the Parse pill + empty-state Refresh button pass
+ * withParse=1 explicitly.
  */
 function handleParseAndFetch_(params) {
-  // Run email parser (internal, no UI) — writes new emails to Transactions tab
-  var parseResult = processInfoAlerts_();
+  // Run email parser only when the caller explicitly opts in. The hourly
+  // trigger (installEmailTrigger / processInfoAlertsTrigger) keeps the
+  // sheet fresh in the background; this inline path is only used when the
+  // user taps Parse / Refresh and is willing to wait for the Gmail scan.
+  var parseResult = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
+  var wantParse = params.withParse === '1' || params.withParse === 'true' || params.withParse === true;
+  if (wantParse) {
+    parseResult = processInfoAlerts_();
+  }
 
   // Read uncategorized transactions from Transactions
   var ss = SpreadsheetApp.getActiveSpreadsheet();
