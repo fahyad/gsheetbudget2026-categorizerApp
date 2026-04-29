@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.15';
+var APP_SCRIPT_VERSION = 'v11.16';
 var APP_SCRIPT_LAST_EDITED = '2026-04-27 15:15 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -57,6 +57,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Add Category', 'addCategory')
     .addItem('Parse Emails', 'processInfoAlerts')
+    .addItem('Setup Email Trigger (hourly auto-parse)', 'installEmailTrigger')
+    .addItem('Remove Email Trigger', 'uninstallEmailTrigger')
     .addItem('Set API Key', 'setApiKey')
     .addSeparator()
     .addItem('View Activity Log', 'showLogsTab')
@@ -3252,4 +3254,141 @@ function rebuildBudgetInternal_(mode, ss) {
   }
 
   return { error: null, totalRows: totalRows, periods: labels.length, categories: budgetCats.length, newCount: newCount };
+}
+
+// ================================================================
+// EMAIL TRIGGER (v11.16) — time-driven background email parsing
+// ================================================================
+//
+// Phase 1 of the time-driven parsing redesign. Runs processInfoAlerts_
+// hourly so new transactions appear in the sheet without the user opening
+// the PWA. Phase 2 (read-only parseAndFetch + force-parse button) is a
+// separate change.
+//
+// Architecture:
+//   processInfoAlertsTrigger  — thin wrapper around processInfoAlerts_,
+//                               called by the time-based trigger. Catches
+//                               errors, writes LAST_TRIGGER_RUN script
+//                               property, logs only "interesting" runs
+//                               (emails parsed or errors) so the Logs tab
+//                               doesn't fill with no-op entries (24/day).
+//   installEmailTrigger       — menu wrapper. Idempotent: deletes any
+//                               existing trigger for processInfoAlertsTrigger
+//                               before creating a new one. Hourly interval
+//                               (change to .everyMinutes(15) here if you
+//                               ever want it more responsive — valid values
+//                               for everyMinutes are 1, 5, 10, 15, 30).
+//   uninstallEmailTrigger     — menu wrapper. Removes all triggers for
+//                               processInfoAlertsTrigger.
+//
+// Trigger health: processInfoAlerts_ already wraps in LockService so the
+// trigger can't race with PWA-driven writes (see v11.3 / S4). On lock
+// timeout it logs and returns skipped=true; emails retry next interval.
+
+/**
+ * Trigger handler. Don't call directly — installed by installEmailTrigger
+ * and fired by Apps Script's scheduler. Wraps processInfoAlerts_ with
+ * crash-safe try/catch and updates LAST_TRIGGER_RUN script property for
+ * later trigger-health detection from the PWA.
+ */
+function processInfoAlertsTrigger() {
+  var start = Date.now();
+  try {
+    var r = processInfoAlerts_();
+    var dur = Date.now() - start;
+
+    PropertiesService.getScriptProperties()
+      .setProperty('LAST_TRIGGER_RUN', new Date().toISOString());
+
+    // processInfoAlerts_ already logs lock_timeout on its own.
+    if (r.skipped) return;
+
+    // Filter: only log "interesting" runs so 24 entries/day don't drown
+    // the Logs tab in noise. No-op runs (parsed: 0, errors: 0) are silent.
+    if (r.parsed > 0 || r.errors > 0) {
+      logActivity_(
+        'triggerParseEmails',
+        dur,
+        r.errors > 0 ? 'partial' : 'success',
+        'parsed:' + r.parsed + ' threads:' + r.threads + ' errors:' + r.errors,
+        r.errors > 0 ? r.errorDetails.join('; ') : ''
+      );
+    }
+  } catch (err) {
+    logActivity_(
+      'triggerParseEmails',
+      Date.now() - start,
+      'crash',
+      '',
+      err.toString() + '\n' + (err.stack || '')
+    );
+  }
+}
+
+/**
+ * Menu item: installs the hourly email-parsing trigger. Idempotent —
+ * safe to re-run. Logs install events to Logs tab so reinstalls are
+ * auditable. After install, Apps Script may prompt for additional
+ * permissions if the trigger handler touches scopes the previous grant
+ * didn't cover; if so, run "Parse Emails" once from the menu to force
+ * the prompt before relying on the trigger.
+ */
+function installEmailTrigger() {
+  var ui = SpreadsheetApp.getUi();
+
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'processInfoAlertsTrigger') {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+
+  ScriptApp.newTrigger('processInfoAlertsTrigger')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  logActivity_('installEmailTrigger', 0, 'success',
+    'interval:1hr removed_existing:' + removed, '');
+
+  ui.alert(
+    'Email trigger installed.\n\n' +
+    'New Scotiabank transaction emails will be parsed automatically once per hour. ' +
+    'You can keep using the PWA as before — Refresh will pick up whatever the trigger has fetched.\n\n' +
+    'To force a parse right now: Budget Tools → Parse Emails.\n' +
+    'To remove: Budget Tools → Remove Email Trigger.'
+  );
+}
+
+/**
+ * Menu item: removes the time-driven email trigger. The "Parse Emails"
+ * menu item still works manually after this. PWA's parseAndFetch also
+ * still parses inline (Phase 1 doesn't change the PWA contract).
+ */
+function uninstallEmailTrigger() {
+  var ui = SpreadsheetApp.getUi();
+
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'processInfoAlertsTrigger') {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+
+  logActivity_('uninstallEmailTrigger', 0, 'success', 'removed:' + removed, '');
+
+  if (removed === 0) {
+    ui.alert('No email trigger was installed (nothing to remove).');
+  } else {
+    ui.alert(
+      'Email trigger removed (' + removed + ' trigger' +
+      (removed === 1 ? '' : 's') + ' deleted).\n\n' +
+      'To parse emails now: Budget Tools → Parse Emails.\n' +
+      'To re-enable auto-parse: Budget Tools → Setup Email Trigger.'
+    );
+  }
 }
