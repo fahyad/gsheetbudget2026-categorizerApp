@@ -1450,3 +1450,53 @@ Skill behavior change worth noting: this session the user re-merged the branch w
 - Docs updated for verification per skill Example 3.
 - Lint clean.
 - Branch `pwa/v0.15-refinement` ready for next iteration. Open question for next session: do we want to start a Phase 23 to tackle the first-cold `mount:categorize` via a consolidated `dashboardData`-style endpoint, or accept the current floor + move to other work?
+
+---
+
+## Session: 2026-04-28 — Time-driven email parsing (v11.16 + v11.17 + PWA v0.17.0)
+
+### Setup
+User shared a critique pasted from another model that argued the dominant pain in this codebase was "using Apps Script as a synchronous HTTPS proxy in front of the Sheet" — every refresh paying the ~2.5 s network tax PLUS a Gmail scan, plus a long tail of trip-ups (302 / POST-body loss, deployment-ID coupling, observability via in-sheet Logs tab, CORS preflight workarounds) that all trace back to that one decision. The critique recommended Option 1 (minimum viable rebuild): keep the sheet, demote Apps Script to a time-driven background worker, eventually move PWA reads to the Sheets API directly. User asked me to plan the time-driven email parsing piece first ("planning and reviewing phase. Do not make changes").
+
+### Design
+Reviewed current state via direct file reads (no agent, since I had conversation context):
+- `processInfoAlerts_` already trigger-safe: LockService-protected since v11.3, idempotent via Gmail's `Budget/Processed` label + `uniqueSuffix_` hash on timestamps, batches reads/writes/labels.
+- `handleParseAndFetch_` does parse + read; PWA `js/api.js` `parseAndFetch()` is the only caller. PWA categorize `refresh()` doesn't read `data.parsed` or `data.parseErrors`, so removing those from the response is contract-safe.
+- No `ScriptApp.newTrigger` anywhere. Existing only entry point is the menu item "Parse Emails" + the inline call from `handleParseAndFetch_`.
+
+Wrote a planning doc covering goal, current state, two-phase architecture, edge cases (concurrency, trigger health, quota, PWA contract, backward compat in both directions), what could break, rollout sequence, and three open questions for the user. User chose:
+1. **Hourly** (vs 15-min) — being behind ≤1 hr is acceptable for personal use; less Logs noise.
+2. **Explicit menu item only** (no auto-install from `updateWorkbook`) — owner controls when the trigger goes live.
+3. **Phase 1 first, verify, then Phase 2** — staged rollout.
+
+### Implementation — Phase 1 (v11.16)
+Three new functions appended to `Code.js`:
+- `processInfoAlertsTrigger()` — wraps `processInfoAlerts_()` in try/catch, writes `LAST_TRIGGER_RUN` script property, and logs only "interesting" runs (parsed > 0 OR errors > 0) to keep 24 entries/day from drowning the Logs tab.
+- `installEmailTrigger()` — idempotent: deletes any existing trigger for the same handler before creating `ScriptApp.newTrigger(...).timeBased().everyHours(1).create()`. UI alert confirms install + tells user where to find the menu items.
+- `uninstallEmailTrigger()` — removes all triggers for `processInfoAlertsTrigger`. UI alert confirms removal count.
+
+Two new menu items added under Budget Tools (between "Parse Emails" and "Set API Key"). VERSION bumped Code.js → v11.16 + matching pointer bumps in CLAUDE.md / task_plan.md / progress.md / findings.md (lint required for the commit). Lint clean (0 blocking, 0 warnings). Deployed via `./deploy.sh "v11.16 — time-driven email parsing trigger"` → revision `@41`.
+
+### Phase 1 verification
+User reported back: row appeared in Logs sheet but Triggers panel was empty in editor. Diagnosed in two paths:
+- If the Logs row's Action was `installEmailTrigger`, it's a stale editor panel (programmatic `.create()` doesn't refresh the open Triggers panel) — hard-reload fixes.
+- If the Action was `triggerParseEmails`, user had run the *handler* via editor Run button (which only executes the function once for a permissions check, doesn't install a trigger). Need to use the menu.
+
+User confirmed working after the diagnostic. Both gotchas added as CLAUDE.md trip-ups #27 and #28.
+
+### Implementation — Phase 2 (v11.17 + PWA v0.17.0)
+Smaller change than expected once I read the categorize.js source: a "↻ Parse" outline pill already exists in the period bar's right slot (visible whenever the sync queue is empty), wired to `refresh({ force: true })`. So no new UI work — just plumb a `withParse` param through the existing `force` flag.
+
+- `Code.js handleParseAndFetch_`: skip `processInfoAlerts_()` unless `params.withParse` is `'1'`/`'true'`/`true`. Returns `{ parsed: 0 }` on the read-only path. Backward compat: old PWA never sends `withParse` → server reads as undefined → server skips parse → returns just-read uncategorized rows. Hourly trigger keeps the sheet fresh.
+- `js/api.js`: `parseAndFetch({ withParse = false })` appends `?withParse=1` only when caller asks.
+- `js/views/categorize.js`: `refresh({ force })` derives `withParse: force` for the `parseAndFetch` call. So:
+  - mount-time auto-refresh (force:false) → read-only (~200 ms server)
+  - "↻ Parse" pill (force:true) → with parse (~1–3 s server)
+  - empty-state Refresh button (force:true) → with parse
+
+Bumped APP_VERSION → v0.17.0, CACHE_VERSION → v26, APP_SCRIPT_VERSION → v11.17, VERSION.txt + doc pointers. Lint clean. Deployed @42.
+
+### Status — PHASE 1 VERIFIED, PHASE 2 PENDING USER VERIFICATION
+- v11.16 + Phase 1: confirmed by user — hourly trigger fires, parses Scotiabank emails into Transactions without PWA involvement. Two trip-ups documented (#27, #28).
+- v11.17 + PWA v0.17.0 + Phase 2: deployed @42, commits `cda57b1` (code+docs) + `65cea43` (post-deploy timestamp). Backward-compatible both directions, so rollback path is "redeploy v11.16" if anything misbehaves. On-device confirmation pending — user needs to force-reload the PWA so the v26 service worker activates, then verify the Setup tab shows v0.17.0 / v11.17 and the Categorize tab still functions normally.
+- Trigger-health detection (PWA reads `LAST_TRIGGER_RUN`, warns if stale) deliberately deferred — manual Parse pill is a sufficient escape hatch and we have no real evidence the trigger silently fails.

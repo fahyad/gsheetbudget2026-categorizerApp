@@ -1323,3 +1323,95 @@ Typical analysis queries (to be added as a sibling `ClientMetrics-Analysis` tab 
   4. **Client-side cached state beats server-side cleverness for perceived performance.** `store.transactions` in localStorage turned a 5 s blank screen into a <200 ms paint even on cold open — no server change required.
   5. **Diagnose before fixing** (from Phase 21 lesson): the four candidate fixes from earlier log analysis were all validated as correct by real `ClientMetrics` data, but the priority ordering changed after seeing network-tax-per-call. If we'd shipped the first three without data, we'd have under-estimated how much the re-mount throttle mattered.
   6. **Mount latency is a misleading single number for "is the app fast?"** — the metric improvement table above shows `mount:categorize` first-cold barely changed, but the user experience improved dramatically because cached txns paint before mount completes AND every subsequent in-session navigation dropped to ~1–16 ms. Always pair mount timings with cache-hit ratio + perceived-paint reasoning when evaluating perf changes.
+
+---
+
+### Time-Driven Email Parsing (v11.16 → v11.17)
+
+A design+implementation note rather than a bug postmortem — this is a deliberate architectural shift, not a fix for something broken.
+
+- **Situation:** After Phase 22 squeezed everything PWA-side, the residual cost on `mount:categorize` was the `parseAndFetch` server time itself (~1–3 s), most of which was the inline Gmail scan inside `processInfoAlerts_`. The ~2.5 s per-call network tax (302 redirect + TLS + cold-container queue) is unavoidable as long as the PWA talks to Apps Script as a synchronous proxy. So the next-largest lever was: stop doing work inside the request that doesn't need to be there.
+
+- **Decision:** Move email parsing off the synchronous request path entirely, using a time-driven Apps Script trigger. The PWA becomes a near-pure reader of pre-parsed rows. Two-phase split was deliberate — each phase rollback-able independently:
+  1. Trigger only (PWA contract unchanged) → if the trigger doesn't fire reliably, no behavior change for the user; manual `parseAndFetch` still parses inline.
+  2. Read-only `parseAndFetch` (with opt-in force-parse) → only ship after Phase 1 is observed working in production.
+
+- **Why this works for THIS app specifically:**
+  - `processInfoAlerts_` was already trigger-safe (LockService + `Budget/Processed` Gmail label + `uniqueSuffix_` timestamp hash). No correctness work needed.
+  - Single user, personal use case → being behind ≤1 hour on email is acceptable. No need for sub-minute responsiveness.
+  - Existing "↻ Parse" pill in the period bar was already wired for "I want fresh now" — re-using it for the explicit force-parse path meant zero new UI.
+
+- **Implementation:**
+  ```js
+  // apps-script/Code.js (v11.16)
+  function processInfoAlertsTrigger() {                         // trigger handler
+    var start = Date.now();
+    try {
+      var r = processInfoAlerts_();
+      PropertiesService.getScriptProperties()
+        .setProperty('LAST_TRIGGER_RUN', new Date().toISOString());
+      if (r.skipped) return;                                    // lock_timeout already logged
+      if (r.parsed > 0 || r.errors > 0) {                       // silent on no-op runs
+        logActivity_('triggerParseEmails', Date.now() - start,
+          r.errors > 0 ? 'partial' : 'success',
+          'parsed:' + r.parsed + ' threads:' + r.threads + ' errors:' + r.errors,
+          r.errors > 0 ? r.errorDetails.join('; ') : '');
+      }
+    } catch (err) {
+      logActivity_('triggerParseEmails', Date.now() - start, 'crash', '',
+        err.toString() + '\n' + (err.stack || ''));
+    }
+  }
+
+  function installEmailTrigger() {                              // idempotent
+    var existing = ScriptApp.getProjectTriggers();
+    for (var i = 0; i < existing.length; i++) {
+      if (existing[i].getHandlerFunction() === 'processInfoAlertsTrigger') {
+        ScriptApp.deleteTrigger(existing[i]);
+      }
+    }
+    ScriptApp.newTrigger('processInfoAlertsTrigger')
+      .timeBased().everyHours(1).create();
+  }
+  ```
+
+  ```js
+  // apps-script/Code.js (v11.17) — handleParseAndFetch_
+  var parseResult = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
+  var wantParse = params.withParse === '1' || params.withParse === 'true' || params.withParse === true;
+  if (wantParse) parseResult = processInfoAlerts_();
+  // ... read uncategorized rows from Transactions tab as before
+  ```
+
+  ```js
+  // js/api.js (v0.17.0)
+  export async function parseAndFetch({ withParse = false } = {}) {
+    const extra = withParse ? { withParse: '1' } : {};
+    return request('parseAndFetch', buildUrl('parseAndFetch', extra));
+  }
+
+  // js/views/categorize.js — inside refresh({ force })
+  const data = await api.parseAndFetch({ withParse: force });
+  ```
+
+- **Trade-offs accepted:**
+  - **Up to 60 min lag on new transactions** in the typical case. Mitigated by the existing "↻ Parse" pill, which still does the inline scan when the user explicitly asks for fresh.
+  - **No PWA-side trigger-health UI.** Apps Script's built-in failure-notification email exists if the trigger ever crashes; the manual Parse pill works as escape hatch. We can add a `LAST_TRIGGER_RUN` reader if we ever observe silent failures, but YAGNI for now.
+  - **Logs tab grows by ~1 entry per "interesting" trigger run** (filtered to runs that parsed something OR errored). At ~1–2 new transactions/day, ~30–60 entries/month. Existing 5000-row rotation handles this easily.
+
+- **Quota math:**
+  - Apps Script triggers: 24 runs/day × ~3 s = ~72 s/day on the 90-min/day consumer quota → 1.3% utilization.
+  - Gmail reads: ~50/day max → trivially under the 20k/day quota.
+
+- **Backward compat (verified by reading both directions):**
+  - Old PWA → new server: PWA never sends `withParse`. Server reads as undefined. Server skips parse, returns just the read. Hourly trigger keeps the sheet fresh, so the user sees nothing different.
+  - New PWA → old server: server doesn't know about `withParse`, parses anyway. Slower than ideal, correct.
+
+- **Bring-up gotchas (added as CLAUDE.md trip-ups):**
+  1. **Apps Script editor's Triggers panel doesn't auto-refresh after programmatic install.** A `ScriptApp.newTrigger().create()` call DOES install the trigger, but an open editor tab from before the install can show empty state. Hard-reload (Cmd+Shift+R) or close-and-reopen the tab. Trip-up #27.
+  2. **Running a trigger handler from the editor's Run button does NOT install a trigger.** It just executes the function once (useful for forcing a permissions re-grant on new scopes). The trigger itself comes from `installEmailTrigger`. Symptom of confusing the two: a `triggerParseEmails` row appears in Logs but no trigger shows in the Triggers panel. Trip-up #28.
+
+- **Lesson:**
+  1. **The single-decision review is more valuable than a per-bug review.** A long list of trip-ups (302 redirect, POST body loss, deployment-ID coupling, in-sheet observability, CORS preflight workaround) all rooted in one architectural choice ("Apps Script as synchronous proxy") were addressable by removing parsing from the request path — not by fixing each trip-up individually. When a code review surfaces 10 problems, look for the one decision that produced them.
+  2. **Re-use existing affordances before adding new UI.** I almost added a force-parse icon button in the categorize header. Re-reading `categorize.js` revealed the "↻ Parse" pill already existed for exactly this case. Net Phase 2 PWA change: ~10 lines.
+  3. **Stage rollouts that are independently reversible.** Phase 1 alone delivered the "emails appear without opening the PWA" win. Phase 2 alone delivered the perf win. Each is rollback-able to the prior state. Bundling them would have made any post-deploy issue harder to bisect.
