@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.17 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.17 makes `handleParseAndFetch_` read-only by default — inline Gmail scan only happens when the caller passes `?withParse=1` (Parse pill + empty-state Refresh). Mount-time refresh is now ~200ms server vs ~1-3s. v11.16 added Phase 1: `processInfoAlertsTrigger` (hourly handler) + `installEmailTrigger`/`uninstallEmailTrigger` menu items. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_` (Saving goal archive; recovered via `clasp pull` 2026-04-26). v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.18 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab (was: archive only hid from PWA dropdown). v11.17 makes `handleParseAndFetch_` read-only by default — inline Gmail scan only when caller passes `?withParse=1`. v11.16 added Phase 1 of time-driven parsing: `processInfoAlertsTrigger` (hourly) + install/uninstall menu items. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_` (Saving goal archive; recovered via `clasp pull` 2026-04-26). v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign + iOS safe-area fix + Savings/Goals dedup + client metrics pipeline. On branch `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). Neither has been merged to `main`. GitHub Pages currently serving from the active refinement branch for preview. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1500,3 +1500,46 @@ Bumped APP_VERSION → v0.17.0, CACHE_VERSION → v26, APP_SCRIPT_VERSION → v1
 - v11.16 + Phase 1: confirmed by user — hourly trigger fires, parses Scotiabank emails into Transactions without PWA involvement. Two trip-ups documented (#27, #28).
 - v11.17 + PWA v0.17.0 + Phase 2: deployed @42, commits `cda57b1` (code+docs) + `65cea43` (post-deploy timestamp). Backward-compatible both directions, so rollback path is "redeploy v11.16" if anything misbehaves. On-device confirmation pending — user needs to force-reload the PWA so the v26 service worker activates, then verify the Setup tab shows v0.17.0 / v11.17 and the Categorize tab still functions normally.
 - Trigger-health detection (PWA reads `LAST_TRIGGER_RUN`, warns if stale) deliberately deferred — manual Parse pill is a sufficient escape hatch and we have no real evidence the trigger silently fails.
+
+---
+
+## Session: 2026-04-29 — Goal archive flow (v11.18)
+
+### Setup
+User reported: *"the savings tab / setup tab is not working as intended, I finished the savings goal Banff, and I clicked archive in setup but it is still present in budget sheet."* The Banff savings goal was achieved (trip booked / spent the money), the user manually checked Setup col F (Archived?) for the linked sub-category, and expected the Banff row to disappear from the Budget tab. It didn't.
+
+### Diagnosis
+Direct file read of `apps-script/Code.js` showed three uncoupled concerns:
+1. `handleCategories_` (Code.js:262+) — already filters Setup col F since v11.14. PWA dropdown was correctly hiding Banff.
+2. `rebuildBudgetInternal_` (Code.js:3109+) — reads Setup `D2:E100`, ignores col F. Comment at line 1885–1887 documented the design intent: *"Archived rows are filtered from PWA dropdown but kept in Setup so historical Budget rebuilds preserve their data."* That decision was the source of the user's surprise.
+3. `handleArchiveGoal_` / `handleUnarchiveGoal_` (Code.js:1095+, v11.14) — DO atomically set Saving col J + flip Setup col F + return result. But: registered in `routeAction_` and otherwise dormant. No PWA caller, no menu wrapper. The "right" archive flow was unreachable from any UI.
+
+So three separate paths existed, each doing one slice of "archive" — none of them tied together for the user.
+
+### Design
+Three options offered to user:
+1. Minimal — just filter `rebuildBudgetInternal_` by Setup col F. ~10 min. Required user to also remember to manually update Saving col J + run Update Script.
+2. Proper — add `Archive Goal...` / `Unarchive Goal...` menu items that wrap the existing endpoint internals + force a Budget rebuild. ~30 min. Atomic.
+3. Best UX — PWA-side archive button. 1–2 hours. Defers a working sheet-side action.
+
+User chose Option 2 with these specific decisions:
+- **Drop Cancelled status** — single menu defaulting to Achieved. User can edit Saving col J manually if they ever want the Cancelled label.
+- **Disclose data loss in confirmation prompt** — opt-in to the destructive rebuild via YES/NO.
+- **Pre-fill goal name from active Saving selection** — small UX win for the common "looking at the Banff row, archive this one" case.
+- **Drop the "hide from PWA only" semantic** — archived = gone from Budget too. Symmetric.
+
+### Implementation
+v11.18 changes in `apps-script/Code.js`:
+1. **Refactored** `handleArchiveGoal_` / `handleUnarchiveGoal_` into lockless internals (`archiveGoalInternal_` / `unarchiveGoalInternal_`) plus thin web-handler wrappers that take the lock + serialize JSON. Same pattern as `processInfoAlerts` / `processInfoAlerts_`. Lets the menu hold one lock across mutate + rebuild.
+2. **Added duplicate-name detection** in `archiveGoalInternal_` — scans all Saving rows; if the goal name matches >1 row, fails with row numbers. Pre-v11.18 silently took the first match.
+3. **`rebuildBudgetInternal_` filter** — read range `D2:E100` → `D2:F100`; emit-list adds `&& catRaw[c][2] !== true`. Symmetric to `handleCategories_`'s existing filter.
+4. **`archiveGoalMenu` / `unarchiveGoalMenu`** — UI wrappers. Prompt for goal name (with pre-fill from active Saving selection + capped list of candidates), confirm with YES/NO disclosing data loss, take script lock, call internal, force `rebuildBudgetInternal_('rebuild', ss)`, log to Logs tab, show result. Rebuild failure is caught and surfaces a "rebuild failed; run Update Script to retry" message rather than crashing.
+5. **`promptForGoalName_(ui, verb)`** — shared helper. Filters by verb ('archive' shows Active goals; 'unarchive' shows Achieved/Cancelled). Pre-fills if user has a Saving-tab row 6+ selected and that row's name is in the candidate list.
+6. **Two new menu items** under Budget Tools, placed between "Add Category" and "Parse Emails": "Archive Goal..." and "Unarchive Goal...".
+7. **Bumped APP_SCRIPT_VERSION** → v11.18 + matching version pointers in CLAUDE.md / task_plan.md / progress.md / findings.md.
+
+### Status — DEPLOYED, ON-DEVICE VERIFICATION PENDING
+- v11.18 deployed @43 (commits `<hash1>` code+docs, `<hash2>` post-deploy timestamp).
+- User next step: reload sheet → confirm the two new menu items → run "Archive Goal..." → type "Banff" (or pre-fill works if they're on the Banff Saving row) → confirm the YES/NO data-loss prompt → verify Banff disappears from Budget tab. Run "Unarchive Goal..." to test reversibility (Banff rows return with Budgeted=0 as documented).
+- Trip-up #29 added covering the new flow + the still-possible manual-col-F failure mode where Saving and Setup tabs disagree.
+- Rollback path: revert the `rebuildBudgetInternal_` filter line. That alone restores Budget behavior; the new menu items become harmless no-ops (or remove them too).

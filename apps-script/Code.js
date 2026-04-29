@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.17';
+var APP_SCRIPT_VERSION = 'v11.18';
 var APP_SCRIPT_LAST_EDITED = '2026-04-29 07:28 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -56,6 +56,8 @@ function onOpen() {
     .addItem('3. Update Script (safe)', 'updateWorkbook')
     .addSeparator()
     .addItem('Add Category', 'addCategory')
+    .addItem('Archive Goal...', 'archiveGoalMenu')
+    .addItem('Unarchive Goal...', 'unarchiveGoalMenu')
     .addItem('Parse Emails', 'processInfoAlerts')
     .addItem('Setup Email Trigger (hourly auto-parse)', 'installEmailTrigger')
     .addItem('Remove Email Trigger', 'uninstallEmailTrigger')
@@ -1091,155 +1093,417 @@ function handleLogClientMetrics_(params) {
 // Banff is being archived, leave Setup's "Travel" archived flag = FALSE
 // because Europe still needs it active.
 //
+// v11.18: split the body into archiveGoalInternal_ (lockless, returns plain
+// object) so the menu wrapper archiveGoalMenu can call it under the same
+// lock as the Budget rebuild. Web handler still takes the lock + serializes
+// to JSON. Also added duplicate-name detection — if two Saving rows share
+// a name, fail explicitly so the user disambiguates instead of silently
+// picking the first match.
+//
 // Body shape: { goalName: string, status: 'Achieved' | 'Cancelled' }
 function handleArchiveGoal_(body) {
-  var goalName = (body && body.goalName ? String(body.goalName) : '').trim();
-  var status = (body && body.status ? String(body.status) : 'Achieved').trim();
-
-  if (!goalName) {
-    return jsonResponse_({ success: false, error: 'goalName is required' });
-  }
-  if (status !== 'Achieved' && status !== 'Cancelled') {
-    return jsonResponse_({ success: false, error: 'status must be Achieved or Cancelled' });
-  }
-
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
     return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
   }
-
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var saving = ss.getSheetByName('Saving');
-    var setup = ss.getSheetByName('Setup');
-    if (!saving || !setup) {
-      return jsonResponse_({ success: false, error: 'Saving or Setup tab not found' });
-    }
-
-    // Read all goal rows once: A=name, B=linkedCategory, J=status (col 10).
-    // Rows 6..SAVING_MAX_GOAL_ROW (105) — that's 100 rows of 10 cols.
-    var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
-
-    var foundIdx = -1;
-    var linkedCategory = '';
-    for (var r = 0; r < goalRows.length; r++) {
-      var name = String(goalRows[r][0] || '').trim();
-      if (name === goalName) {
-        foundIdx = r;
-        linkedCategory = String(goalRows[r][1] || '').trim();
-        break;
-      }
-    }
-    if (foundIdx === -1) {
-      return jsonResponse_({ success: false, error: 'Goal not found: ' + goalName });
-    }
-
-    // Write status to col J of the matched row.
-    saving.getRange(foundIdx + 6, 10).setValue(status);
-
-    // Decide whether to archive the linked sub-category in Setup col F.
-    // Skip if linkedCategory is empty, or if any OTHER active goal links to it.
-    var categoryArchived = false;
-    if (linkedCategory) {
-      var hasOtherActive = false;
-      for (var r2 = 0; r2 < goalRows.length; r2++) {
-        if (r2 === foundIdx) continue;
-        var otherName = String(goalRows[r2][0] || '').trim();
-        if (!otherName) continue;
-        var otherLinked = String(goalRows[r2][1] || '').trim();
-        var otherStatus = String(goalRows[r2][9] || '').trim();
-        var otherIsActive = (otherStatus === '' || otherStatus === 'Active');
-        if (otherLinked === linkedCategory && otherIsActive) {
-          hasOtherActive = true;
-          break;
-        }
-      }
-
-      if (!hasOtherActive) {
-        var setupRows = setup.getRange('D2:F100').getValues();
-        for (var s = 0; s < setupRows.length; s++) {
-          var sub = String(setupRows[s][1] || '').trim();
-          if (sub === linkedCategory) {
-            setup.getRange(s + 2, 6).setValue(true);
-            categoryArchived = true;
-            break;
-          }
-        }
-      }
-    }
-
-    return jsonResponse_({
-      success: true,
-      goal: { name: goalName, linkedCategory: linkedCategory, status: status },
-      categoryArchived: categoryArchived
-    });
+    return jsonResponse_(archiveGoalInternal_(
+      body && body.goalName,
+      body && body.status
+    ));
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Internal — does the work, no lock, no JSON wrap. Caller must hold the
+ * script lock. Returns a plain object: { success, goal, categoryArchived }
+ * on success; { success:false, error } on failure.
+ */
+function archiveGoalInternal_(goalNameRaw, statusRaw, ssOpt) {
+  var goalName = (goalNameRaw == null ? '' : String(goalNameRaw)).trim();
+  var status = (statusRaw == null ? 'Achieved' : String(statusRaw)).trim();
+
+  if (!goalName) return { success: false, error: 'goalName is required' };
+  if (status !== 'Achieved' && status !== 'Cancelled') {
+    return { success: false, error: 'status must be Achieved or Cancelled' };
+  }
+
+  var ss = ssOpt || SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  var setup = ss.getSheetByName('Setup');
+  if (!saving || !setup) {
+    return { success: false, error: 'Saving or Setup tab not found' };
+  }
+
+  // Read all goal rows once: A=name, B=linkedCategory, J=status (col 10).
+  // Rows 6..SAVING_MAX_GOAL_ROW (105) — that's 100 rows of 10 cols.
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  // Duplicate-name detection (v11.18): scan ALL rows; bail if more than one
+  // matches. Previously this took the first match silently, which would
+  // archive the wrong row if names happened to clash.
+  var matchIdxs = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (name === goalName) matchIdxs.push(r);
+  }
+  if (matchIdxs.length === 0) {
+    return { success: false, error: 'Goal not found: ' + goalName };
+  }
+  if (matchIdxs.length > 1) {
+    var rowNums = matchIdxs.map(function(idx) { return idx + 6; }).join(', ');
+    return { success: false, error: 'Goal name "' + goalName + '" appears in multiple rows (' + rowNums + '). Rename one before archiving.' };
+  }
+
+  var foundIdx = matchIdxs[0];
+  var linkedCategory = String(goalRows[foundIdx][1] || '').trim();
+  var prevStatus = String(goalRows[foundIdx][9] || '').trim();
+
+  // Write status to col J of the matched row.
+  saving.getRange(foundIdx + 6, 10).setValue(status);
+
+  // Decide whether to archive the linked sub-category in Setup col F.
+  // Skip if linkedCategory is empty, or if any OTHER active goal links to it.
+  var categoryArchived = false;
+  if (linkedCategory) {
+    var hasOtherActive = false;
+    for (var r2 = 0; r2 < goalRows.length; r2++) {
+      if (r2 === foundIdx) continue;
+      var otherName = String(goalRows[r2][0] || '').trim();
+      if (!otherName) continue;
+      var otherLinked = String(goalRows[r2][1] || '').trim();
+      var otherStatus = String(goalRows[r2][9] || '').trim();
+      var otherIsActive = (otherStatus === '' || otherStatus === 'Active');
+      if (otherLinked === linkedCategory && otherIsActive) {
+        hasOtherActive = true;
+        break;
+      }
+    }
+
+    if (!hasOtherActive) {
+      var setupRows = setup.getRange('D2:F100').getValues();
+      for (var s = 0; s < setupRows.length; s++) {
+        var sub = String(setupRows[s][1] || '').trim();
+        if (sub === linkedCategory) {
+          setup.getRange(s + 2, 6).setValue(true);
+          categoryArchived = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    success: true,
+    goal: { name: goalName, linkedCategory: linkedCategory, status: status, prevStatus: prevStatus },
+    categoryArchived: categoryArchived
+  };
 }
 
 // unarchiveGoal: reverse archiveGoal. Sets Saving row status to Active and
 // clears the linked sub-category's Setup col F. Permissive — clears the
 // flag regardless of other goals.
 //
+// v11.18: same split pattern as archiveGoal — internal + thin handler.
+//
 // Body shape: { goalName: string }
 function handleUnarchiveGoal_(body) {
-  var goalName = (body && body.goalName ? String(body.goalName) : '').trim();
-  if (!goalName) {
-    return jsonResponse_({ success: false, error: 'goalName is required' });
-  }
-
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
     return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
   }
-
   try {
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    var saving = ss.getSheetByName('Saving');
-    var setup = ss.getSheetByName('Setup');
-    if (!saving || !setup) {
-      return jsonResponse_({ success: false, error: 'Saving or Setup tab not found' });
-    }
-
-    var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
-    var foundIdx = -1;
-    var linkedCategory = '';
-    for (var r = 0; r < goalRows.length; r++) {
-      var name = String(goalRows[r][0] || '').trim();
-      if (name === goalName) {
-        foundIdx = r;
-        linkedCategory = String(goalRows[r][1] || '').trim();
-        break;
-      }
-    }
-    if (foundIdx === -1) {
-      return jsonResponse_({ success: false, error: 'Goal not found: ' + goalName });
-    }
-
-    saving.getRange(foundIdx + 6, 10).setValue('Active');
-
-    var categoryUnarchived = false;
-    if (linkedCategory) {
-      var setupRows = setup.getRange('D2:F100').getValues();
-      for (var s = 0; s < setupRows.length; s++) {
-        var sub = String(setupRows[s][1] || '').trim();
-        if (sub === linkedCategory) {
-          setup.getRange(s + 2, 6).setValue(false);
-          categoryUnarchived = true;
-          break;
-        }
-      }
-    }
-
-    return jsonResponse_({
-      success: true,
-      goal: { name: goalName, linkedCategory: linkedCategory, status: 'Active' },
-      categoryUnarchived: categoryUnarchived
-    });
+    return jsonResponse_(unarchiveGoalInternal_(body && body.goalName));
   } finally {
     lock.releaseLock();
   }
+}
+
+function unarchiveGoalInternal_(goalNameRaw, ssOpt) {
+  var goalName = (goalNameRaw == null ? '' : String(goalNameRaw)).trim();
+  if (!goalName) return { success: false, error: 'goalName is required' };
+
+  var ss = ssOpt || SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  var setup = ss.getSheetByName('Setup');
+  if (!saving || !setup) {
+    return { success: false, error: 'Saving or Setup tab not found' };
+  }
+
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  var matchIdxs = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (name === goalName) matchIdxs.push(r);
+  }
+  if (matchIdxs.length === 0) {
+    return { success: false, error: 'Goal not found: ' + goalName };
+  }
+  if (matchIdxs.length > 1) {
+    var rowNums = matchIdxs.map(function(idx) { return idx + 6; }).join(', ');
+    return { success: false, error: 'Goal name "' + goalName + '" appears in multiple rows (' + rowNums + '). Rename one before unarchiving.' };
+  }
+
+  var foundIdx = matchIdxs[0];
+  var linkedCategory = String(goalRows[foundIdx][1] || '').trim();
+  var prevStatus = String(goalRows[foundIdx][9] || '').trim();
+
+  saving.getRange(foundIdx + 6, 10).setValue('Active');
+
+  var categoryUnarchived = false;
+  if (linkedCategory) {
+    var setupRows = setup.getRange('D2:F100').getValues();
+    for (var s = 0; s < setupRows.length; s++) {
+      var sub = String(setupRows[s][1] || '').trim();
+      if (sub === linkedCategory) {
+        setup.getRange(s + 2, 6).setValue(false);
+        categoryUnarchived = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    success: true,
+    goal: { name: goalName, linkedCategory: linkedCategory, status: 'Active', prevStatus: prevStatus },
+    categoryUnarchived: categoryUnarchived
+  };
+}
+
+// ================================================================
+// GOAL ARCHIVE — MENU WRAPPERS (v11.18)
+// ================================================================
+//
+// Sheet-side flow for archiving a savings goal. Wraps archiveGoalInternal_
+// + a forced Budget rebuild so the user gets a single "this goal is done"
+// action. The PWA contract (handleArchiveGoal_/handleUnarchiveGoal_) is
+// unchanged and still callable from any future PWA UI.
+//
+// Why also rebuild Budget here:
+//   rebuildBudgetInternal_ (v11.18) filters Setup col F so archived
+//   sub-categories drop out of the Budget tab. Without an explicit
+//   rebuild from the menu, the user wouldn't see the change until the
+//   next Update Script / addCategory call. Forcing the rebuild here
+//   makes archive feel atomic.
+//
+// Lock strategy:
+//   The menu function takes the script lock once and holds it across
+//   archiveGoalInternal_ + rebuildBudgetInternal_ — so the hourly email
+//   trigger and PWA writes can't interleave a half-rebuilt Budget tab.
+
+function archiveGoalMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var goalName = promptForGoalName_(ui, 'archive');
+  if (!goalName) return;
+
+  // Look up linked category for the confirmation message (read-only, no lock needed).
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) { ui.alert('Saving tab not found.'); return; }
+  var nameAndCat = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 2).getValues();
+  var linkedCategory = '';
+  for (var r = 0; r < nameAndCat.length; r++) {
+    if (String(nameAndCat[r][0] || '').trim() === goalName) {
+      linkedCategory = String(nameAndCat[r][1] || '').trim();
+      break;
+    }
+  }
+
+  var catRef = linkedCategory || '(no linked category)';
+  var confirmText = 'Archive "' + goalName + '"?\n\n' +
+    'This will:\n' +
+    '  • Set Saving status to Achieved\n' +
+    '  • Hide "' + catRef + '" from the PWA categorize dropdown\n' +
+    '    (only if no other active goals depend on this sub-category)\n' +
+    '  • Remove "' + catRef + '" rows from the Budget tab on rebuild\n' +
+    '  • LOSE any Budgeted values for that category in past periods\n' +
+    '    (Spent values stay computed from Transactions and remain reachable)\n\n' +
+    'Continue?';
+
+  var confirm = ui.alert('Archive Goal', confirmText, ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    ui.alert('Another operation in progress, try again.');
+    return;
+  }
+  try {
+    var result = archiveGoalInternal_(goalName, 'Achieved', ss);
+    if (!result.success) {
+      ui.alert('Archive failed: ' + result.error);
+      return;
+    }
+
+    // Force a Budget rebuild so archived sub-categories disappear
+    // immediately. 'rebuild' mode (vs 'add') wipes + rebuilds.
+    try {
+      rebuildBudgetInternal_('rebuild', ss);
+    } catch (rebuildErr) {
+      logActivity_('archiveGoalMenu', 0, 'rebuild_failed',
+        'goal:' + goalName, rebuildErr.toString() + '\n' + (rebuildErr.stack || ''));
+      ui.alert('Goal archived but Budget rebuild failed:\n' + rebuildErr.toString() +
+        '\n\nRun Budget Tools → Update Script to retry the rebuild.');
+      return;
+    }
+
+    var msg = 'Goal "' + result.goal.name + '" archived.';
+    if (result.categoryArchived) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory +
+        '" archived in Setup; will not appear in PWA dropdown.';
+    } else if (result.goal.linkedCategory) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory +
+        '" kept active because other goals still depend on it.';
+    }
+    msg += '\n\nBudget tab rebuilt — archived categories no longer appear.';
+
+    logActivity_('archiveGoalMenu', 0, 'success',
+      'goal:' + goalName + ' categoryArchived:' + result.categoryArchived, '');
+    ui.alert(msg);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function unarchiveGoalMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var goalName = promptForGoalName_(ui, 'unarchive');
+  if (!goalName) return;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) { ui.alert('Saving tab not found.'); return; }
+  var nameAndCat = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 2).getValues();
+  var linkedCategory = '';
+  for (var r = 0; r < nameAndCat.length; r++) {
+    if (String(nameAndCat[r][0] || '').trim() === goalName) {
+      linkedCategory = String(nameAndCat[r][1] || '').trim();
+      break;
+    }
+  }
+
+  var catRef = linkedCategory || '(no linked category)';
+  var confirmText = 'Unarchive "' + goalName + '"?\n\n' +
+    'This will:\n' +
+    '  • Set Saving status back to Active\n' +
+    '  • Unhide "' + catRef + '" in the PWA categorize dropdown\n' +
+    '  • Re-add "' + catRef + '" rows to the Budget tab on rebuild\n' +
+    '    (Budgeted values start at 0 — past values were lost on the original archive)\n\n' +
+    'Continue?';
+
+  var confirm = ui.alert('Unarchive Goal', confirmText, ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    ui.alert('Another operation in progress, try again.');
+    return;
+  }
+  try {
+    var result = unarchiveGoalInternal_(goalName, ss);
+    if (!result.success) {
+      ui.alert('Unarchive failed: ' + result.error);
+      return;
+    }
+
+    try {
+      rebuildBudgetInternal_('rebuild', ss);
+    } catch (rebuildErr) {
+      logActivity_('unarchiveGoalMenu', 0, 'rebuild_failed',
+        'goal:' + goalName, rebuildErr.toString() + '\n' + (rebuildErr.stack || ''));
+      ui.alert('Goal unarchived but Budget rebuild failed:\n' + rebuildErr.toString() +
+        '\n\nRun Budget Tools → Update Script to retry the rebuild.');
+      return;
+    }
+
+    var msg = 'Goal "' + result.goal.name + '" unarchived (Active).';
+    if (result.categoryUnarchived) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory + '" unhidden in Setup.';
+    }
+    msg += '\n\nBudget tab rebuilt — category rows restored (Budgeted starts at 0).';
+
+    logActivity_('unarchiveGoalMenu', 0, 'success',
+      'goal:' + goalName + ' categoryUnarchived:' + result.categoryUnarchived, '');
+    ui.alert(msg);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Prompts the user for a goal name. Pre-fills from the active Saving tab
+ * selection when applicable. Shows a list of candidate goals filtered by
+ * verb ('archive' = Active goals only; 'unarchive' = Achieved/Cancelled).
+ *
+ * Returns the trimmed goal name string, or null if the user cancelled.
+ */
+function promptForGoalName_(ui, verb) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) {
+    ui.alert('Saving tab not found.');
+    return null;
+  }
+
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  var candidates = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (!name) continue;
+    var st = String(goalRows[r][9] || '').trim();
+    var isActive = (st === '' || st === 'Active');
+    if (verb === 'archive' && isActive) candidates.push(name);
+    if (verb === 'unarchive' && !isActive) candidates.push(name);
+  }
+
+  if (candidates.length === 0) {
+    ui.alert(
+      verb === 'archive'
+        ? 'No active goals to archive. (Saving tab has no rows with status Active or blank.)'
+        : 'No archived goals to unarchive. (Saving tab has no rows with status Achieved or Cancelled.)'
+    );
+    return null;
+  }
+
+  // Pre-fill from active Saving-tab selection when applicable.
+  var prefill = '';
+  var activeSheet = ss.getActiveSheet();
+  if (activeSheet && activeSheet.getName() === 'Saving') {
+    var activeCell = activeSheet.getActiveCell();
+    if (activeCell && activeCell.getRow() >= 6) {
+      var nameAtRow = String(saving.getRange(activeCell.getRow(), 1).getValue() || '').trim();
+      if (nameAtRow && candidates.indexOf(nameAtRow) !== -1) {
+        prefill = nameAtRow;
+      }
+    }
+  }
+
+  // Build the prompt body. Cap the list at 10 names to keep the modal small.
+  var listShown = candidates.slice(0, 10).join('\n  • ');
+  var more = candidates.length > 10 ? '\n  • … and ' + (candidates.length - 10) + ' more' : '';
+  var listText = '\n  • ' + listShown + more;
+
+  var promptText =
+    (verb === 'archive' ? 'Goals available to archive:' : 'Goals available to unarchive:') +
+    listText + '\n\nType the exact goal name' +
+    (prefill ? '\n(or leave blank to use pre-filled selection: "' + prefill + '")' : '') + ':';
+
+  var response = ui.prompt(
+    verb === 'archive' ? 'Archive Goal' : 'Unarchive Goal',
+    promptText,
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return null;
+
+  var typed = response.getResponseText().trim();
+  if (!typed && prefill) typed = prefill;
+  if (!typed) return null;
+  return typed;
 }
 
 /**
@@ -3123,10 +3387,19 @@ function rebuildBudgetInternal_(mode, ss) {
     return { error: 'No period labels found in Setup. Run "Build Workbook" first.' };
   }
 
-  var catRaw = setup.getRange('D2:E100').getValues();
+  // v11.18: read D:F (was D:E) and filter out rows where Setup col F
+  // (Archived?) is checked. Symmetric to handleCategories_'s existing
+  // filter — archived sub-categories are now excluded from the Budget
+  // tab as well as from the PWA dropdown. This makes "Archive Goal"
+  // produce the user-expected outcome (Banff disappears from Budget on
+  // rebuild). Trade-off: budgeted values for archived categories in
+  // past periods are lost on the next wipe-and-rebuild — disclosed in
+  // the Archive Goal confirmation prompt. Spent values stay reachable
+  // via Transactions (formula-derived).
+  var catRaw = setup.getRange('D2:F100').getValues();
   var budgetCats = [];
   for (var c = 0; c < catRaw.length; c++) {
-    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income') {
+    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income' && catRaw[c][2] !== true) {
       budgetCats.push(catRaw[c][1]);
     }
   }

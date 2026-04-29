@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.17 Apps Script** (Phase 2 of time-driven email parsing — `handleParseAndFetch_` read-only by default, inline Gmail scan opt-in via `?withParse=1`; v11.16 added the hourly `processInfoAlertsTrigger` + install/uninstall menu items; v11.15 Budget B1 auto-snaps to today's period via `currentPeriodLabel_`; v11.14 `handleArchiveGoal_`/`handleUnarchiveGoal_` for Saving tab — recovered into repo via `clasp pull` 2026-04-26; v11.13 echoes `_elapsedMs` + `logClientMetrics` endpoint, ClientMetrics tab) + **v0.17.0 PWA** (cache v26; `parseAndFetch({ withParse })` partner of v11.17 — mount-time read-only, Parse pill / empty-state Refresh force-parse). v0.16.0 introduced persistent views (cache v25 — tab switches keep DOM mounted). Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
+> Reference document. Sections describe the system as it currently exists: **v11.18 Apps Script** (Goal archive flow — `Archive Goal...` / `Unarchive Goal...` menu items wrap the v11.14 endpoint internals + force Budget rebuild; `rebuildBudgetInternal_` now filters Setup col F so archived sub-categories drop from Budget too; v11.17 Phase 2 of time-driven email parsing — `handleParseAndFetch_` read-only by default, inline scan opt-in via `?withParse=1`; v11.16 added the hourly `processInfoAlertsTrigger` + install/uninstall menu items; v11.15 Budget B1 auto-snaps to today's period via `currentPeriodLabel_`; v11.14 `handleArchiveGoal_`/`handleUnarchiveGoal_` for Saving tab — recovered into repo via `clasp pull` 2026-04-26; v11.13 echoes `_elapsedMs` + `logClientMetrics` endpoint, ClientMetrics tab) + **v0.17.0 PWA** (cache v26; `parseAndFetch({ withParse })` partner of v11.17). v0.16.0 introduced persistent views (cache v25 — tab switches keep DOM mounted). Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1415,3 +1415,101 @@ A design+implementation note rather than a bug postmortem — this is a delibera
   1. **The single-decision review is more valuable than a per-bug review.** A long list of trip-ups (302 redirect, POST body loss, deployment-ID coupling, in-sheet observability, CORS preflight workaround) all rooted in one architectural choice ("Apps Script as synchronous proxy") were addressable by removing parsing from the request path — not by fixing each trip-up individually. When a code review surfaces 10 problems, look for the one decision that produced them.
   2. **Re-use existing affordances before adding new UI.** I almost added a force-parse icon button in the categorize header. Re-reading `categorize.js` revealed the "↻ Parse" pill already existed for exactly this case. Net Phase 2 PWA change: ~10 lines.
   3. **Stage rollouts that are independently reversible.** Phase 1 alone delivered the "emails appear without opening the PWA" win. Phase 2 alone delivered the perf win. Each is rollback-able to the prior state. Bundling them would have made any post-deploy issue harder to bisect.
+
+---
+
+### Goal Archive Flow (v11.18)
+
+A user-visible behavior change rather than a bug postmortem: archive of a savings goal now removes the linked sub-category from the Budget tab, where previously it only hid from the PWA dropdown.
+
+- **Symptom:** User completed the "Banff" savings goal, manually checked Setup col F (Archived?) for the linked sub-category, and reported the Banff row was still appearing in the Budget tab. Expectation didn't match design.
+
+- **Root cause:** Three separate concerns hadn't been linked into one user-facing action.
+  - `handleCategories_` already filtered Setup col F → PWA dropdown was correct.
+  - `rebuildBudgetInternal_` read only `D2:E100`, ignored col F → Budget tab kept archived rows by design (comment at Code.js:1885 documented this as intentional: *"kept in Setup so historical Budget rebuilds preserve their data"*).
+  - `handleArchiveGoal_` / `handleUnarchiveGoal_` (v11.14) DO atomically set Saving col J + flip Setup col F. But registered in `routeAction_` and dormant — no PWA caller, no menu wrapper. The "right" flow was unreachable.
+
+- **Design decision:** The original "kept in Budget" rule made sense for "I want to stop categorizing new transactions but keep history visible" — a use case nobody actually has in this single-user app. Real use case is "I'm done with this goal; remove it." So:
+  - **Filter Setup col F in `rebuildBudgetInternal_` too.** Symmetric to `handleCategories_`.
+  - **Add `Archive Goal...` / `Unarchive Goal...` menu items.** Wrap the existing endpoint internals + force a Budget rebuild atomically.
+  - **No PWA-side archive UI in this round** — sheet-side menu solves the immediate user need; PWA-side would be a follow-up.
+
+- **Trade-off accepted:** Budgeted values for archived sub-categories in past periods are lost on the wipe-and-rebuild. Spent values stay reachable (computed via SUMIFS on Transactions). Disclosed in the menu's YES/NO confirmation prompt. Justification: archive is a "this goal is done" signal — keeping budgeted values around for a category the user explicitly stopped budgeting to is more clutter than help.
+
+- **Fix:**
+  ```js
+  // Code.js — refactored archive handler. Lockless internal + thin web wrapper.
+  function handleArchiveGoal_(body) {
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(10000)) {
+      return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+    }
+    try {
+      return jsonResponse_(archiveGoalInternal_(body && body.goalName, body && body.status));
+    } finally { lock.releaseLock(); }
+  }
+
+  function archiveGoalInternal_(goalNameRaw, statusRaw, ssOpt) {
+    // ... validation, scan Saving rows ...
+    // Duplicate-name detection (v11.18 addition):
+    var matchIdxs = [];
+    for (var r = 0; r < goalRows.length; r++) {
+      if (String(goalRows[r][0] || '').trim() === goalName) matchIdxs.push(r);
+    }
+    if (matchIdxs.length > 1) {
+      return { success: false, error: '...appears in multiple rows...' };
+    }
+    // ... rest unchanged from v11.14 logic ...
+    return { success: true, goal: {...}, categoryArchived: <bool> };
+  }
+  ```
+
+  ```js
+  // Code.js — rebuildBudgetInternal_ filter change.
+  // Before:
+  var catRaw = setup.getRange('D2:E100').getValues();
+  if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income') {
+    budgetCats.push(catRaw[c][1]);
+  }
+  // After (v11.18):
+  var catRaw = setup.getRange('D2:F100').getValues();
+  if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income' && catRaw[c][2] !== true) {
+    budgetCats.push(catRaw[c][1]);
+  }
+  ```
+
+  ```js
+  // Code.js — menu wrapper holds one lock across archive + rebuild.
+  function archiveGoalMenu() {
+    var ui = SpreadsheetApp.getUi();
+    var goalName = promptForGoalName_(ui, 'archive');
+    if (!goalName) return;
+    // ... show YES/NO confirmation with data-loss disclosure ...
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(10000)) { ui.alert('Another operation in progress, try again.'); return; }
+    try {
+      var result = archiveGoalInternal_(goalName, 'Achieved', ss);
+      if (!result.success) { ui.alert('Archive failed: ' + result.error); return; }
+      try { rebuildBudgetInternal_('rebuild', ss); }
+      catch (rebuildErr) { /* log + tell user to run Update Script */ }
+      // ... success message including "kept active because other goals" hint ...
+    } finally { lock.releaseLock(); }
+  }
+  ```
+
+- **Edge cases handled:**
+  - **Duplicate goal names** (v11.18 new): scan all rows; fail with row numbers if same name in multiple rows. Was: silently pick first match.
+  - **Linked sub-category shared with another active goal**: `hasOtherActive` check (preserved from v11.14) — Setup col F flip is skipped; `categoryArchived: false` returned; menu surfaces the reason.
+  - **No active goals to archive / no archived goals to unarchive**: `promptForGoalName_` short-circuits with `ui.alert('No goals to archive...')` before showing the prompt.
+  - **Rebuild failure mid-archive**: wrapped in try/catch inside the menu; logs `archiveGoalMenu / rebuild_failed` to Logs tab, tells user to run Update Script manually. Saving status + Setup col F still get committed (idempotent on re-run).
+  - **User cancels at either prompt**: returns null, no lock acquired, no state change.
+
+- **Not handled (deferred):**
+  - **Restoring budgeted values on unarchive** — requires a persistent budgetedMap survival mechanism (Script Properties, hidden tab). Not worth the complexity for a personal-use app where archive is "this goal is done forever" 95% of the time.
+  - **PWA-side archive button** — endpoints stay reachable; UI is the only missing piece. A few hours of PWA work, deferred.
+  - **`onEdit` trigger that auto-rebuilds Budget when Setup col F changes** — would unify the manual-col-F-edit flow with the menu flow. Risk: surprising side-effects from any Setup edit. Use the menu instead.
+
+- **Lesson:**
+  1. **A long list of "doesn't work" symptoms can collapse to one missing connection.** Three independent code paths each handled their slice of "archive" correctly. The bug was that no UI tied them together. The fix isn't fixing the parts — it's the wrapper. (Compare to the time-driven email parsing finding above: 10 trip-ups → 1 architectural decision. Same shape.)
+  2. **Dormant endpoints are technical debt with a friendly face.** `handleArchiveGoal_` had been registered in `routeAction_` for two weeks before this session — looked complete from `apps-script/Code.js`'s perspective, but had never been called by anything. Worth checking, periodically: which web-app actions actually have callers? Anything in the action map without a UI invocation is at risk of being subtly broken next time anyone touches it.
+  3. **"By design" comments age badly when the use case behind them was wrong.** The Code.js:1885 comment saying *"Archived rows are kept in Setup so historical Budget rebuilds preserve their data"* was technically accurate but documented a use case nobody had. Worth re-reading old design comments occasionally — sometimes the design was right for an audience the project no longer has.
