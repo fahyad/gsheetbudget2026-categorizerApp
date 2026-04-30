@@ -442,6 +442,179 @@
   font-weight: 600;
 }
 
+/* ===================== PHASE C+ — DASHBOARD POLISH (v0.18.2) ===================== */
+/* Refinements on top of Phase C's accent-stripe + stepped-bars work.
+   Confirmed gaps after living with v0.18.0 on phone:
+     - Phase C set the stepped gradient on .cat-bar-fill but kept its
+       height at 1px (style.css default), so the pattern was invisible.
+     - .cat-group-header had bg-selected from style.css, which painted
+       OVER the new amber accent stripe at the left edge.
+     - Sub-category borders inside a group used the same solid 1px rule
+       as group separators — too noisy. Mockup uses dotted within-group.
+     - Summary strip sat above the fold with no sticky behavior, so the
+       Ready-to-assign value scrolled away when reading the cards.
+     - Toggle glyph (+/−) inherited ink color, blending in. Mockup uses
+       green so the tap-target reads as interactive.
+   All changes are pixel-scoped — mono theme stays untouched. */
+
+/* Cat-bar: needs height for the stepped 4px-on/2px-off pattern to be
+   visible at all. Style.css defaults to 1px which made Phase C silently
+   invisible. */
+:root[data-theme="pixel"] .cat-bar {
+  height: 4px;
+  background: transparent;
+}
+:root[data-theme="pixel"] .cat-bar-fill {
+  height: 4px;
+  /* The gradient itself comes from Phase C's existing rule. */
+}
+
+/* Sticky summary strip: pin beneath the period bar when scrolling. The
+   top offset is the period bar's pad-top (env safe-area + 10) plus its
+   inline content height (~38). Tested on notched and non-notched
+   viewports; the calc keeps it flush. */
+:root[data-theme="pixel"] .summary-strip {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 48px);
+  z-index: 7;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.45);
+  padding: 18px 20px 20px;
+  gap: 10px;
+}
+
+/* Larger summary values (terminal hero numbers — JetBrains Mono fills
+   in for DSEG7 since user opted out of the LCD font). */
+:root[data-theme="pixel"] .summary-cell .label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+}
+:root[data-theme="pixel"] .summary-cell .value {
+  font-size: 18px;
+  letter-spacing: 0;
+  margin-top: 8px;
+  line-height: 1;
+  font-weight: 500;
+}
+:root[data-theme="pixel"] .summary-cell.ready .value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--green);
+}
+:root[data-theme="pixel"] .summary-cell.ready .value.negative {
+  color: var(--red);
+}
+
+/* Cat-group-header: drop the bg-selected background (which covers the
+   accent stripe) and indent past the 3px stripe so the toggle-glyph
+   doesn't sit ON the accent line. */
+:root[data-theme="pixel"] .cat-group-header {
+  background: transparent;
+  padding: 14px 18px 12px 22px;
+}
+
+/* Toggle glyph in green so the +/- reads as an interactive control,
+   not part of the body text. */
+:root[data-theme="pixel"] .cat-group-header .toggle-glyph {
+  color: var(--green);
+  font-weight: 700;
+}
+
+/* Cat-group-header type: tighter terminal letterspacing */
+:root[data-theme="pixel"] .cat-group-header .group-name {
+  letter-spacing: 0.22em;
+  font-size: 12px;
+  font-weight: 700;
+}
+:root[data-theme="pixel"] .cat-group-header .group-count {
+  letter-spacing: 0.18em;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* Sub-category rows: transparent bg (so the tinted card bg shows
+   through), dotted border-bottom for in-group separation, last-child
+   loses its border to avoid a double-line at the bottom of a group. */
+:root[data-theme="pixel"] .cat-sub {
+  background: transparent;
+  border-bottom: 1px dotted var(--rule);
+  padding: 12px 18px 12px 42px;
+}
+:root[data-theme="pixel"] .cat-sub:last-child {
+  border-bottom: none;
+}
+
+/* Sub-cat type adjustments — smaller but more letter-spaced */
+:root[data-theme="pixel"] .cat-sub-name {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-sub-avail {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-sub-spent {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
+/* Goals section eyebrow header — make the "SAVING GOALS" label feel
+   like a section divider, not a stray paragraph. */
+:root[data-theme="pixel"] .eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 24px 20px 10px;
+}
+
+/* Goal card type — uppercase + tabular nums on the amount; meta row
+   gets letter-spacing to feel like UI chrome. */
+:root[data-theme="pixel"] .goal-name {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 13px;
+  font-weight: 600;
+}
+:root[data-theme="pixel"] .goal-amount {
+  font-size: 12px;
+  font-weight: 500;
+}
+:root[data-theme="pixel"] .goal-meta {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+/* Goal expand-on-tap detail rows (already implemented in dashboard.js
+   since v0.15 — just needed the type polish for pixel theme). */
+:root[data-theme="pixel"] .goal-detail-row {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 10px;
+  padding: 4px 0;
+  color: var(--muted);
+}
+:root[data-theme="pixel"] .goal-detail-row span:last-child {
+  color: var(--ink);
+}
+:root[data-theme="pixel"] .goal-notes span:last-child {
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
 /* ===================== PHASE D — PERIOD BAR + CALENDAR POLISH (v0.18.1) ===================== */
 
 /* Today chip ("[27]" amber-bracket day-of-month for current period, or
