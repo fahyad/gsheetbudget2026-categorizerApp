@@ -1,12 +1,17 @@
-const CACHE_VERSION = 'v26';
+const CACHE_VERSION = 'v27';
 const CACHE_NAME = 'budget-categorizer-' + CACHE_VERSION;
 
 // Precached on install. Views (js/views/*) and lib (js/lib/*) are NOT
 // listed here — they're lazy-imported and handled by the SWR rule below.
+//
+// v0.18.0: pixel.css added — both themes ship in every bundle and the
+// data-theme attribute on <html> selects which one applies. Loading both
+// stylesheets unconditionally avoids a flash-of-mono on theme switch.
 const APP_SHELL = [
   './',
   './index.html',
   './css/style.css',
+  './css/pixel.css',
   './js/app.js',
   './js/router.js',
   './js/ui.js',

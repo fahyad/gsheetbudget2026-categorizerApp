@@ -1,7 +1,7 @@
 // PWA version info — bumped manually on each meaningful release.
 // Displayed in the Setup screen so the user can confirm the running version.
-export const APP_VERSION = 'v0.17.0';
-export const APP_LAST_EDITED = '2026-04-28';
+export const APP_VERSION = 'v0.18.0';
+export const APP_LAST_EDITED = '2026-04-30';
 
 // Hardcoded production deployment URL. Safe to expose (public anyway — visible in
 // every network request). The API key stays in localStorage (per-device, never

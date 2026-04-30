@@ -7,12 +7,38 @@
   <link rel="manifest" href="manifest.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
-  <meta name="theme-color" content="#FAFAF9">
+  <link rel="stylesheet" href="css/pixel.css">
+  <meta name="theme-color" content="#FAFAF9" id="theme-color-meta">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/icon.svg">
+  <!--
+    PWA v0.18.0 — early theme init. Reads localStorage `budget_theme`
+    (or the ?theme=pixel|mono URL param) BEFORE the CSS parses, so
+    there's no flash-of-mono on first paint when pixel theme is active.
+    Setting data-theme on <html> activates the rules in css/pixel.css.
+    Also updates the iOS status-bar tint to match.
+  -->
+  <script>
+    (function () {
+      try {
+        var stored = localStorage.getItem('budget_theme');
+        var urlTheme = new URLSearchParams(location.search).get('theme');
+        if (urlTheme === 'pixel' || urlTheme === 'mono') {
+          stored = urlTheme;
+          localStorage.setItem('budget_theme', stored);
+        }
+        var theme = stored === 'pixel' ? 'pixel' : 'mono';
+        document.documentElement.setAttribute('data-theme', theme);
+        var meta = document.getElementById('theme-color-meta');
+        if (meta) meta.setAttribute('content', theme === 'pixel' ? '#0A0A0A' : '#FAFAF9');
+      } catch (e) {
+        // localStorage unavailable (private mode etc.) — leave default mono.
+      }
+    })();
+  </script>
 </head>
 <body>
   <header>

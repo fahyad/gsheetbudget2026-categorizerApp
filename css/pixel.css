@@ -1,0 +1,493 @@
+/*
+ * pixel.css — opt-in "Pixel UI" theme overrides (PWA v0.18.0).
+ *
+ * Activated by setting `data-theme="pixel"` on <html>. The early
+ * <head> script in index.html reads localStorage `budget_theme` (or the
+ * `?theme=pixel` URL param) BEFORE this stylesheet parses, so there's
+ * no flash-of-mono on first paint.
+ *
+ * Phase A — theme infrastructure (no rules; here so the file exists)
+ * Phase B — color palette + JetBrains Mono everywhere
+ * Phase C — stepped progress bars + single-accent dashboard card stripe
+ *
+ * Phase D–G additions land here too as we add them.
+ *
+ * Design source: Claude Design "PWA V2" handoff bundle 2026-04-30
+ * (pixel-UI-redesign theme), adapted per user decisions:
+ *   - Toggle, not hard switch
+ *   - Skip DSEG7 (use JetBrains Mono for hero numbers)
+ *   - Single accent stripe (not per-main-category tint)
+ *   - Keep current semantic: green = positive available, amber = zero,
+ *     red = over (mockup's "amber as sole accent" rejected — the
+ *     color-coded balances are too useful to lose)
+ *   - Multi-select category rail deferred to a later phase
+ *
+ * No JS-side change for any rule below — DOM and behavior are unchanged.
+ * Rolling back the theme is a one-attribute toggle.
+ */
+
+/* ===================== TOKENS — pixel theme overrides ===================== */
+
+:root[data-theme="pixel"] {
+  /* Surfaces — flip to near-black with a slightly lifted period bar */
+  --bg:           #0A0A0A;
+  --bg-period:    #141414;
+  --bg-selected:  #1C1C1C;
+  --bg-active-tab:#1C1C1C;
+
+  /* Ink — warm parchment for high contrast on dark bg without harsh white */
+  --ink:          #F0E9D6;
+  --muted:        #8C8678;
+  --muted-2:      #5A554A;
+  --rule:         #2A2722;
+  --rule-2:       #1F1D19;
+
+  /* Status colors — kept semantic (per user choice 4):
+       green  = positive available  (AA-contrast green for dark bg)
+       amber  = zero / pending       (mockup color, also our accent)
+       red    = overspent / error    (mockup color, slightly muted) */
+  --green:        #5BC850;
+  --amber:        #E8A33D;
+  --red:          #E25555;
+}
+
+/* ===================== TYPOGRAPHY — JetBrains Mono everywhere ===================== */
+
+:root[data-theme="pixel"] body {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+
+/* All UI text inherits via body. A few elements pin Inter explicitly in
+   style.css — re-declare them to JetBrains Mono so nothing escapes. */
+:root[data-theme="pixel"] #tab-bar .tab,
+:root[data-theme="pixel"] .period-eyebrow,
+:root[data-theme="pixel"] .period-label,
+:root[data-theme="pixel"] .pill-btn,
+:root[data-theme="pixel"] .subtab,
+:root[data-theme="pixel"] .txn-merchant,
+:root[data-theme="pixel"] .txn-date,
+:root[data-theme="pixel"] .txn-amount,
+:root[data-theme="pixel"] .empty-state,
+:root[data-theme="pixel"] .cat-group-header .group-name,
+:root[data-theme="pixel"] .cat-group-header .group-count,
+:root[data-theme="pixel"] .cat-sub-name,
+:root[data-theme="pixel"] .cat-sub-avail,
+:root[data-theme="pixel"] .cat-sub-spent,
+:root[data-theme="pixel"] .summary-cell .label,
+:root[data-theme="pixel"] .summary-cell .value,
+:root[data-theme="pixel"] .goal-name,
+:root[data-theme="pixel"] .goal-amount,
+:root[data-theme="pixel"] .goal-meta,
+:root[data-theme="pixel"] #config-form,
+:root[data-theme="pixel"] #config-form input,
+:root[data-theme="pixel"] #config-form button,
+:root[data-theme="pixel"] #version-info,
+:root[data-theme="pixel"] .version-row,
+:root[data-theme="pixel"] #cancel-pick,
+:root[data-theme="pixel"] #selected-merchant,
+:root[data-theme="pixel"] .cat-btn,
+:root[data-theme="pixel"] .add-cat-trigger,
+:root[data-theme="pixel"] .modal-content h3,
+:root[data-theme="pixel"] .modal-content label,
+:root[data-theme="pixel"] .modal-content button,
+:root[data-theme="pixel"] #undo-bar,
+:root[data-theme="pixel"] #undo-btn,
+:root[data-theme="pixel"] #error-toast {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* Numbers always tabular so columns line up */
+:root[data-theme="pixel"] .txn-amount,
+:root[data-theme="pixel"] .summary-cell .value,
+:root[data-theme="pixel"] .cat-sub-avail,
+:root[data-theme="pixel"] .cat-sub-spent,
+:root[data-theme="pixel"] .goal-amount,
+:root[data-theme="pixel"] .version-row span:last-child {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hero numbers (dashboard summary strip + goal amounts) — slightly larger
+   + medium weight so they read as "the number" without DSEG7 LCD font.
+   Per user choice 2: skipped DSEG7 (CDN dep + extra font load). */
+:root[data-theme="pixel"] .summary-cell .value {
+  font-weight: 500;
+  letter-spacing: 0;
+}
+:root[data-theme="pixel"] .summary-cell.ready .value {
+  font-weight: 700;
+}
+
+/* Tab labels: tighter terminal-style letterspacing */
+:root[data-theme="pixel"] #tab-bar .tab {
+  letter-spacing: 0.18em;
+  font-weight: 600;
+}
+:root[data-theme="pixel"] #tab-bar .tab.active {
+  font-weight: 700;
+}
+
+/* Sub-tab + pills inherit the terminal cap-spacing */
+:root[data-theme="pixel"] .subtab {
+  letter-spacing: 0.18em;
+}
+:root[data-theme="pixel"] .pill-btn {
+  letter-spacing: 0.16em;
+  font-weight: 600;
+}
+
+/* ===================== STATUS BAR / SAFE-AREA TINT ===================== */
+
+/* The period bar already pads into env(safe-area-inset-top) — it inherits
+   --bg-period which is dark in pixel theme, so the iOS status-bar gap goes
+   dark automatically. The Setup view (no period bar) needs the same:
+   keep its top padding so the notch area is just dark body bg. */
+
+/* ===================== PHASE C — STEPPED PROGRESS BARS ===================== */
+
+/* Dashboard category bars: replace the solid fill with a 4px-on / 2px-off
+   repeating gradient. The .zero and .over color variants share the same
+   pattern. Solid bg color preserved for the chip-active "armed" state.
+   Assumes the existing dashboard markup uses .cat-bar-fill (matches the
+   v0.15 design system). */
+:root[data-theme="pixel"] .cat-bar-fill {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--ink) 0,
+      var(--ink) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+:root[data-theme="pixel"] .cat-bar-fill.zero {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--amber) 0,
+      var(--amber) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+:root[data-theme="pixel"] .cat-bar-fill.over {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--red) 0,
+      var(--red) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+
+/* Goal cards — pixel-block fill: thicker bar + outlined border, repeating
+   green chunks. Matches the mockup's .goal-bar-fill aesthetic. */
+:root[data-theme="pixel"] .goal-bar {
+  height: 8px;
+  background: transparent;
+  border: 1px solid var(--rule);
+  position: relative;
+}
+:root[data-theme="pixel"] .goal-bar-fill {
+  height: 100%;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--green) 0,
+      var(--green) 6px,
+      transparent 6px,
+      transparent 8px
+    );
+}
+
+/* ===================== PHASE C — SINGLE-ACCENT DASHBOARD CARDS ===================== */
+
+/* Per user choice 3: single accent stripe (not per-main tint). Each
+   .cat-group on the dashboard becomes a tinted card with a 3px amber
+   accent on the left edge. Behaviorally unchanged. */
+:root[data-theme="pixel"] .cat-group {
+  background: var(--bg-period);
+  border: 1px solid var(--rule);
+  position: relative;
+  overflow: hidden;
+}
+
+:root[data-theme="pixel"] .cat-group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber);
+}
+
+/* Goal cards get the same accent — visually unifies "things you're
+   tracking" sections under one motif. */
+:root[data-theme="pixel"] .goal-card {
+  background: var(--bg-period);
+  border: 1px solid var(--rule);
+  position: relative;
+  overflow: hidden;
+  margin: 12px 14px 0;
+}
+:root[data-theme="pixel"] .goal-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber);
+}
+
+/* ===================== PERIOD BAR — TERMINAL POLISH ===================== */
+
+/* Sticky shadow under the period bar so it lifts off the dark scrolled
+   content beneath it. Already partially in style.css; here we make the
+   shadow more pronounced for the dark palette. */
+:root[data-theme="pixel"] .period-bar {
+  border-bottom: 1px solid var(--rule);
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.55);
+}
+
+/* The "↻ Parse" / "Sync N" pill inherits ink/border color from variables.
+   Add the terminal outlined look (1px ink border, transparent bg). */
+:root[data-theme="pixel"] .pill-btn {
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  padding: 6px 10px;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .pill-btn:active {
+  background: var(--bg-selected);
+}
+:root[data-theme="pixel"] .pill-btn.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #0A0A0A;
+}
+:root[data-theme="pixel"] .pill-btn.primary:active {
+  background: #4AAE40;
+}
+:root[data-theme="pixel"] .pill-btn:disabled {
+  opacity: 0.4;
+}
+
+/* ===================== TXN LIST — TERMINAL TOUCH ===================== */
+
+/* Merchant + amount get uppercase + tighter spacing per the mockup */
+:root[data-theme="pixel"] .txn-merchant {
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+:root[data-theme="pixel"] .txn-date {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+:root[data-theme="pixel"] .txn-amount {
+  letter-spacing: 0.02em;
+}
+
+/* ===================== EMPTY STATES ===================== */
+
+:root[data-theme="pixel"] .empty-state,
+:root[data-theme="pixel"] #period-empty-state,
+:root[data-theme="pixel"] #auto-empty-state {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .empty-state .glyph {
+  color: var(--muted-2);
+}
+
+/* ===================== UNDO BAR + TOAST ===================== */
+
+:root[data-theme="pixel"] #undo-bar {
+  background: var(--ink);
+  color: var(--bg);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #undo-btn {
+  color: var(--bg);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] #error-toast {
+  background: var(--red);
+  color: #0A0A0A;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #error-toast.success {
+  background: var(--green);
+  color: #0A0A0A;
+}
+
+/* ===================== CATEGORY PICKER + ADD-CAT MODAL ===================== */
+
+:root[data-theme="pixel"] #category-picker {
+  border-top: 1px solid var(--green);
+}
+:root[data-theme="pixel"] .cat-group-label,
+:root[data-theme="pixel"] #selected-merchant-eyebrow {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #selected-merchant {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-btn {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 0;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-btn:active {
+  background: var(--bg-selected);
+  border-color: var(--green);
+}
+:root[data-theme="pixel"] .add-cat-trigger {
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+  color: var(--muted);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .modal-content {
+  background: var(--bg);
+  border-top: 1px solid var(--green);
+}
+:root[data-theme="pixel"] .modal-content h3 {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .modal-content label {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .modal-content select,
+:root[data-theme="pixel"] .modal-content input[type="text"] {
+  background: var(--bg-selected);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 0;
+}
+:root[data-theme="pixel"] #cancel-add-cat {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #save-add-cat {
+  background: var(--green);
+  color: #0A0A0A;
+  border: none;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* ===================== SETUP TAB — DARK FORMS ===================== */
+
+:root[data-theme="pixel"] #config-form input {
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+}
+:root[data-theme="pixel"] #config-form input:focus {
+  border-bottom-color: var(--green);
+}
+:root[data-theme="pixel"] #config-form button {
+  background: var(--green);
+  color: #0A0A0A;
+  border: none;
+  border-radius: 0;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #config-form label {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #version-info h3 {
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .version-row {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--rule);
+}
+:root[data-theme="pixel"] #update-status-display.update-needed {
+  color: var(--red);
+  font-weight: 700;
+}
+:root[data-theme="pixel"] #update-status-display.up-to-date {
+  color: var(--green);
+  font-weight: 600;
+}
+
+/* ===================== THEME TOGGLE (Setup tab) ===================== */
+
+/* These rules apply in BOTH themes — the toggle UI lives in setup.js
+   regardless of which theme is active. Scoped to the toggle's own
+   container so it doesn't collide with anything else. */
+
+#theme-toggle {
+  margin-top: 32px;
+}
+#theme-toggle h3 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+#theme-toggle .theme-buttons {
+  display: flex;
+  gap: 8px;
+}
+#theme-toggle .theme-btn {
+  flex: 1;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+#theme-toggle .theme-btn.active {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+  font-weight: 700;
+}
+
+:root[data-theme="pixel"] #theme-toggle h3 {
+  letter-spacing: 0.22em;
+}
+:root[data-theme="pixel"] #theme-toggle .theme-btn {
+  letter-spacing: 0.16em;
+}

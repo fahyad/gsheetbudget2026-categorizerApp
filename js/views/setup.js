@@ -34,6 +34,17 @@ const TEMPLATE = `
         <span id="update-status-display"></span>
       </div>
     </div>
+
+    <!-- v0.18.0: experimental theme toggle. Pixel = dark terminal aesthetic.
+         Both themes ship in the same bundle; toggling just flips data-theme
+         on <html> and persists the choice to localStorage. No reload needed. -->
+    <div id="theme-toggle">
+      <h3>Theme</h3>
+      <div class="theme-buttons">
+        <button type="button" class="theme-btn" data-theme-value="mono">Monochrome</button>
+        <button type="button" class="theme-btn" data-theme-value="pixel">Pixel</button>
+      </div>
+    </div>
   </section>
 `;
 
@@ -58,6 +69,12 @@ export default {
       config.save(urlInput.value, keyInput.value);
       navigate('#/categorize');
     });
+
+    // v0.18.0 theme toggle. Reads current data-theme (set by the early
+    // <head> script in index.html) to mark the active button, then wires
+    // clicks to flip + persist live (no reload — CSS variables update
+    // immediately when data-theme changes).
+    setupThemeToggle_(root);
 
     populateVersionInfo(root);
   },
@@ -111,6 +128,36 @@ async function populateVersionInfo(root) {
     asEl.textContent = '⚠ could not connect (check API key)';
     statusRow.hidden = true;
   }
+}
+
+// v0.18.0: theme toggle plumbing. Source of truth = data-theme on <html>
+// (set by the early <head> script). localStorage 'budget_theme' persists
+// the choice. Updating the iOS status-bar tint to match is a small touch
+// that makes the standalone-installed PWA feel coherent.
+const THEME_KEY = 'budget_theme';
+
+function setupThemeToggle_(root) {
+  const buttons = root.querySelectorAll('.theme-btn');
+  const current = document.documentElement.getAttribute('data-theme') || 'mono';
+  applyThemeButtons_(buttons, current);
+
+  buttons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const next = btn.getAttribute('data-theme-value');
+      if (next !== 'mono' && next !== 'pixel') return;
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* private mode */ }
+      const meta = document.getElementById('theme-color-meta');
+      if (meta) meta.setAttribute('content', next === 'pixel' ? '#0A0A0A' : '#FAFAF9');
+      applyThemeButtons_(buttons, next);
+    });
+  });
+}
+
+function applyThemeButtons_(buttons, theme) {
+  buttons.forEach(b => {
+    b.classList.toggle('active', b.getAttribute('data-theme-value') === theme);
+  });
 }
 
 function renderVersion_(asEl, statusRow, statusEl, v) {
