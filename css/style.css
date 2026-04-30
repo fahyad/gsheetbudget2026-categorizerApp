@@ -1044,3 +1044,277 @@ header h1,
 /* Legacy stubs that should never render again — keep guards in case any
    orphan DOM sneaks in. */
 #sync-bar, .ready-card { display: none !important; }
+
+/* ============================ CATEGORY RAIL (v0.19.0 / Phase G) =========
+   Bottom-anchored multi-select category strip. Tap a chip to arm a
+   category, tap multiple txns to check them, tap Assign to batch-
+   categorize. When no chip is armed, tapping a txn falls through to
+   the existing picker (single-tap quick-categorize).
+
+   Rail visibility:
+     - Mounted always in DOM (categorize.js inserts the #cat-rail block
+       inside #app-section).
+     - JS toggles [hidden] based on activeSubtab + categories loaded.
+     - When visible, #app-section.with-rail adds bottom padding to the
+       txn list and lifts the undo bar above the rail.
+
+   These styles are the mono-theme version (default).
+   pixel.css overrides them for the dark terminal look. */
+
+#cat-rail {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--tab-bar-total);
+  background: var(--bg);
+  border-top: 1px solid var(--rule);
+  z-index: 12;
+  padding-top: 10px;
+}
+
+#app-section.with-rail #transaction-list {
+  padding-bottom: 140px;
+}
+
+/* Lift the undo bar above the rail when the rail is mounted. The undo
+   bar is fixed-positioned via existing rules. */
+#app-section.with-rail ~ #undo-bar,
+section#app-section.with-rail #undo-bar {
+  bottom: calc(var(--tab-bar-total) + 140px);
+}
+
+#rail-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 16px 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  min-height: 18px;
+}
+
+#rail-status-left {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rail-status-hint {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.rail-status-count {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-status-arrow {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rail-status-active {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-status-sum {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+  font-weight: 500;
+}
+
+#rail-status-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+#rail-cancel-btn,
+#rail-commit-btn {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#rail-cancel-btn { color: var(--muted); }
+#rail-cancel-btn:active { background: var(--bg-selected); }
+
+#rail-commit-btn {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+#rail-commit-btn:active { background: #1F1F1F; }
+#rail-commit-btn:disabled {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--muted-2);
+  cursor: default;
+}
+
+/* Horizontal scroll strip — chips + group labels + dividers + +Add */
+#rail-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 16px 14px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  align-items: stretch;
+  /* Prevent the iOS edge-swipe-back gesture from interfering with the
+     rail's own horizontal scroll. */
+  overscroll-behavior-x: contain;
+}
+#rail-scroll::-webkit-scrollbar { display: none; }
+
+.rail-group-label {
+  align-self: center;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  /* Vertical text — saves horizontal real estate for chips */
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  padding: 2px 0;
+  flex-shrink: 0;
+}
+
+.rail-divider {
+  width: 1px;
+  background: var(--rule);
+  flex-shrink: 0;
+  margin: 4px 2px;
+}
+
+.rail-chip {
+  flex-shrink: 0;
+  min-width: 96px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 0;
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+.rail-chip:active { background: var(--bg-selected); }
+.rail-chip.active {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.rail-chip.active .chip-name,
+.rail-chip.active .chip-amount { color: var(--bg); }
+.rail-chip.active .chip-bar { background: rgba(255, 255, 255, 0.18); }
+.rail-chip.active .chip-bar-fill { background: var(--bg); }
+
+.chip-name {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.chip-bar {
+  height: 2px;
+  background: var(--rule-2);
+}
+.chip-bar-fill {
+  height: 2px;
+  background: var(--ink);
+}
+.chip-bar-fill.zero { background: var(--amber); }
+.chip-bar-fill.over { background: var(--red); }
+
+.chip-amount {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+.chip-amount.zero { color: var(--amber); }
+.chip-amount.over { color: var(--red); }
+
+.rail-add {
+  flex-shrink: 0;
+  min-width: 64px;
+  padding: 8px 10px;
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Txn-item armed/checked states. .armed = a chip is selected; the cursor
+   is a pointer because tap toggles selection. .checked = txn is in the
+   multi-select. The 3px ink stripe on the left edge is the visual cue
+   that "this is selected for batch-assign." */
+.txn-item.armed { cursor: pointer; }
+.txn-item.armed:active { background: var(--bg-selected); }
+.txn-item.checked {
+  background: var(--bg-selected);
+  position: relative;
+}
+.txn-item.checked::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--ink);
+}
+
+/* Reduced motion — keep transitions on (they're already short) but
+   disable any future animations the rail might gain. */
+@media (prefers-reduced-motion: reduce) {
+  .rail-chip,
+  .rail-add,
+  #rail-cancel-btn,
+  #rail-commit-btn {
+    transition: none;
+  }
+}

@@ -741,6 +741,214 @@
   background: var(--amber);
 }
 
+/* ===================== PHASE G — CATEGORY RAIL (v0.19.0) =====================
+   Pixel-theme overrides for the multi-select rail. Mono styles in
+   style.css set the structure; here we restyle for the dark terminal
+   look — JetBrains Mono everywhere, amber accents on armed/checked,
+   green on commit + active chip, stepped chip-bar pattern matching the
+   Phase C dashboard cards. */
+
+/* Status row — terminal letter-spacing + monospace numbers */
+:root[data-theme="pixel"] #rail-status {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+:root[data-theme="pixel"] .rail-status-hint {
+  color: var(--muted-2);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .rail-status-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--green);
+}
+
+:root[data-theme="pixel"] #cat-rail.armed .rail-status-count {
+  color: var(--green);
+}
+
+:root[data-theme="pixel"] .rail-status-arrow {
+  color: var(--muted);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+:root[data-theme="pixel"] .rail-status-active {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--green);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .rail-status-sum {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Cancel + Commit — terminal outlined buttons, green commit on armed */
+:root[data-theme="pixel"] #rail-cancel-btn,
+:root[data-theme="pixel"] #rail-commit-btn {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+
+:root[data-theme="pixel"] #rail-cancel-btn { color: var(--muted); }
+:root[data-theme="pixel"] #rail-cancel-btn:active { background: var(--bg-selected); }
+
+:root[data-theme="pixel"] #rail-commit-btn {
+  background: var(--green);
+  border-color: var(--green);
+  color: #0A0A0A;
+}
+:root[data-theme="pixel"] #rail-commit-btn:active {
+  background: #4AAE40;
+}
+:root[data-theme="pixel"] #rail-commit-btn:disabled {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--muted-2);
+  cursor: default;
+}
+
+/* Group labels — vertical-text, terminal letterspacing */
+:root[data-theme="pixel"] .rail-group-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--muted-2);
+}
+
+/* Chip — terminal outline, stepped chip-bar pattern in Phase C style */
+:root[data-theme="pixel"] .rail-chip {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border: 1px solid var(--rule);
+  background: transparent;
+}
+:root[data-theme="pixel"] .rail-chip:active { background: var(--bg-selected); }
+:root[data-theme="pixel"] .rail-chip.active {
+  background: var(--green);
+  border-color: var(--green);
+}
+:root[data-theme="pixel"] .rail-chip.active .chip-name,
+:root[data-theme="pixel"] .rail-chip.active .chip-amount { color: #0A0A0A; }
+
+:root[data-theme="pixel"] .chip-name {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+/* Stepped chip-bar pattern — 3px-on / 2px-off, matching the Phase C
+   dashboard bars but proportionally smaller. */
+:root[data-theme="pixel"] .chip-bar {
+  height: 3px;
+  background: transparent;
+  border-top: 1px dotted var(--rule-2);
+}
+:root[data-theme="pixel"] .chip-bar-fill {
+  height: 3px;
+  margin-top: -1px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--ink) 0,
+      var(--ink) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+:root[data-theme="pixel"] .chip-bar-fill.zero {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--amber) 0,
+      var(--amber) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+:root[data-theme="pixel"] .chip-bar-fill.over {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--red) 0,
+      var(--red) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+/* When chip is active, the bar pattern reads on the green bg as
+   ink-on-green dashes. */
+:root[data-theme="pixel"] .rail-chip.active .chip-bar { border-top-color: rgba(10, 10, 10, 0.25); }
+:root[data-theme="pixel"] .rail-chip.active .chip-bar-fill {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      #0A0A0A 0,
+      #0A0A0A 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+
+:root[data-theme="pixel"] .chip-amount {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--green);
+}
+:root[data-theme="pixel"] .chip-amount.zero { color: var(--amber); }
+:root[data-theme="pixel"] .chip-amount.over { color: var(--red); }
+
+/* + Add chip — dashed outline, muted */
+:root[data-theme="pixel"] .rail-add {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+}
+
+/* Txn-item armed/checked — green accents in pixel theme */
+:root[data-theme="pixel"] .txn-item.armed:active {
+  background: rgba(91, 200, 80, 0.14);
+}
+:root[data-theme="pixel"] .txn-item.checked {
+  background: rgba(91, 200, 80, 0.10);
+}
+:root[data-theme="pixel"] .txn-item.checked::before {
+  background: var(--green);
+}
+
 /* ===================== THEME TOGGLE (Setup tab) ===================== */
 
 /* These rules apply in BOTH themes — the toggle UI lives in setup.js

@@ -140,6 +140,19 @@ export const store = {
     this.saveSyncQueue();
   },
 
+  // v0.19.0 — batch-add for the multi-select rail commit. One
+  // localStorage write at the end instead of N. Caller must have
+  // already removed the txns from this.transactions (matches the
+  // existing categorize() pattern: remove then queue).
+  addBatchToSyncQueue(txns, category) {
+    for (const txn of txns) {
+      const existing = this.syncQueue.findIndex(q => q.timestamp === txn.timestamp);
+      if (existing !== -1) this.syncQueue.splice(existing, 1);
+      this.syncQueue.push({ ...txn, category });
+    }
+    this.saveSyncQueue();
+  },
+
   removeFromSyncQueue(timestamp) {
     const idx = this.syncQueue.findIndex(q => q.timestamp === timestamp);
     if (idx === -1) return null;
