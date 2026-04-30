@@ -317,11 +317,26 @@ function renderPeriodBar() {
   label.appendChild(eyebrow);
   label.appendChild(name);
 
+  // v0.18.1 (Phase D): today chip. Hidden via display:none in pixel.css's
+  // default rule for both themes; pixel theme re-shows via attribute scope.
+  // So: in mono this DOM is invisible; in pixel it renders "[27]" (amber
+  // brackets + day-of-month) for the current period or "PAST" otherwise.
+  // Same block also in dashboard.js renderPeriodBar — keep the two in sync.
+  const todayChip = document.createElement('span');
+  todayChip.className = 'period-today-chip' + (isCurrent ? ' is-current' : '');
+  if (isCurrent) {
+    const day = new Date().getDate();
+    todayChip.innerHTML = '<span class="today-bracket">[</span>' + day + '<span class="today-bracket">]</span>';
+  } else {
+    todayChip.textContent = 'PAST';
+  }
+
   const caret = document.createElement('span');
   caret.className = 'period-caret';
   caret.textContent = '▾';
 
   toggle.appendChild(label);
+  toggle.appendChild(todayChip);
   toggle.appendChild(caret);
 
   const next = document.createElement('button');

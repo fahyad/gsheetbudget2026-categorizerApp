@@ -442,6 +442,132 @@
   font-weight: 600;
 }
 
+/* ===================== PHASE D — PERIOD BAR + CALENDAR POLISH (v0.18.1) ===================== */
+
+/* Today chip ("[27]" amber-bracket day-of-month for current period, or
+   "PAST" label otherwise). Lives in the period-toggle between the
+   period-label and the caret. Default = hidden in both themes (so mono
+   stays untouched even though the DOM is always present); pixel theme
+   re-shows it. */
+
+.period-today-chip {
+  display: none;
+}
+
+:root[data-theme="pixel"] .period-today-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+:root[data-theme="pixel"] .period-today-chip.is-current {
+  color: var(--amber);
+}
+:root[data-theme="pixel"] .period-today-chip .today-bracket {
+  color: var(--amber);
+  margin: 0 1px;
+  font-weight: 700;
+}
+
+/* In pixel theme the today chip carries the "where am I" semantic, so
+   the eyebrow ("CURRENT PERIOD" / "PERIOD") becomes redundant. Hide it
+   so the period-toggle reads as a clean inline strip. */
+:root[data-theme="pixel"] .period-eyebrow {
+  display: none;
+}
+
+/* Tighten the period-toggle layout so dates + chip + caret sit on one
+   line (mono uses the stacked eyebrow+label so it stays display:flex
+   from style.css). */
+:root[data-theme="pixel"] .period-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+:root[data-theme="pixel"] .period-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-top: 0;
+}
+
+:root[data-theme="pixel"] .period-caret {
+  margin-top: 0;
+  font-size: 9px;
+}
+:root[data-theme="pixel"] .period-bar.open .period-caret {
+  color: var(--amber);
+}
+
+/* ──── Calendar dropdown — terminal restyle ──── */
+
+/* Our renderCalendar shows ONLY the period range (not a full month), so
+   every visible cell IS in-period and gets the amber treatment. Today
+   gets the outlined cursor-box around its numeral. has-txn cells stay
+   amber and gain an amber dot beneath the day. */
+
+:root[data-theme="pixel"] .calendar-grid {
+  border: 1px dashed var(--rule);
+  padding: 10px 12px 8px;
+  background: rgba(0, 0, 0, 0.18);
+  margin: 14px auto 0;
+  max-width: 280px;
+  /* Keep the existing display:grid / 7-col / 4px gap from style.css */
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+:root[data-theme="pixel"] .calendar-cell {
+  border: none;
+  background: transparent;
+  color: var(--amber);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* has-txn keeps amber (no color flip); the dot below indicates txn
+   presence. In mono theme has-txn fills the cell with rule-2 grey —
+   the pixel approach is more spartan. */
+:root[data-theme="pixel"] .calendar-cell.has-txn {
+  background: transparent;
+  color: var(--amber);
+}
+
+/* Today: outlined cursor box around the day number (NOT the cell).
+   Mono renders today as a filled black cell with white number; pixel
+   renders it as a transparent cell with an amber 1px box around the
+   numeral so the period-band amber stays visible. */
+:root[data-theme="pixel"] .calendar-cell.today {
+  background: transparent;
+  border: none;
+  color: var(--amber);
+  font-weight: 700;
+}
+:root[data-theme="pixel"] .calendar-cell.today > div:not(.cell-dot) {
+  border: 1px solid var(--amber);
+  padding: 1px 4px;
+  line-height: 1;
+}
+
+/* Dot under has-txn days: amber to match the period band */
+:root[data-theme="pixel"] .calendar-cell .cell-dot {
+  background: var(--amber);
+}
+:root[data-theme="pixel"] .calendar-cell.today .cell-dot {
+  background: var(--amber);
+}
+
 /* ===================== THEME TOGGLE (Setup tab) ===================== */
 
 /* These rules apply in BOTH themes — the toggle UI lives in setup.js
