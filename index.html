@@ -15,27 +15,29 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/icon.svg">
   <!--
-    PWA v0.18.0 — early theme init. Reads localStorage `budget_theme`
-    (or the ?theme=pixel|mono URL param) BEFORE the CSS parses, so
-    there's no flash-of-mono on first paint when pixel theme is active.
-    Setting data-theme on <html> activates the rules in css/pixel.css.
-    Also updates the iOS status-bar tint to match.
+    PWA v0.19.1 — force pixel theme on this branch. The user-facing
+    toggle was removed because mono on this branch had drifted (the
+    multi-select rail was designed for pixel; mono variants felt
+    out of place). Mono CSS rules in style.css are still loaded as
+    the structural foundation that pixel.css overrides — keeping
+    them in place means the toggle can return without code surgery
+    if we ever want it.
+
+    The data-theme attribute is set BEFORE the stylesheets parse,
+    so there's no flash-of-mono on first paint. The iOS status-bar
+    tint meta is set to the dark theme's bg color so the standalone
+    PWA's notch area matches the period bar.
   -->
   <script>
     (function () {
       try {
-        var stored = localStorage.getItem('budget_theme');
-        var urlTheme = new URLSearchParams(location.search).get('theme');
-        if (urlTheme === 'pixel' || urlTheme === 'mono') {
-          stored = urlTheme;
-          localStorage.setItem('budget_theme', stored);
-        }
-        var theme = stored === 'pixel' ? 'pixel' : 'mono';
-        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.setAttribute('data-theme', 'pixel');
         var meta = document.getElementById('theme-color-meta');
-        if (meta) meta.setAttribute('content', theme === 'pixel' ? '#0A0A0A' : '#FAFAF9');
+        if (meta) meta.setAttribute('content', '#0A0A0A');
       } catch (e) {
-        // localStorage unavailable (private mode etc.) — leave default mono.
+        // Defensive — doesn't matter; default attribute is empty which
+        // means mono via the cascade. Worst case is a visual fallback,
+        // nothing functional breaks.
       }
     })();
   </script>

@@ -102,6 +102,17 @@ header h1,
   background: var(--bg-active-tab);
 }
 
+/* v0.19.1 — instant visual feedback on tap. Without this, a tap on a
+   tab waits for the lazy-import + mount cycle (~100-500ms first-time)
+   before any visual change. The user perceives that as "frozen." This
+   :active rule paints the pressed tab immediately during the tap so
+   there's always confirmation the tap registered.
+   Works in both themes via CSS vars. */
+#tab-bar .tab:active {
+  background: var(--bg-active-tab);
+  color: var(--ink);
+}
+
 #tab-bar .tab.active::before {
   content: '';
   position: absolute;
