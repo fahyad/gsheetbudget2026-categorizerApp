@@ -292,7 +292,7 @@ Decisions made during planning:
 - Old "hide from PWA but keep in Budget" semantics (`Setup col F` checkbox without Saving status update) are no longer reachable through the menu, but still possible via direct cell edit. Trip-up #29 documents the inconsistent-tabs failure mode.
 
 Patterns added to CLAUDE.md trip-up list (item #29).
-- **Status:** complete (deployed @43); on-device verification pending. Rollback path: revert the `rebuildBudgetInternal_` filter line — that alone restores the prior Budget behavior; the new menu items become harmless no-ops.
+- **Status:** complete + verified working. Deployed @43; user confirmed 2026-04-29 that the Archive Goal flow works end-to-end (Banff archive removed the row from Budget). Rollback path (unused): revert the `rebuildBudgetInternal_` filter line — that alone restores the prior Budget behavior; the new menu items become harmless no-ops.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 

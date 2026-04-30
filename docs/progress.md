@@ -1538,8 +1538,8 @@ v11.18 changes in `apps-script/Code.js`:
 6. **Two new menu items** under Budget Tools, placed between "Add Category" and "Parse Emails": "Archive Goal..." and "Unarchive Goal...".
 7. **Bumped APP_SCRIPT_VERSION** → v11.18 + matching version pointers in CLAUDE.md / task_plan.md / progress.md / findings.md.
 
-### Status — DEPLOYED, ON-DEVICE VERIFICATION PENDING
-- v11.18 deployed @43 (commits `<hash1>` code+docs, `<hash2>` post-deploy timestamp).
-- User next step: reload sheet → confirm the two new menu items → run "Archive Goal..." → type "Banff" (or pre-fill works if they're on the Banff Saving row) → confirm the YES/NO data-loss prompt → verify Banff disappears from Budget tab. Run "Unarchive Goal..." to test reversibility (Banff rows return with Budgeted=0 as documented).
+### Status — VERIFIED WORKING
+- v11.18 deployed @43 (commits `74018cd` code+docs, `eeaf637` post-deploy timestamp).
+- User confirmed 2026-04-29: Archive Goal flow works end-to-end. Banff archive removed the row from Budget tab; menu items appeared after sheet reload.
 - Trip-up #29 added covering the new flow + the still-possible manual-col-F failure mode where Saving and Setup tabs disagree.
-- Rollback path: revert the `rebuildBudgetInternal_` filter line. That alone restores Budget behavior; the new menu items become harmless no-ops (or remove them too).
+- Rollback path (unused): revert the `rebuildBudgetInternal_` filter line. That alone restores Budget behavior; the new menu items become harmless no-ops.
