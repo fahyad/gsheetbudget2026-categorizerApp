@@ -4,7 +4,9 @@
 >
 > **Apps Script:** v11.18 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab (was: archive only hid from PWA dropdown). v11.17 makes `handleParseAndFetch_` read-only by default — inline Gmail scan only when caller passes `?withParse=1`. v11.16 added Phase 1 of time-driven parsing: `processInfoAlertsTrigger` (hourly) + install/uninstall menu items. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_` (Saving goal archive; recovered via `clasp pull` 2026-04-26). v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
 >
-> **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign + iOS safe-area fix + Savings/Goals dedup + client metrics pipeline. On branch `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). Neither has been merged to `main`. GitHub Pages currently serving from the active refinement branch for preview. `.nojekyll` at repo root is required — don't delete.
+> **PWA:** v0.19.1 (cache v31) on branch `pwa/pixel-ui-redesign` — Phase 25 pixel UI redesign overlay; branch is force-pixel via early `<head>` script. NOT merged to main (main is at v0.17.0 / cache v26). GitHub Pages can be pointed at either branch for preview. `.nojekyll` at repo root is required — don't delete.
+>
+> **Workflow tooling:** project-level `.claude/settings.json` (permissions + SessionStart hook), `.claude/state-check.sh` (state snapshot), `.claude/statusline.sh` (persistent display), three slash-command skills (`/state`, `/lint`, `/deploy`). On main, also merged into pixel branch.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -1543,3 +1545,53 @@ v11.18 changes in `apps-script/Code.js`:
 - User confirmed 2026-04-29: Archive Goal flow works end-to-end. Banff archive removed the row from Budget tab; menu items appeared after sheet reload.
 - Trip-up #29 added covering the new flow + the still-possible manual-col-F failure mode where Saving and Setup tabs disagree.
 - Rollback path (unused): revert the `rebuildBudgetInternal_` filter line. That alone restores Budget behavior; the new menu items become harmless no-ops.
+
+---
+
+## Session: 2026-04-30 — PWA pixel UI redesign (v0.18.0 → v0.19.1) + Claude Code workflow tooling
+
+### Setup
+Two parallel work streams from the same multi-day session:
+
+1. **Pixel UI redesign**: user shared a Claude Design "PWA V2" handoff bundle proposing a terminal/pixel UI aesthetic (dark surfaces, JetBrains Mono everywhere, stepped progress bars, multi-select category rail). Asked to implement cautiously as suggestions, not must-haves; branch-only deploy with theme toggle so mono stays available. Wanted phased rollout with each phase rollback-able.
+2. **Claude Code workflow tooling**: after the pixel UI work, user asked whether Claude Code features (settings, hooks, slash commands, status line) could improve daily workflow + help future Claude sessions ramp faster. Their existing setup was already strong (extensive CLAUDE.md, working skill, pre-commit hook, deploy alias) but project-level Claude Code features were unused.
+
+### Design (pixel UI)
+Read the Claude Design handoff bundle (HTML/CSS/JSX prototypes + chat transcript at `pwa-v2/chats/chat1.md`). Key insight from the chat: "Pick a category → assign matching transactions" is the receipt-sorting metaphor; old flow ("pick transaction → pick category") is for "what is this?" while new flow is for "what belongs here?". Both have value — multi-select rail wins on backlog clearance, picker wins for one-off categorization. Decision: ship rail as primary, picker as fallback when no chip is armed.
+
+For all visual phases, designed as a CSS overlay: `css/pixel.css` scoped via `:root[data-theme="pixel"]` so all rules are inert until the attribute flips. Same DOM, same JS-flow. Backward-compat with mono CSS preserved via the same CSS-variable layer.
+
+### Implementation (pixel UI — five sub-phases on `pwa/pixel-ui-redesign`)
+
+**v0.18.0 (Phase A+B+C):** Theme infrastructure (early `<head>` script, `data-theme` attribute, two-stylesheet load, Settings toggle UI). Color palette flip + JetBrains Mono. Stepped progress bars. Single amber accent stripe on dashboard cards.
+
+**v0.18.1 (Phase D):** Period bar today chip ("[27]" amber-bracket day-of-month, hidden in mono). Calendar dropdown restyled (dashed border, amber numerals, outlined cursor box for today). Touched both `categorize.js` and `dashboard.js` `renderPeriodBar` (~6 lines each, kept in sync via comments).
+
+**v0.18.2 (Phase C+):** Two real bugs fixed from Phase C — `.cat-bar` was 1px tall in mono so the stepped gradient was invisible (bumped to 4px); `.cat-group-header` had `bg-selected` background that painted over the new accent stripe (switched to transparent + indented 22px). Plus polish: sticky summary strip, dotted within-group borders, green toggle glyph.
+
+**v0.19.0 (Phase G):** Multi-select category rail. State machine: IDLE → ARMED → ARMED+SEL with explicit clear on chip-switch (overriding mockup's footgun keep-selection-on-switch). Backend untouched (`handleBatchCategorize_` already supports many items). Picker stays as fallback for no-chip-armed quick-categorize. Mono theme also gets the rail with simpler styling.
+
+**v0.19.1 (branch fixes after on-device testing):** User reported (a) summary strip values wrapping (`−$1,948.00` broke onto two lines on iPhone), (b) tab bar felt frozen on tap (no visual feedback during lazy-mount window), (c) pixel theme defaulted to mono on cold start. Fixes: pixel summary 18px → 14px + `white-space: nowrap`; new `#tab-bar .tab:active` rule paints pressed tab immediately; early script hardcodes `data-theme="pixel"` on this branch + theme toggle UI removed from Settings. Mono CSS preserved as structural foundation; rollback is single-commit revert.
+
+### Implementation (workflow tooling — two commits on `main`)
+
+**`.claude/settings.json` + `.claude/state-check.sh` (commit 59ec80d):**
+- Permission allow-list: ~18 read-only diagnostic Bash commands no longer prompt.
+- Deny-list: 9 destructive operations blocked outright.
+- SessionStart hook runs `state-check.sh` (~305 ms): outputs branch + sync state vs origin + uncommitted count + last 5 commits + version pointers with DRIFT warning if Code.js ≠ VERSION.txt.
+
+**Slash commands + status line (commit 8214e65):**
+- `/state`, `/lint`, `/deploy "<desc>"` as skills under `.claude/skills/`.
+- `.claude/statusline.sh` (~176 ms): persistent display `<branch>[ *<dirty>] · <as-version>[⚠]`.
+
+Both commits merged into pixel branch via `git merge main`. Tooling lives on main as the canonical home; pixel branch inherits via merge.
+
+### Status — VERIFIED WORKING
+- **Pixel UI:** v0.19.1 on `pwa/pixel-ui-redesign` deployed via GitHub Pages branch source. User confirmed on-device that summary strip no longer wraps, tab bar gives instant tap feedback, and pixel is the default theme on cold start. Multi-select rail works as designed. NOT merged to main pending broader confirmation; main stays at v0.17.0 / cache v26.
+- **Workflow tooling:** on main + merged into pixel branch. Will activate at next session start (skills register at session start, not mid-session — see trip-up #30).
+- **Two new trip-ups added:** #30 (skills mid-session) + #31 (pixel branch defaults).
+- **Rollback paths preserved everywhere:**
+  - Pixel UI: don't merge to main, OR switch GitHub Pages source back to main, OR revert v0.19.1 commit to bring the toggle back.
+  - Tooling: revert the two tooling commits on main.
+  - Mono CSS in `style.css` is structurally complete and untouched; pixel.css is purely additive.
+- **Open from this arc (deferred):** Phase E (pixel SVG tab icons), Phase H (animated sync stage). Phase F (goal expand-on-tap) was already implemented in v0.15 — only needed CSS polish, which Phase C+ handled.

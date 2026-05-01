@@ -6,7 +6,8 @@
 
 ## Current State (April 2026)
 - **Apps Script:** v11.18 — Goal archive flow: `Archive Goal...` / `Unarchive Goal...` menu items wrap the existing (v11.14) endpoint internals + force a Budget rebuild. `rebuildBudgetInternal_` now filters Setup col F so archived sub-categories drop out of Budget too (was: only filtered from PWA dropdown). Trade-off: budgeted values for archived categories in past periods are lost on rebuild — disclosed in the menu's confirmation prompt. v11.17 Phase 2 of time-driven email parsing — `handleParseAndFetch_` skips inline Gmail scan unless `?withParse=1`. v11.16 added Phase 1 — `processInfoAlertsTrigger` + install/uninstall menu items, hourly auto-parse. v11.15 made `buildBudgetDashboard_` auto-set Budget B1 to the period containing today on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_` (Saving goal archive endpoints; recovered via `clasp pull` 2026-04-26). v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab. v11.12 fixed Budget `#REF!` cascade via `rebuildBudgetInternal_` delegation; v11.9–v11.11 were Saving tab shakedown. Full postmortems in `docs/findings.md`.
-- **PWA:** v0.15.4 (cache v24) — cold-start optimization informed by v0.15.3 ClientMetrics data. Four fixes landed after confirming real-session measurements: dedupe `categories` by sharing mount's promise with `refresh()`, defer `ensureIndexReady()` until first Auto-tab tap, persist `store.transactions` to localStorage for instant cold-open paint, throttle silent re-mount `refresh()` to once per 60s (Parse pill always forces fresh). Also cached `version` response per Setup module lifetime. Layered on v0.15.3 (Minimal Monochrome redesign + iOS safe-area + Savings/Goals dedup + metrics pipeline) and v0.12 → v0.14 (hash router, lazy views, dashboard, auto-suggest). Branch: `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). `main` at v0.11 — not merged yet. GitHub Pages serves from the feature branch for preview.
+- **PWA:** v0.19.1 (cache v31) on branch `pwa/pixel-ui-redesign` (NOT yet merged to main; main at v0.17.0 / cache v26). Phase 25 — pixel UI redesign overlay (`css/pixel.css`) scoped via `:root[data-theme="pixel"]`. Branch is force-pixel via the early `<head>` script in `index.html`. v0.19.0 added Phase G multi-select category rail. v0.18.0 → v0.18.2 introduced theme infrastructure + dashboard polish + period-bar today chip + terminal calendar styling. Earlier (already on main): v0.17.0 Phase 2 of time-driven email parsing (read-only `parseAndFetch`); v0.16.0 persistent views; v0.15.4 cold-start optimization (dedupe categories, defer suggest, persist txns cache, throttle re-mount).
+- **Workflow tooling:** Phase 26 — `.claude/settings.json` (permission allow-list + SessionStart hook), `.claude/state-check.sh` (state snapshot script), `.claude/statusline.sh` (persistent branch+version display), three slash-command skills (`/state`, `/lint`, `/deploy`). On main, merged into pixel branch.
 - **Workflow:** `clasp` CLI. `./deploy.sh "description"` is the one-command production deploy. Auto-bumps timestamp + writes VERSION.txt.
 - **Active deployment ID** (DO NOT change): `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ`
 - **Sheet inspectable by Claude:** `?action=dumpSheet&apiKey=...&metadata=true|tab=X&range=...` (no OAuth needed — uses the same API key as other endpoints).
@@ -293,6 +294,53 @@ Decisions made during planning:
 
 Patterns added to CLAUDE.md trip-up list (item #29).
 - **Status:** complete + verified working. Deployed @43; user confirmed 2026-04-29 that the Archive Goal flow works end-to-end (Banff archive removed the row from Budget). Rollback path (unused): revert the `rebuildBudgetInternal_` filter line — that alone restores the prior Budget behavior; the new menu items become harmless no-ops.
+
+### Phase 25: PWA Pixel UI Redesign (PWA v0.18.0 → v0.19.1)
+User shared a Claude Design "PWA V2" handoff bundle proposing a terminal/pixel UI aesthetic — fundamentally different from the v0.15 Minimal Monochrome direction (dark surfaces with warm parchment ink, JetBrains Mono everywhere, stepped/pixelated progress bars, pixel-block goal fill, accent-stripe cards, multi-select category rail). The user wanted to try it cautiously: branch-only, theme-toggleable, no risk to functionality. Apps Script unchanged across the entire arc.
+
+The redesign arrived as a CSS overlay (`css/pixel.css`) scoped via `:root[data-theme="pixel"]` so all rules are inert until the attribute flips. Same DOM, same JS-flow, same Apps Script — pure visual layer. Backward-compat with mono CSS preserved via the same CSS-variable layer.
+
+Sub-phases shipped on `pwa/pixel-ui-redesign`:
+
+- **v0.18.0 (Phase A+B+C):** Theme infrastructure — early `<head>` script reads `localStorage.budget_theme`, sets `data-theme` before stylesheets parse, no flash-of-mono. Two stylesheets shipped together; `pixel.css` rules scoped via attribute selector. Settings tab gained a Theme section with Mono/Pixel buttons. JetBrains Mono everywhere in pixel theme. Stepped progress bars on dashboard category cards (4px-on / 2px-off repeating gradient). Single amber accent stripe on `.cat-group` and `.goal-card` left edges.
+
+- **v0.18.1 (Phase D):** Period bar today chip (`[27]` amber-bracket day-of-month for current period, `PAST` otherwise). Hidden in mono via default `display: none` rule. Eyebrow ("CURRENT PERIOD" / "PERIOD") hidden in pixel — chip carries the same info. Calendar dropdown restyled: dashed border container, transparent cells with amber numerals, today rendered as outlined cursor box around the day number. Touched both `categorize.js` and `dashboard.js` `renderPeriodBar` (~6 lines each — kept in sync via comments).
+
+- **v0.18.2 (Phase C+):** Two real bugs fixed from Phase C — `.cat-bar` was 1px tall in mono so the stepped gradient was invisible (bumped to 4px), and `.cat-group-header` had `bg-selected` background that painted over the new accent stripe (switched to transparent + indented 22px). Plus dashboard polish: sticky summary strip below period bar, dotted borders within sub-category groups, green toggle glyph (was ink), eyebrow restyled, terminal type for goal cards. The expand-on-tap goal detail rows that already existed in v0.15 got terminal CSS polish here.
+
+- **v0.19.0 (Phase G):** Multi-select category rail. State machine: IDLE (no chip armed → tap txn opens picker, today's flow) → ARMED (chip selected → tap txns adds checkboxes) → ARMED+SEL (Cancel/Commit visible). Tap a different chip while armed CLEARS selection (overriding mockup's keep-selection-on-switch behavior — that was a footgun). Backend untouched (`handleBatchCategorize_` already supports many items). Picker stays as fallback for the no-chip-armed quick-categorize path. Mono theme also gets the rail (different styling, same flow).
+
+- **v0.19.1 (branch fixes after on-device testing):** Three issues from real use — (1) summary strip values wrapping (`−$1,948.00` broke into "−" / "$1,948.00") — dropped pixel font from 18px → 14px + added `white-space: nowrap`. (2) Tab bar felt frozen on tap because `-webkit-tap-highlight-color: transparent` removed the iOS native flash and `.active` class only applied after the lazy-imported view mounted — added `:active` rule that paints the pressed tab immediately. (3) Pixel theme defaulted to mono on cold start — early script now hardcodes `data-theme="pixel"`, theme toggle UI removed from Settings (mono CSS preserved as structural foundation; bringing toggle back is a single-commit revert).
+
+Phases skipped (deliberately):
+- **Phase E** (pixel SVG tab icons): cosmetic, low-effort, deferred
+- **Phase F** (goal expand-on-tap detail): JS already implemented in v0.15 — only needed CSS polish in pixel theme, which Phase C+ handled
+- **Phase H** (animated sync stage): mockup has it, but the existing pill works; deferred indefinitely
+
+Patterns added to CLAUDE.md trip-up list (item #31 — pixel branch defaults).
+- **Status:** complete + verified working on phone. Branch is `pwa/pixel-ui-redesign`, NOT yet merged to main. Main stays at v0.17.0 / cache v26 until broader confirmation. Rollback path: switch GitHub Pages source back to `main`, OR don't merge.
+
+### Phase 26: Claude Code Workflow Tooling (main, multiple commits)
+User asked whether Claude Code (the CLI tool) features could improve the day-to-day workflow and help future Claude sessions get up to speed faster. Their existing setup was already top 5% — extensive CLAUDE.md, working `update-budget-docs` skill, pre-commit hook (secret detection + docs lint), structured docs, `deploy.sh` + `deploy` shell function — but project-level Claude Code features (settings.json, hooks, status line, slash commands) were unused.
+
+Two commits on `main`:
+
+**`.claude/settings.json` + `.claude/state-check.sh` (commit 59ec80d):**
+- Permission allow-list for ~18 read-only diagnostic Bash commands (`git status`/`log`/`diff`/`branch`/`show`/`rev-parse`/`stash list`/`ls-files`/`remote`/`config --get`, `node --check`, `bash .claude/skills/update-budget-docs/lint.sh`, `bash .claude/state-check.sh`, `bash .claude/statusline.sh`, `wc`/`ls`/`file`/`head`/`tail`). Claude no longer prompts for these.
+- Deny-list for 9 destructive operations (`rm -rf`/`-fr`, `git push --force`/`-f`/`--force-with-lease`, `git reset --hard`, `git clean -fd`/`-df`/`-fdx`) — blocked outright.
+- SessionStart hook runs `state-check.sh`. The script outputs branch + sync state vs origin (ahead/behind counts) + uncommitted file count + first 8 names + last 5 commits + version pointers (with `⚠ DRIFT` warning if Code.js APP_SCRIPT_VERSION ≠ VERSION.txt — catches the v11.14-class incident the project already has trip-up #X for). Output gets injected as Claude's first context. Replaces the manual 4-step ritual at the top of CLAUDE.md.
+- Performance: state-check measured 305 ms locally (under the 500 ms budget).
+
+**Slash commands as skills + status line (commit 8214e65):**
+- `/state` — re-runs state-check.sh on demand (e.g., mid-session after commits)
+- `/lint` — runs the docs lint, reports cleanly without auto-fixing
+- `/deploy "<description>"` — orchestrates full deploy workflow: pre-flight verification → `./apps-script/deploy.sh` → post-deploy timestamp commit → push. Each step gated; `deploy.sh` stays prompted (production deploys should always be explicit).
+- `.claude/statusline.sh` — persistent display in Claude Code's status area: `<branch>[ *<dirty>] · <as-version>[⚠]`. Examples: `main · v11.18`, `pwa/pixel-ui-redesign *2 · v11.18`, `main · v11.17⚠`. Performance ~176 ms.
+
+Patterns added to CLAUDE.md trip-up list (item #30 — skills register at session start, not mid-session).
+
+What this achieves: a new Claude session in this repo lands with state in mind (no manual checking), runs diagnostic commands without nagging, and can invoke established workflows in one token. The workflow ritual that lived in CLAUDE.md as text now executes automatically.
+- **Status:** complete. Tooling-only, zero impact on app behavior. Lives on main; merged into pixel branch.
 
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
