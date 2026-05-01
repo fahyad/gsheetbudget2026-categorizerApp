@@ -418,7 +418,13 @@ function renderSub(c) {
 
   const spent = document.createElement('div');
   spent.className = 'cat-sub-spent';
-  spent.textContent = '$' + (c.spent || 0).toFixed(0) + ' / $' + (c.budgeted || 0).toFixed(0);
+  // v0.19.2: labeled "$X spent / $Y budget" instead of bare "$X / $Y" —
+  // the bare form was too cryptic when the available amount above it is
+  // negative or zero (e.g. seeing "$0.00 LEFT" with "$0 / $98" beneath
+  // didn't make obvious why available was zero — answer is overspend
+  // carried over from a prior period). Labels make the relationship
+  // explicit without needing to remember which number is which.
+  spent.textContent = '$' + (c.spent || 0).toFixed(0) + ' spent / $' + (c.budgeted || 0).toFixed(0) + ' budget';
 
   amounts.appendChild(avail);
   amounts.appendChild(spent);
