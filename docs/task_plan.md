@@ -294,6 +294,21 @@ Decisions made during planning:
 Patterns added to CLAUDE.md trip-up list (item #29).
 - **Status:** complete + verified working. Deployed @43; user confirmed 2026-04-29 that the Archive Goal flow works end-to-end (Banff archive removed the row from Budget). Rollback path (unused): revert the `rebuildBudgetInternal_` filter line — that alone restores the prior Budget behavior; the new menu items become harmless no-ops.
 
+### Phase 27: Budget Tab Rolled Over Column (v11.19 + paired PWA v0.19.3)
+The Budget tab's Available column has always carried prior-period rollover via a recursive SUMIFS lookup embedded inside the Available formula. Math was correct; visibility was zero. User flagged the confusion with a real example: Groceries showing "$0.00 LEFT" with "$0 spent / $98 budget" beneath. The math looked wrong (budgeted $98 minus spent $0 should leave $98), but the answer was that $98 of overspend rolled in from a prior period. The number was always there — just hidden inside the formula chain.
+
+Phase 27 surfaces the rollover as its own Budget tab column. Three formula changes in `apps-script/Code.js`:
+- **`buildRolledOverFormula_(row)`** (NEW) — extracts the prior-period-Available SUMIFS that used to live inside Available. Returns 0 for period 1 (MATCH > 1 guard against the period-1 INDEX-with-row-0 circular-reference bug fixed in v10.4) or for new categories with no prior rows. Sign mirrors Available — positive when prior period underspent, negative when overspent.
+- **`buildAvailableFormula_(row)`** (SIMPLIFIED) — now `=F + D - E` arithmetic. No SUMIFS. The recursive carryover chain runs through Rolled Over instead. Each row's Rolled Over depends on prior period's Available; that prior Available depends on its own Rolled Over; etc. down to period 1. Sheets evaluates in dependency order; no circular reference.
+- **`setNamedRanges_`** — `Budget_Available` shifts F8:F500 → G8:G500. New `Budget_RolledOver` = F8:F500. Saving tab + dashboard formulas reference these by name, so the column shift is transparent to them.
+
+Layout: header + data rows extended to 7 cols (was 6). Column F = Rolled Over, column G = Available. Slicer range covers 7 cols. Currency format on D-G.
+
+PWA pairs with v0.19.3 (one-line `parseDashboard` change in `js/lib/budget.js` to read `row[6]` as available). Sheet shipped first per user direction; PWA dashboard temporarily shows wrong numbers until v0.19.3 lands.
+
+Patterns added to CLAUDE.md trip-up list (item #32 — Budget tab schema changes need paired PWA parser updates).
+- **Status:** Apps Script v11.19 deployed @44 (commits `5b76c1b` + `8313d30`). User confirmed 2026-05-04 that the new Rolled Over column appears with sensible values (period 1 = $0, subsequent periods = prior Available, Available column still computes to the same numbers as before). PWA v0.19.3 fix queued; dashboard temporarily showing wrong numbers until it lands.
+
 ## Deferred Cleanup Items (discovered 2026-04-18 via dumpSheet)
 
 ### ✅ Orphan Transactions (RESOLVED in v11.0)
