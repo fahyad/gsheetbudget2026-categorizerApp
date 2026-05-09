@@ -12,8 +12,11 @@
 import * as api from '../api.js';
 import { recordEvent } from './metrics.js';
 
-const CACHE_KEY = 'budget_dashboard_cache';
-const FETCHED_AT_KEY = 'budget_dashboard_fetched_at';
+// v0.17.1: bumped cache key suffix to invalidate pre-v11.19 cached data
+// that has the old 6-col Budget shape. Without this bump, returning
+// users would see the cached row-shape until the 10-min TTL expires.
+const CACHE_KEY = 'budget_dashboard_cache_v2';
+const FETCHED_AT_KEY = 'budget_dashboard_fetched_at_v2';
 const TTL_MS = 10 * 60 * 1000;
 
 // Layouts match apps-script/Code.js (rebuildBudgetInternal_ / rebuildSavingInternal_).
@@ -133,12 +136,20 @@ function parseDashboard(budgetRows, savingRows) {
     const period = String(row[0] ?? '').trim();
     const sub = String(row[2] ?? '').trim();
     if (!period || !sub) continue;
+    // v0.17.1 (paired with Apps Script v11.19): Budget tab gained a
+    // "Rolled Over" column at F, shifting Available from F → G. Read
+    // both — rolledOver is exposed for future use (cat-sub label
+    // enhancement to show "$X spent / $Y budget · ±$Z rolled").
+    // Pre-v11.19 sheets won't have row[6] populated; parseCurrency on
+    // undefined returns 0 — degrades to "no rollover info" instead of
+    // breaking. See `docs/findings.md` "Budget Tab Schema Evolution".
     const entry = {
       main: String(row[1] ?? '').trim(),
       sub,
       budgeted: parseCurrency(row[3]),
       spent: parseCurrency(row[4]),
-      available: parseCurrency(row[5]),
+      rolledOver: parseCurrency(row[5]),
+      available: parseCurrency(row[6]),
     };
     if (!categoriesByPeriod[period]) categoriesByPeriod[period] = [];
     categoriesByPeriod[period].push(entry);

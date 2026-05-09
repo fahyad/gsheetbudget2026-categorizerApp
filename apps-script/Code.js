@@ -34,8 +34,8 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.18';
-var APP_SCRIPT_LAST_EDITED = '2026-04-29 10:26 MDT';
+var APP_SCRIPT_VERSION = 'v11.19';
+var APP_SCRIPT_LAST_EDITED = '2026-05-04 04:42 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
 // month-by-month checks. PayPeriods data (lines ~1559-1566) is also
@@ -2647,10 +2647,15 @@ function setNamedRanges_(ss, setup, fixed, budget, txn) {
   ss.setNamedRange('FixedExpenses_DueDay', fixed.getRange('C2:C50'));
 
   // Budget_* ranges start at row 8 — rows 1-6 are dashboard, row 7 is header.
+  // v11.19 (Phase 27): added Budget_RolledOver at col F. Budget_Available
+  // shifted from col F → col G to make room. Saving tab + dashboard
+  // formulas reference these by name, so the column shift is transparent
+  // to them.
   ss.setNamedRange('Budget_Period',    budget.getRange('A8:A500'));
   ss.setNamedRange('Budget_Category',  budget.getRange('C8:C500'));
   ss.setNamedRange('Budget_Budgeted',  budget.getRange('D8:D500'));
-  ss.setNamedRange('Budget_Available', budget.getRange('F8:F500'));
+  ss.setNamedRange('Budget_RolledOver',budget.getRange('F8:F500'));
+  ss.setNamedRange('Budget_Available', budget.getRange('G8:G500'));
 
   ss.setNamedRange('Transactions_Amount',    txn.getRange('C2:C1000'));
   ss.setNamedRange('Transactions_Category',  txn.getRange('D2:D1000'));
@@ -3267,19 +3272,51 @@ function buildPaycheckFormula_(periodCellRef) {
 }
 
 /**
+ * Returns the Budget tab "Rolled Over" formula for a given row.
+ *
+ * v11.19 (Phase 27): the prior-period-Available lookup was previously
+ * embedded inside buildAvailableFormula_, which made Available a
+ * compound expression that was hard to reason about ("$0 LEFT" with
+ * "$0 spent / $98 budget" was mathematically correct but the carryover
+ * was invisible). Extracted to its own column F so the user can see
+ * exactly what's being carried in from the prior period.
+ *
+ * Result is the prior period's Available for this same sub-category,
+ * or 0 if (a) this is the first period (MATCH=1) or (b) no prior row
+ * exists for this category. Sign mirrors Available — positive when the
+ * prior period underspent (leftover carries in), negative when overspent.
+ *
+ * Recursion: each row's Rolled Over depends on Budget_Available of the
+ * prior period; that prior Available depends on its own Rolled Over;
+ * etc. down to period 1 (Rolled Over = 0). Sheets evaluates in
+ * dependency order — no circular reference.
+ */
+function buildRolledOverFormula_(row) {
+  return '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
+    'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
+    '0)';
+}
+
+/**
  * Returns the Budget tab "Available" formula for a given row.
- * Format: `prevPeriodAvailable + Budgeted - Spent`.
- * The IF(MATCH>1, ..., 0) wrapper avoids the period-1 INDEX-with-row-0
- * circular-reference bug fixed in v10.4.
+ * Format: `RolledOver + Budgeted - Spent` (= F + D - E).
+ *
+ * v11.19 (Phase 27): simplified from the old compound formula now that
+ * the prior-period-Available lookup lives in its own Rolled Over column
+ * (col F). Available is now pure arithmetic with no SUMIFS — the
+ * recursive carryover chain runs through buildRolledOverFormula_ instead.
+ *
+ * Pre-v11.19 history: this formula used to embed the SUMIFS lookup
+ * directly. The IF(MATCH>1, ..., 0) wrapper that avoided the period-1
+ * INDEX-with-row-0 circular-reference bug (fixed in v10.4) now lives in
+ * buildRolledOverFormula_.
  *
  * B10: was duplicated in two places (rebuildBudgetInternal_ for full
  * rebuild, processInfoAlerts-adjacent path for incremental). Centralized
  * here so future formula edits land in one place.
  */
 function buildAvailableFormula_(row) {
-  return '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
-    'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
-    '0)+D' + row + '-E' + row;
+  return '=F' + row + '+D' + row + '-E' + row;
 }
 
 /**
@@ -3450,11 +3487,18 @@ function rebuildBudgetInternal_(mode, ss) {
   buildBudgetDashboard_(budget);
 
   // Header row at row 7
-  budget.getRange(7, 1, 1, 6)
-    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
+  // v11.19 (Phase 27): added "Rolled Over" between Spent and Available
+  // so the carryover from prior periods is explicit. Available shifts
+  // from col F to col G; Rolled Over takes col F.
+  budget.getRange(7, 1, 1, 7)
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Rolled Over', 'Available']])
     .setFontWeight('bold').setBackground('#d9ead3');
 
   // Build category rows (no more _income rows)
+  // v11.19: each row gets 7 columns now (was 6). Cols E (Spent), F
+  // (Rolled Over), G (Available) are all formula-driven; allValues
+  // holds the literal cells (period, main, cat, budgeted) plus
+  // placeholders 0/0/0 that the formula write below will overwrite.
   var DATA_START_ROW = 8;
   var allValues = [];
   for (var pi = 0; pi < labels.length; pi++) {
@@ -3463,12 +3507,12 @@ function rebuildBudgetInternal_(mode, ss) {
       var cat = budgetCats[ki];
       var mapKey = label + '|' + cat;
       var bVal = (budgetedMap[mapKey] !== undefined) ? budgetedMap[mapKey] : 0;
-      allValues.push([label, '', cat, bVal, 0, 0]);
+      allValues.push([label, '', cat, bVal, 0, 0, 0]);
     }
   }
 
   var totalRows = allValues.length;
-  budget.getRange(DATA_START_ROW, 1, totalRows, 6).setValues(allValues);
+  budget.getRange(DATA_START_ROW, 1, totalRows, 7).setValues(allValues);
 
   // Column B (Main Category) — lookup formula
   var formulasB = [];
@@ -3480,21 +3524,25 @@ function rebuildBudgetInternal_(mode, ss) {
   }
   budget.getRange(DATA_START_ROW, 2, totalRows, 1).setFormulas(formulasB);
 
-  // Columns E (Spent) and F (Available) — formulas.
-  // Available formula centralized in buildAvailableFormula_ (B10).
-  var formulasEF = [];
+  // Columns E (Spent), F (Rolled Over), G (Available) — formulas.
+  // v11.19: Spent unchanged (SUMIFS Transactions). Rolled Over is the
+  // prior-period Available lookup (extracted from the old Available
+  // formula). Available is now pure arithmetic: F + D - E.
+  var formulasEFG = [];
   for (var ef = 0; ef < totalRows; ef++) {
     var efRow = ef + DATA_START_ROW;
-    formulasEF.push([
+    formulasEFG.push([
       '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
+      buildRolledOverFormula_(efRow),
       buildAvailableFormula_(efRow)
     ]);
   }
-  budget.getRange(DATA_START_ROW, 5, totalRows, 2).setFormulas(formulasEF);
+  budget.getRange(DATA_START_ROW, 5, totalRows, 3).setFormulas(formulasEFG);
 
-  // Currency format on Budgeted/Spent/Available columns
-  budget.getRange(DATA_START_ROW, 4, totalRows, 3).setNumberFormat('$#,##0.00');
-  budget.autoResizeColumns(1, 6);
+  // Currency format on Budgeted / Spent / Rolled Over / Available
+  // (cols D, E, F, G — 4 cols, was 3 pre-v11.19).
+  budget.getRange(DATA_START_ROW, 4, totalRows, 4).setNumberFormat('$#,##0.00');
+  budget.autoResizeColumns(1, 7);
 
   // Update the slicer to cover header + the new data range.
   //
@@ -3512,7 +3560,10 @@ function rebuildBudgetInternal_(mode, ss) {
   // Build Workbook or by right-clicking → Set Column if it ever ends up
   // without a filter column.
   try {
-    var slicerRange = budget.getRange(7, 1, totalRows + 1, 6);
+    // v11.19 (Phase 27): slicer range covers 7 cols now (was 6) to
+    // include the new Rolled Over column. Anchor (row 1, col 8) stays
+    // — slicer widget itself doesn't need to move.
+    var slicerRange = budget.getRange(7, 1, totalRows + 1, 7);
     var existingSlicers = budget.getSlicers();
 
     if (existingSlicers.length > 0) {

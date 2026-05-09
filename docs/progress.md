@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.18 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab (was: archive only hid from PWA dropdown). v11.17 makes `handleParseAndFetch_` read-only by default — inline Gmail scan only when caller passes `?withParse=1`. v11.16 added Phase 1 of time-driven parsing: `processInfoAlertsTrigger` (hourly) + install/uninstall menu items. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_` (Saving goal archive; recovered via `clasp pull` 2026-04-26). v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.19 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.19 adds the Rolled Over column to the Budget tab (col F, between Spent and Available). Available formula simplified to `F + D - E`; carryover lookup extracted to `buildRolledOverFormula_`. New `Budget_RolledOver` named range; `Budget_Available` moves F → G. PWA needs paired v0.19.3 (parses row[6] as available). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab. v11.17 makes `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_`. v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.1 (cache v31) on branch `pwa/pixel-ui-redesign` — Phase 25 pixel UI redesign overlay; branch is force-pixel via early `<head>` script. NOT merged to main (main is at v0.17.0 / cache v26). GitHub Pages can be pointed at either branch for preview. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1595,3 +1595,49 @@ Both commits merged into pixel branch via `git merge main`. Tooling lives on mai
   - Tooling: revert the two tooling commits on main.
   - Mono CSS in `style.css` is structurally complete and untouched; pixel.css is purely additive.
 - **Open from this arc (deferred):** Phase E (pixel SVG tab icons), Phase H (animated sync stage). Phase F (goal expand-on-tap) was already implemented in v0.15 — only needed CSS polish, which Phase C+ handled.
+
+---
+
+## Session: 2026-05-04 — Budget tab Rolled Over column (v11.19) + paired PWA parser fix queued
+
+### Setup
+User flagged a real confusion case from the dashboard: Groceries showing "$0.00 LEFT" with "$0 spent / $98 budget" beneath. Mathematically this looked wrong — budgeted $98 minus spent $0 should leave $98, not $0. The actual reason: $98 of overspend from the prior period rolls forward and reduces this period's Available to $0. The math has always been correct; the user just couldn't see the rollover term because it was buried inside the Available formula's compound expression.
+
+User asked to add an explicit Rolled Over column to the Budget tab between Spent and Available, with paired PWA work for the new column position. Stated preference: sheet first, verify, then PWA.
+
+### Design
+Decisions made via planning conversation (5 open questions answered):
+1. **Column placement**: between Spent (E) and Available (G). Reading left-to-right tells the story: planned in (Budgeted) → out (Spent) → carried in (Rolled Over) → result (Available).
+2. **Column name**: "Rolled Over".
+3. **PWA cat-sub label enhancement** (showing rolled in the existing label): defer for follow-up.
+4. **Deploy timing**: sheet first, verify, then PWA.
+5. **Named range**: add `Budget_RolledOver` mirroring the existing `Budget_Available` / `Budget_Budgeted` naming.
+
+Key insight: the SUMIFS recursive lookup that used to live inside `buildAvailableFormula_` extracts cleanly to a new helper. Available simplifies to pure arithmetic (`F + D - E`); the carryover chain runs through Rolled Over instead. No circular reference because Sheets evaluates rows in dependency order — period 1 (Rolled Over = 0 by the MATCH > 1 guard) → period 2 (Rolled Over depends on period 1's Available, which is now resolved) → ... and so on.
+
+### Implementation (v11.19)
+`apps-script/Code.js`:
+- New `buildRolledOverFormula_(row)` — the SUMIFS-on-prior-period-Available lookup, with the MATCH > 1 guard against the period-1 INDEX-with-row-0 circular-reference bug (preserved from v10.4).
+- Simplified `buildAvailableFormula_(row)` — now `=F + D - E`.
+- `rebuildBudgetInternal_` — header writes 7 cols (was 6) with "Rolled Over" between Spent and Available. Data rows extended to 7 cols. New `formulasEFG` block writes E (Spent SUMIFS), F (Rolled Over), G (Available) in one `setFormulas` call. Currency format extended to cols D-G (4 cols, was 3). `autoResizeColumns(1, 7)`. Slicer range covers 7 cols.
+- `setNamedRanges_` — added `Budget_RolledOver` = F8:F500. `Budget_Available` shifted from F8:F500 → G8:G500. Saving tab + dashboard formulas reference by name; the column shift is transparent.
+- `APP_SCRIPT_VERSION` v11.18 → v11.19. VERSION.txt + 4 doc version pointers updated.
+
+Deployed @44. Two commits on main: `5b76c1b` (code + minimum doc sync) + `8313d30` (post-deploy timestamp).
+
+### User verification (2026-05-04)
+User ran `Budget Tools → Update Script` in their sheet, confirmed:
+- New Rolled Over column appeared between Spent and Available.
+- Existing user-entered Budgeted values preserved across the wipe-and-rebuild (via `budgetedMap`).
+- Sensible values throughout: period 1 = $0 (no prior to roll from); subsequent periods = prior period's Available for the same sub-category.
+- Available column still computes to the same numbers as before — math unchanged, just decomposed into two columns.
+- Groceries case now self-explanatory: Rolled Over = −$98 (prior overspend), Budgeted = $98, Spent = $0, Available = $0. The reason "$0 LEFT" is no longer mysterious.
+
+### Status — VERIFIED WORKING (sheet + PWA both shipped)
+- Apps Script v11.19 deployed @44; user confirmed working.
+- PWA paired fix v0.17.1 shipped on main (commit `ff46930`): `parseDashboard` now reads `row[6]` as available + `row[5]` as new `rolledOver` field. Cache key bumped to `budget_dashboard_cache_v2` to invalidate pre-v11.19 cached data.
+- Pixel branch merged main + bumped to v0.19.3 / cache v33 with the same parser fix.
+- Trip-up #32 added to CLAUDE.md covering the schema-change-breaks-PWA pattern (with #30 and #31 from the pixel branch already in place).
+- Phase 27 entry in task_plan.md.
+- Findings architecture section "Budget Tab Schema Evolution (v11.19)" added.
+- Rollback path (unused): revert commits `5b76c1b` + `8313d30` (Apps Script) + `ff46930` (PWA parser) and run Update Script again. budgetedMap survives; user data preserved.

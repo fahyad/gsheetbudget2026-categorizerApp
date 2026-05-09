@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.18 Apps Script** (Goal archive flow + Budget filter — see "Goal Archive Flow"; v11.17 read-only `parseAndFetch`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints) + **v0.19.1 PWA** (cache v31; on branch `pwa/pixel-ui-redesign` — pixel UI redesign overlay scoped via `:root[data-theme="pixel"]`, multi-select category rail, force-pixel default; main at v0.17.0). v0.16.0 introduced persistent views; v0.15.4 was cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.1) is documented under "Pixel UI Theme System" and "Multi-Select Category Rail". Workflow tooling (settings + hooks + slash commands + status line) is under "Claude Code Workflow Tooling".**
+> Reference document. Sections describe the system as it currently exists: **v11.19 Apps Script** (Phase 27 — Budget tab Rolled Over column added between Spent and Available; Available formula simplified to `F + D - E`; new `Budget_RolledOver` named range; v11.18 Goal archive flow + Setup col F filter in `rebuildBudgetInternal_`; v11.17 read-only `handleParseAndFetch_` with opt-in `?withParse=1`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.3 PWA** (cache v33; on branch `pwa/pixel-ui-redesign` — pixel UI redesign overlay scoped via `:root[data-theme="pixel"]`, multi-select category rail, force-pixel default; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available, `row[5]` as new `rolledOver` field; main at v0.17.1). v0.16.0 introduced persistent views; v0.15.4 was cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.1) is documented under "Pixel UI Theme System" and "Multi-Select Category Rail". Workflow tooling (settings + hooks + slash commands + status line) is under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) is under "Budget Tab Schema Evolution".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1657,3 +1657,71 @@ Project-level `.claude/` infrastructure to make Claude Code sessions in this rep
   2. **Permissions tighten the trust boundary.** Allow-list reduces friction without weakening safety; deny-list catches typos before they execute. Default-prompt-everything is too noisy; default-allow-everything is too risky.
   3. **The hook + status line + slash commands together compress the cold-open ritual** from ~5 manual commands to zero. The CLAUDE.md ritual was always right; relying on Claude to remember it was the failure mode.
   4. **Skills register at session start.** Mid-session adds work but require restart to be invocable via `Skill()` — read SKILL.md directly and follow manually as the workaround.
+
+---
+
+### Budget Tab Schema Evolution (v11.19)
+
+The Budget tab gains an explicit "Rolled Over" column between Spent and Available, surfacing the prior-period carryover that was previously hidden inside the Available formula. Math is unchanged; only the decomposition + visibility is new.
+
+- **Symptom:** User reported Groceries showing "$0.00 LEFT" with "$0 spent / $98 budget" beneath. Mathematically appears wrong (budgeted $98 minus spent $0 should leave $98 available, not $0). Reality: prior period overspent by $98, the deficit rolled forward, this period's Available = $98 budgeted − $98 carried-over deficit = $0. The carryover term was always part of the Available formula but invisible — no column showed it, no PWA label hinted at it.
+
+- **Fix (v11.19, deployed @44):** Extract the carryover into its own column F. Available simplifies from a compound SUMIFS expression to pure arithmetic.
+
+  ```js
+  // Before — buildAvailableFormula_ embedded the recursive SUMIFS lookup:
+  '=IF(MATCH(A_row,PayPeriods_Label,0)>1,'
+    + 'IFERROR(SUMIFS(Budget_Available,Budget_Period,'
+    +   'INDEX(PayPeriods_Label,MATCH(A_row,PayPeriods_Label,0)-1),'
+    +   'Budget_Category,C_row),0),'
+    + '0)+D_row-E_row'
+
+  // After — split into two helpers:
+  buildRolledOverFormula_(row):
+    '=IF(MATCH(A_row,PayPeriods_Label,0)>1,'
+      + 'IFERROR(SUMIFS(Budget_Available,Budget_Period,'
+      +   'INDEX(PayPeriods_Label,MATCH(A_row,PayPeriods_Label,0)-1),'
+      +   'Budget_Category,C_row),0),'
+      + '0)'
+
+  buildAvailableFormula_(row):
+    '=F_row+D_row-E_row'
+  ```
+
+  Layout changes:
+
+  ```
+  Before (6 cols):
+    A: Period | B: Main Cat | C: Category | D: Budgeted | E: Spent | F: Available
+
+  After (7 cols):
+    A: Period | B: Main Cat | C: Category | D: Budgeted | E: Spent | F: Rolled Over | G: Available
+  ```
+
+  Named range updates:
+
+  ```
+  setNamedRanges_:
+    Budget_RolledOver = budget.getRange('F8:F500')   // NEW
+    Budget_Available  = budget.getRange('G8:G500')   // shifted F → G
+  ```
+
+  Saving tab + dashboard formulas reference these by name, so the column shift is transparent — they continue to work without code changes.
+
+- **Edge cases handled:**
+  - **First period (no prior):** MATCH > 1 guard returns 0. Rolled Over = $0. Available = D − E. Same as before.
+  - **New category mid-year (no prior data):** SUMIFS returns 0. Rolled Over = $0. Correct.
+  - **Archived sub-category** (filtered out of `rebuildBudgetInternal_` since v11.18): no Budget row at all. Unaffected.
+  - **User edits Budgeted mid-period:** Available recalculates → next period's Rolled Over recalculates → cascade continues. No special handling needed; Sheets dependency graph propagates.
+  - **User runs Update Script:** `budgetedMap` preserves user-entered Budgeted across the wipe-and-rebuild. Rolled Over and Available re-derive fresh from formulas.
+  - **Recursion safety:** Each row's Rolled Over depends on prior period's Available; that prior Available depends on its own Rolled Over (which depends on prior-prior Available); chain bottoms out at period 1 where MATCH > 1 returns false. No circular reference because Sheets evaluates in dependency order, not cell-position order.
+
+- **Coupling that bit us — and is now a trip-up (#32):** The PWA's `parseDashboard` (in `js/lib/budget.js`) reads Budget tab columns by index — `row[5]` for Available pre-v11.19. After the column shift, `row[5]` is Rolled Over and Available is `row[6]`. Adding/removing/reordering Budget tab columns requires a paired PWA parser update OR the dashboard cards silently show wrong numbers (no error, just values from the wrong column).
+
+  Why named ranges DON'T help here: the PWA reads via the `dumpSheet` endpoint which returns raw 2D arrays indexed by column position, not by named range. Anything that consumes the dump has to know the column layout. Saving tab + sheet-side formulas use named ranges (resilient to column shifts); PWA's dashboard parser doesn't (must update in lockstep with schema changes).
+
+- **Lesson:**
+  1. **Decompose compound formulas when the hidden terms are user-relevant information.** Available was always `RolledOver + Budgeted − Spent`; collapsing it into a single SUMIFS-driven cell saved a column but cost user comprehension. Three columns ($D + $F − $E = $G) is more honest than one.
+  2. **Schema changes propagate through every consumer that reads by index.** Saving tab and sheet-side formulas use named ranges and survive transparently. The PWA reads raw arrays from `dumpSheet` and breaks immediately. Plan paired updates whenever `rebuildBudgetInternal_`'s column count changes.
+  3. **"By design" + "user can't see it" can both be true.** The original embedded-SUMIFS Available formula was correct AND opaque. Correctness doesn't preclude the need for visibility.
+  4. **Math-doesn't-look-right reports are usually visibility issues.** When the user said "Groceries math doesn't add up," the bug wasn't math — it was the missing term. Look for hidden inputs before assuming the formula is wrong.
