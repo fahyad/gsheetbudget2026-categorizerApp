@@ -665,12 +665,43 @@
   background: var(--bg-selected);
 }
 
-/* Panel container — terminal aesthetic. Sits below the (sticky) summary
-   strip and scrolls with the page; strip overlay handles its own
-   background so panel rows sliding under it disappear cleanly. */
+/* Panel container — sticks to the page like its summary-cell trigger.
+   General principle: anything toggleable from a sticky element should
+   remain reachable while scrolling.
+   Stacking ladder (top → bottom):
+     #period-bar-host      z-index 9, top: 0
+     .summary-strip        z-index 7, top: env-inset + 48
+     .fixed-panel (open)   z-index 6, top: env-inset + 108  ← here
+   The 108 is the period bar height (~48 incl. safe-area pad) + summary
+   strip height (~60). If you ever change strip padding, retune this. */
 :root[data-theme="pixel"] .fixed-panel {
   background: var(--bg);
   border-bottom: 1px solid var(--rule);
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 108px);
+  z-index: 6;
+  /* Soft shadow under so it reads as a layer hovering above the
+     scrolled content beneath, matching the strip's treatment. */
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.45);
+}
+/* When collapsed (`hidden` attr), the [hidden] base rule sets
+   display: none — but explicit `position: static` here is cheap
+   defense in case any future override fights with it. */
+:root[data-theme="pixel"] .fixed-panel[hidden] {
+  position: static;
+}
+
+/* v0.19.6: highlight the FIXED summary cell when its panel is open.
+   Visual: amber label + chevron + slightly tinted bg, matching the
+   period bar's "armed" treatment when the calendar dropdown is open. */
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] {
+  background: var(--bg-period);
+}
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] .label {
+  color: var(--amber);
+}
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] .summary-chevron {
+  color: var(--amber);
 }
 
 :root[data-theme="pixel"] .fixed-panel-head {
