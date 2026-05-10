@@ -156,11 +156,24 @@ function renderPeriodBar() {
   label.appendChild(eyebrow);
   label.appendChild(name);
 
+  // v0.18.1 (Phase D): today chip. Hidden via display:none in pixel.css's
+  // default rule for both themes; pixel theme re-shows via attribute scope.
+  // Same block also in categorize.js renderPeriodBar — keep the two in sync.
+  const todayChip = document.createElement('span');
+  todayChip.className = 'period-today-chip' + (isCurrent ? ' is-current' : '');
+  if (isCurrent) {
+    const day = new Date().getDate();
+    todayChip.innerHTML = '<span class="today-bracket">[</span>' + day + '<span class="today-bracket">]</span>';
+  } else {
+    todayChip.textContent = 'PAST';
+  }
+
   const caret = document.createElement('span');
   caret.className = 'period-caret';
   caret.textContent = '▾';
 
   toggle.appendChild(label);
+  toggle.appendChild(todayChip);
   toggle.appendChild(caret);
 
   const next = document.createElement('button');
@@ -431,18 +444,10 @@ function renderFixedPanel(period) {
   const sheetTotal = (cachedData?.summaryCurrent?.fixedExpenses) || 0;
   const reconcileMismatch = Math.abs(clientTotal - sheetTotal) > 0.01;
 
-  // Header with the period total
-  const head = document.createElement('div');
-  head.className = 'fixed-panel-head';
-  const title = document.createElement('span');
-  title.className = 'fixed-panel-title';
-  title.textContent = `Fixed expenses · ${period.label}`;
-  const total = document.createElement('span');
-  total.className = 'fixed-panel-total' + (clientTotal < 0 ? ' negative' : '');
-  total.textContent = (clientTotal < 0 ? '−' : '') + formatCurrency(Math.abs(clientTotal));
-  head.appendChild(title);
-  head.appendChild(total);
-  panel.appendChild(head);
+  // v0.19.6: removed the .fixed-panel-head element ("FIXED EXPENSES ·
+  // <period> · <total>"). The total was already visible in the FIXED
+  // summary cell above; the period was already in the period bar.
+  // Header was visual noise; rows alone are cleaner.
 
   // Reconciliation warning (rare; means dueDatesInPeriod disagrees with
   // sheet's buildFixedExpensesFormula_ — usually a BUDGET_YEAR mismatch).
@@ -572,7 +577,13 @@ function renderSub(c) {
 
   const spent = document.createElement('div');
   spent.className = 'cat-sub-spent';
-  spent.textContent = '$' + (c.spent || 0).toFixed(0) + ' / $' + (c.budgeted || 0).toFixed(0);
+  // v0.19.2: labeled "$X spent / $Y budget" instead of bare "$X / $Y" —
+  // the bare form was too cryptic when the available amount above it is
+  // negative or zero (e.g. seeing "$0.00 LEFT" with "$0 / $98" beneath
+  // didn't make obvious why available was zero — answer is overspend
+  // carried over from a prior period). Labels make the relationship
+  // explicit without needing to remember which number is which.
+  spent.textContent = '$' + (c.spent || 0).toFixed(0) + ' spent / $' + (c.budgeted || 0).toFixed(0) + ' budget';
 
   amounts.appendChild(avail);
   amounts.appendChild(spent);

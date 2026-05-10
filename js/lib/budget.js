@@ -59,6 +59,20 @@ export function invalidateDashboardCache() {
   localStorage.removeItem(FETCHED_AT_KEY);
 }
 
+/**
+ * v0.19.0 — synchronous accessor for already-cached dashboard data
+ * without firing a network fetch. Returns null if no cache exists.
+ *
+ * Used by Categorize's chip rail to render budgeted/spent info on
+ * cold open. Chips render name-only when this returns null; an
+ * async getDashboardData() call updates them when fetch resolves.
+ */
+export function peekDashboardCache() {
+  const cached = readCache();
+  if (!cached) return null;
+  return { data: cached.data, fetchedAt: cached.fetchedAt };
+}
+
 function readCache() {
   const at = parseInt(localStorage.getItem(FETCHED_AT_KEY) || '0', 10);
   if (!at) return null;

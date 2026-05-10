@@ -4,7 +4,9 @@
 >
 > **Apps Script:** v11.19 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.19 adds the Rolled Over column to the Budget tab (col F, between Spent and Available). Available formula simplified to `F + D - E`; carryover lookup extracted to `buildRolledOverFormula_`. New `Budget_RolledOver` named range; `Budget_Available` moves F → G. PWA needs paired v0.19.3 (parses row[6] as available). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab. v11.17 makes `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_`. v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
 >
-> **PWA:** v0.15.3 (cache v23) — Minimal Monochrome redesign + iOS safe-area fix + Savings/Goals dedup + client metrics pipeline. On branch `pwa/v0.15-refinement` (branched from `claude/read-markdown-context-v1c5T`). Neither has been merged to `main`. GitHub Pages currently serving from the active refinement branch for preview. `.nojekyll` at repo root is required — don't delete.
+> **PWA:** v0.19.6 (cache v36) on `main` — pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
+>
+> **Workflow tooling:** project-level `.claude/settings.json` (permissions + SessionStart hook), `.claude/state-check.sh` (state snapshot), `.claude/statusline.sh` (persistent display), three slash-command skills (`/state`, `/lint`, `/deploy`). On main, also merged into pixel branch.
 >
 > **Production deployment ID:** `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw33ofmOm_FF-B-sAeSy51sn_kBjyQ` (in `apps-script/deploy.sh` and `js/config.js DEFAULT_API_URL` — must match).
 >
@@ -1546,6 +1548,56 @@ v11.18 changes in `apps-script/Code.js`:
 
 ---
 
+## Session: 2026-04-30 — PWA pixel UI redesign (v0.18.0 → v0.19.1) + Claude Code workflow tooling
+
+### Setup
+Two parallel work streams from the same multi-day session:
+
+1. **Pixel UI redesign**: user shared a Claude Design "PWA V2" handoff bundle proposing a terminal/pixel UI aesthetic (dark surfaces, JetBrains Mono everywhere, stepped progress bars, multi-select category rail). Asked to implement cautiously as suggestions, not must-haves; branch-only deploy with theme toggle so mono stays available. Wanted phased rollout with each phase rollback-able.
+2. **Claude Code workflow tooling**: after the pixel UI work, user asked whether Claude Code features (settings, hooks, slash commands, status line) could improve daily workflow + help future Claude sessions ramp faster. Their existing setup was already strong (extensive CLAUDE.md, working skill, pre-commit hook, deploy alias) but project-level Claude Code features were unused.
+
+### Design (pixel UI)
+Read the Claude Design handoff bundle (HTML/CSS/JSX prototypes + chat transcript at `pwa-v2/chats/chat1.md`). Key insight from the chat: "Pick a category → assign matching transactions" is the receipt-sorting metaphor; old flow ("pick transaction → pick category") is for "what is this?" while new flow is for "what belongs here?". Both have value — multi-select rail wins on backlog clearance, picker wins for one-off categorization. Decision: ship rail as primary, picker as fallback when no chip is armed.
+
+For all visual phases, designed as a CSS overlay: `css/pixel.css` scoped via `:root[data-theme="pixel"]` so all rules are inert until the attribute flips. Same DOM, same JS-flow. Backward-compat with mono CSS preserved via the same CSS-variable layer.
+
+### Implementation (pixel UI — five sub-phases on `pwa/pixel-ui-redesign`)
+
+**v0.18.0 (Phase A+B+C):** Theme infrastructure (early `<head>` script, `data-theme` attribute, two-stylesheet load, Settings toggle UI). Color palette flip + JetBrains Mono. Stepped progress bars. Single amber accent stripe on dashboard cards.
+
+**v0.18.1 (Phase D):** Period bar today chip ("[27]" amber-bracket day-of-month, hidden in mono). Calendar dropdown restyled (dashed border, amber numerals, outlined cursor box for today). Touched both `categorize.js` and `dashboard.js` `renderPeriodBar` (~6 lines each, kept in sync via comments).
+
+**v0.18.2 (Phase C+):** Two real bugs fixed from Phase C — `.cat-bar` was 1px tall in mono so the stepped gradient was invisible (bumped to 4px); `.cat-group-header` had `bg-selected` background that painted over the new accent stripe (switched to transparent + indented 22px). Plus polish: sticky summary strip, dotted within-group borders, green toggle glyph.
+
+**v0.19.0 (Phase G):** Multi-select category rail. State machine: IDLE → ARMED → ARMED+SEL with explicit clear on chip-switch (overriding mockup's footgun keep-selection-on-switch). Backend untouched (`handleBatchCategorize_` already supports many items). Picker stays as fallback for no-chip-armed quick-categorize. Mono theme also gets the rail with simpler styling.
+
+**v0.19.1 (branch fixes after on-device testing):** User reported (a) summary strip values wrapping (`−$1,948.00` broke onto two lines on iPhone), (b) tab bar felt frozen on tap (no visual feedback during lazy-mount window), (c) pixel theme defaulted to mono on cold start. Fixes: pixel summary 18px → 14px + `white-space: nowrap`; new `#tab-bar .tab:active` rule paints pressed tab immediately; early script hardcodes `data-theme="pixel"` on this branch + theme toggle UI removed from Settings. Mono CSS preserved as structural foundation; rollback is single-commit revert.
+
+### Implementation (workflow tooling — two commits on `main`)
+
+**`.claude/settings.json` + `.claude/state-check.sh` (commit 59ec80d):**
+- Permission allow-list: ~18 read-only diagnostic Bash commands no longer prompt.
+- Deny-list: 9 destructive operations blocked outright.
+- SessionStart hook runs `state-check.sh` (~305 ms): outputs branch + sync state vs origin + uncommitted count + last 5 commits + version pointers with DRIFT warning if Code.js ≠ VERSION.txt.
+
+**Slash commands + status line (commit 8214e65):**
+- `/state`, `/lint`, `/deploy "<desc>"` as skills under `.claude/skills/`.
+- `.claude/statusline.sh` (~176 ms): persistent display `<branch>[ *<dirty>] · <as-version>[⚠]`.
+
+Both commits merged into pixel branch via `git merge main`. Tooling lives on main as the canonical home; pixel branch inherits via merge.
+
+### Status — VERIFIED WORKING
+- **Pixel UI:** v0.19.1 on `pwa/pixel-ui-redesign` deployed via GitHub Pages branch source. User confirmed on-device that summary strip no longer wraps, tab bar gives instant tap feedback, and pixel is the default theme on cold start. Multi-select rail works as designed. NOT merged to main pending broader confirmation; main stays at v0.17.0 / cache v26.
+- **Workflow tooling:** on main + merged into pixel branch. Will activate at next session start (skills register at session start, not mid-session — see trip-up #30).
+- **Two new trip-ups added:** #30 (skills mid-session) + #31 (pixel branch defaults).
+- **Rollback paths preserved everywhere:**
+  - Pixel UI: don't merge to main, OR switch GitHub Pages source back to main, OR revert v0.19.1 commit to bring the toggle back.
+  - Tooling: revert the two tooling commits on main.
+  - Mono CSS in `style.css` is structurally complete and untouched; pixel.css is purely additive.
+- **Open from this arc (deferred):** Phase E (pixel SVG tab icons), Phase H (animated sync stage). Phase F (goal expand-on-tap) was already implemented in v0.15 — only needed CSS polish, which Phase C+ handled.
+
+---
+
 ## Session: 2026-05-04 — Budget tab Rolled Over column (v11.19) + paired PWA parser fix queued
 
 ### Setup
@@ -1581,11 +1633,48 @@ User ran `Budget Tools → Update Script` in their sheet, confirmed:
 - Available column still computes to the same numbers as before — math unchanged, just decomposed into two columns.
 - Groceries case now self-explanatory: Rolled Over = −$98 (prior overspend), Budgeted = $98, Spent = $0, Available = $0. The reason "$0 LEFT" is no longer mysterious.
 
-### Status — SHEET VERIFIED, PWA PAIRED FIX QUEUED
+### Status — VERIFIED WORKING (sheet + PWA both shipped)
 - Apps Script v11.19 deployed @44; user confirmed working.
-- PWA `parseDashboard` (in `js/lib/budget.js`) still reads `row[5]` as available; needs to read `row[6]`. One-line change. Will land as PWA v0.19.3 in next session/turn.
-- **Until PWA fix lands, dashboard cards on phone show wrong numbers** — they render the Rolled Over amount where Available used to render. No error; just wrong values from the wrong column. User aware; sheet-first ordering was the intentional choice.
-- Trip-up #32 added to CLAUDE.md covering the schema-change-breaks-PWA pattern.
+- PWA paired fix v0.17.1 shipped on main (commit `ff46930`): `parseDashboard` now reads `row[6]` as available + `row[5]` as new `rolledOver` field. Cache key bumped to `budget_dashboard_cache_v2` to invalidate pre-v11.19 cached data.
+- Pixel branch merged main + bumped to v0.19.3 / cache v33 with the same parser fix.
+- Trip-up #32 added to CLAUDE.md covering the schema-change-breaks-PWA pattern (with #30 and #31 from the pixel branch already in place).
 - Phase 27 entry in task_plan.md.
 - Findings architecture section "Budget Tab Schema Evolution (v11.19)" added.
-- Rollback path (unused): revert commits `5b76c1b` + `8313d30` and run Update Script again. budgetedMap survives; user data preserved.
+- Rollback path (unused): revert commits `5b76c1b` + `8313d30` (Apps Script) + `ff46930` (PWA parser) and run Update Script again. budgetedMap survives; user data preserved.
+
+---
+
+## Session: 2026-05-09 — Pixel UI graduates to main + FIXED accordion polish (v0.19.4 → v0.19.6)
+
+### Setup
+After living with pixel UI on the `pwa/pixel-ui-redesign` branch for ~10 days (v0.18.0 → v0.19.3), user shipped three more refinements via the FIXED accordion arc and then asked to make pixel branch the canonical main.
+
+### FIXED accordion arc (three commits)
+
+**v0.19.4 — accordion infrastructure.** Tap the FIXED summary cell on Dashboard to expand a panel between summary strip and category groups. Implementation per WAI-ARIA APG accordion pattern + a research brief on iOS Safari edge cases (avoid `<details>`/`<summary>` in grid contexts; use custom `<button>` + aria-expanded + aria-controls; `hidden` attr toggles; no animation). New `dueDatesInPeriod` helper in `periods.js` mirrors sheet's `buildFixedExpensesFormula_` so client-side total reconciles to Budget!B4. Cache key bumped to invalidate pre-v0.19.4 cached data shape.
+
+**v0.19.5 — sticky containment fix.** User reported period bar not sticking on long scrolls. Root cause: `.period-bar` was sticky but its containing block (`#period-bar-host`) was shrink-to-fit, so sticky could only act within ~60 px. Fix: promote sticky to the host element, which spans the full dashboard scroll range. CSS-only one-rule addition.
+
+**v0.19.6 — sticky FIXED panel + drop header + highlight cell when open.** User principle: anything toggleable from a sticky element should remain reachable. Made `.fixed-panel` sticky at `top: env-inset + 108px` (z-index: 6, just below summary strip's 7). Removed the in-panel "Fixed expenses · <period> · <total>" header (the total was already in the summary cell above; the period was already in the period bar). Added highlight on `.summary-cell-toggle[aria-expanded="true"]` — amber label + chevron + slight bg tint, matching period bar's "armed" treatment. Two commits because the dashboard.js header-removal edit raced with a file refresh (`6d9650e` shipped CSS + version bumps; `ed7da6e` actually removed the head element).
+
+### Pixel UI graduation to main
+
+User asked to make pixel branch the canonical main. Plan + 5 open questions answered: --no-ff merge (preserves history), keep pixel branch around as snapshot, user handles GitHub Pages source switch.
+
+Steps executed:
+1. Tagged main as `main-pre-pixel-merge` (PWA v0.17.2 / cache v28); pushed tag to origin.
+2. Switched to main; merged `pwa/pixel-ui-redesign --no-ff`.
+3. Three conflicts (config.js, sw.js, dashboard.js's panel-head removal). All resolved to pixel's version (the desired state).
+4. Doc files auto-merged cleanly (pixel branch's docs were ahead).
+5. Doc cleanup: dropped "branch is force-pixel; NOT yet merged" framing across CLAUDE.md / task_plan.md / progress.md / findings.md. Trip-up #31 rewritten — now reads "main is force-pixel" (was "the pwa/pixel-ui-redesign branch is force-pixel"). Phase 25 status updated to "merged to main 2026-05-09 (commit `<sha>`)".
+6. Lint clean.
+7. Pushed main to origin (single non-force push — the `--no-ff` merge commit did the work).
+
+### Status — VERIFIED WORKING (merge complete; pending Pages source switch)
+- main now at PWA v0.19.6 / cache v36 (was v0.17.2 / cache v28).
+- All pixel branch content lives on main: pixel.css, force-pixel `<head>` script, multi-select rail, today chip, terminal calendar, sticky period bar, sticky FIXED panel, accordion + highlight.
+- The `pwa/pixel-ui-redesign` branch is preserved on remote as a snapshot (per user request — keep around) but no longer active for development.
+- `main-pre-pixel-merge` tag is the rollback handle (PWA v0.17.2 / cache v28).
+- **User next step:** switch GitHub Pages source from `pwa/pixel-ui-redesign` back to `main` in repo Settings → Pages (if it was previously pointed at the pixel branch for preview).
+- No Apps Script change in this session (still v11.19 @44).
+- Rollback path (unused): `git checkout main && git reset --hard main-pre-pixel-merge && git push origin main --force` (force-push needs explicit user permission since it's denied by `.claude/settings.json`).

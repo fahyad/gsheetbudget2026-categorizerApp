@@ -36,6 +36,10 @@ const TEMPLATE = `
     </div>
   </section>
 `;
+// v0.19.1: theme toggle UI removed. Branch is pixel-only. The early
+// <head> script in index.html forces data-theme="pixel" before any
+// CSS parses. Bringing the toggle back is a TEMPLATE + a
+// setupThemeToggle_ helper away (see git history for the prior code).
 
 // Stash the mount root so onShow() can re-query within it. The router
 // passes the same container on first mount; afterwards the view persists.
@@ -59,6 +63,7 @@ export default {
       navigate('#/categorize');
     });
 
+    // v0.19.1: theme toggle removed (branch is pixel-only).
     populateVersionInfo(root);
   },
 

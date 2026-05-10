@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.19 Apps Script** (Phase 27 — Budget tab Rolled Over column added between Spent and Available; Available formula simplified to `F + D - E`; new `Budget_RolledOver` named range; v11.18 Goal archive flow + Setup col F filter in `rebuildBudgetInternal_`; v11.17 read-only `handleParseAndFetch_` with opt-in `?withParse=1`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.17.0 PWA** (cache v26; main branch — pixel branch at v0.19.2 with PWA Rolled Over parser fix queued as v0.19.3). v0.16.0 introduced persistent views. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)".**
+> Reference document. Sections describe the system as it currently exists: **v11.19 Apps Script** (Phase 27 — Budget tab Rolled Over column added between Spent and Available; Available formula simplified to `F + D - E`; new `Budget_RolledOver` named range; v11.18 Goal archive flow + Setup col F filter in `rebuildBudgetInternal_`; v11.17 read-only `handleParseAndFetch_` with opt-in `?withParse=1`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.6 PWA on `main`** (cache v36; pixel UI graduated from `pwa/pixel-ui-redesign` to canonical on 2026-05-09 — overlay scoped via `:root[data-theme="pixel"]`, multi-select category rail, force-pixel default, FIXED summary-cell accordion with sticky panel; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available, `row[5]` as new `rolledOver` field). v0.16.0 introduced persistent views; v0.15.4 was cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.6) is documented under "Pixel UI Theme System" and "Multi-Select Category Rail". Workflow tooling (settings + hooks + slash commands + status line) is under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) is under "Budget Tab Schema Evolution".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1513,6 +1513,150 @@ A user-visible behavior change rather than a bug postmortem: archive of a saving
   1. **A long list of "doesn't work" symptoms can collapse to one missing connection.** Three independent code paths each handled their slice of "archive" correctly. The bug was that no UI tied them together. The fix isn't fixing the parts — it's the wrapper. (Compare to the time-driven email parsing finding above: 10 trip-ups → 1 architectural decision. Same shape.)
   2. **Dormant endpoints are technical debt with a friendly face.** `handleArchiveGoal_` had been registered in `routeAction_` for two weeks before this session — looked complete from `apps-script/Code.js`'s perspective, but had never been called by anything. Worth checking, periodically: which web-app actions actually have callers? Anything in the action map without a UI invocation is at risk of being subtly broken next time anyone touches it.
   3. **"By design" comments age badly when the use case behind them was wrong.** The Code.js:1885 comment saying *"Archived rows are kept in Setup so historical Budget rebuilds preserve their data"* was technically accurate but documented a use case nobody had. Worth re-reading old design comments occasionally — sometimes the design was right for an audience the project no longer has.
+
+---
+
+### Pixel UI Theme System (PWA v0.18.0 → v0.19.1)
+
+A second visual direction (terminal/pixel aesthetic) shipped as a CSS overlay scoped via the `data-theme` attribute. Coexists with the v0.15 Minimal Monochrome direction as the structural foundation.
+
+- **Symptom:** None — additive feature, not a bug fix. User shared a Claude Design "PWA V2" handoff and asked to try it cautiously without breaking the existing UI.
+
+- **Decision:** Don't replace mono. Add pixel as an opt-in overlay with the same DOM and JS, just different CSS. Use `:root[data-theme="pixel"]` selector scope so the new rules are inert until the attribute flips. Keep mono CSS in `style.css` as the structural foundation that pixel.css overrides — every pixel rule is a `var()`-aware override or attribute-scoped addition. Result: rollback is a single attribute flip; full revert is removing one stylesheet link.
+
+- **Architecture:**
+  ```
+  index.html
+    <head>
+      <link rel="stylesheet" href="css/style.css">    ← always loaded; mono baseline
+      <link rel="stylesheet" href="css/pixel.css">    ← always loaded; rules inert without data-theme="pixel"
+      <script>document.documentElement.setAttribute('data-theme', 'pixel');</script>  ← early, before paint
+    </head>
+  
+  css/style.css       :root { --bg: #FAFAF9; --ink: #0A0A0A; ... }
+  css/pixel.css       :root[data-theme="pixel"] { --bg: #0A0A0A; --ink: #F0E9D6; ... }
+  
+  All component rules use var(--bg), var(--ink), etc. — they re-cascade
+  automatically when the attribute flips. The selectors don't need to
+  know which theme is active.
+  ```
+
+- **Fix sub-phases (each rollback-able independently):**
+  - **v0.18.0 (Phase A+B+C):** infrastructure (toggle UI in Settings, both stylesheets shipped, JS-side persistence). Color palette + JetBrains Mono + stepped progress bars + single accent stripe.
+  - **v0.18.1 (Phase D):** today chip + terminal calendar.
+  - **v0.18.2 (Phase C+):** dashboard polish + two real bugs fixed (`.cat-bar` 1px-tall, header background covering accent stripe).
+  - **v0.19.0 (Phase G):** multi-select rail (separate finding below).
+  - **v0.19.1:** branch fixes after on-device — summary wrapping (font 18→14 + nowrap), tab tap feedback (`:active` rule), force-pixel default (toggle removed from Settings; mono CSS still loaded as structural foundation).
+
+- **Lessons:**
+  1. **Two-stylesheet load + attribute scope is the cleanest theme overlay pattern.** Browsers handle the cascade for free; no JS theme-switcher logic needs to walk the DOM.
+  2. **Force-flip the attribute in the `<head>` script before any CSS parses** to avoid flash-of-mono on cold open. `document.documentElement.setAttribute('data-theme', X)` runs synchronously in the head; CSS doesn't paint until parsed.
+  3. **Bugs in Phase C surfaced only on phone.** The stepped gradient on `.cat-bar-fill` looked correct in source review but rendered invisibly because `.cat-bar` was 1px tall. Always test new visuals on the target device before declaring done.
+  4. **Mono as structural foundation, pixel as overlay** keeps rollback cheap. Removing the pixel branch entirely just means deleting one stylesheet link; the app keeps working.
+
+---
+
+### Multi-Select Category Rail (PWA v0.19.0)
+
+Phase G of the pixel UI redesign. The most behavior-significant change in the arc — first new categorize-flow paradigm since v0.11.
+
+- **Symptom (in user terms):** Old flow ("tap a transaction → pick its category → repeat") was optimized for "what is this transaction?". User has a backlog of receipts every few days; clearing them is faster as "pick a category → check matching transactions → commit" — the receipt-sorting metaphor.
+
+- **Design (state machine):**
+  ```
+  IDLE        no chip armed, no selection
+              tap chip      → ARMED
+              tap txn       → opens picker (today's flow, fallback)
+  
+  ARMED       chip selected, no txns checked yet
+              tap same chip → IDLE
+              tap diff chip → ARMED with new chip, selection clears
+              tap txn       → ARMED+SEL
+  
+  ARMED+SEL   chip armed AND ≥1 txn checked
+              Commit        → batch-categorize all selected to chip → IDLE
+              Cancel        → IDLE (clear all)
+              tap chip      → IDLE (clear all)
+              tap diff chip → ARMED with new chip, selection clears
+              tap txn       → toggle that txn's checked state
+  ```
+  Override of mockup: mockup KEEPS selection on chip-switch, which would let user select 5 Coffee txns then accidentally tap Travel and assign all 5 to Travel. Phase G clears on chip-switch — safety > one fewer tap.
+
+- **Fix:**
+  - `js/views/categorize.js`: new module-level `activeCategory` (string|null) + `selectedTimestamps` (Set<string>) state. `selectedTimestamp` (single, picker mode) kept for the IDLE-tap-txn fallback path.
+  - New tap router routes to picker-open OR toggle-checkbox based on `activeCategory` presence.
+  - New `commitBatch()` calls `store.removeTransaction` + `store.addToSyncQueue` per selected item, sets `lastCategorized = { batch: [...], category }`, transitions to IDLE.
+  - New `renderRail()` builds the chip strip + status row; selective DOM updates on tap (no full re-render — flip classList only).
+  - Backend untouched: `handleBatchCategorize_` already accepts a list of `{ts, cat}` items.
+
+- **Edge cases handled:**
+  - Period switch mid-selection: clears `selectedTimestamps` but keeps `activeCategory`.
+  - Sub-tab switch (Manual → Auto): clears both.
+  - Tab away (onHide): clears both.
+  - Add Category mid-selection: modal opens, on save the new category auto-arms, selection clears.
+  - Sync in flight + commit: allowed; new items append to syncQueue.
+  - Sync in flight + Undo: blocked (matches today's behavior).
+  - Batch undo: loops through `lastCategorized.batch`, restores each. If sync ran between commit and undo (some items left syncQueue), only restores items still in queue + reports partial.
+  - Long category names: chip width grows; rail just scrolls more.
+  - >30 categories: horizontal scroll fine on mobile.
+  - Goal-linked categories appear in rail; archived categories don't (already filtered server-side).
+
+- **Lesson:**
+  1. **Mutual exclusion of two flows beats forcing one.** Picker fallback for IDLE-tap-txn keeps the 2-tap quick-categorize path. Rail is for batch. Both have value; they don't overlap.
+  2. **Override the mockup's UX choices when they're footguns.** The chat transcript showed considered design but didn't catch the chip-switch-keeps-selection problem. Worth questioning every "design decision" in a handoff against your specific use case.
+  3. **State machine on paper before code.** Three explicit states (IDLE / ARMED / ARMED+SEL) with explicit transition rules made the implementation straightforward and the edge-case audit tractable.
+
+---
+
+### Claude Code Workflow Tooling (main, 2026-04-30)
+
+Project-level `.claude/` infrastructure to make Claude Code sessions in this repo land with state in mind, run diagnostic commands without prompting, and invoke established workflows in one token.
+
+- **Symptom:** New Claude sessions paid the "ramp-up tax" every cold open — needed to read CLAUDE.md, notice the 4-step state-check ritual, run those commands one by one (each prompting for permission), then synthesize state. Existing setup was already strong (CLAUDE.md, working `update-budget-docs` skill, pre-commit hook, `deploy.sh`, `deploy` shell function) but project-level Claude Code features were unused.
+
+- **Decision:** Add four pieces of infrastructure, all project-scoped (committed under `.claude/`), all rollback-able as single-commit reverts.
+
+- **Fix:**
+  ```
+  .claude/settings.json              ← permission allow-list (~18 read-only Bash commands)
+                                       deny-list (9 destructive ops blocked outright)
+                                       SessionStart hook → state-check.sh
+                                       statusLine config → statusline.sh
+  
+  .claude/state-check.sh             ← runs at session start, outputs:
+                                       branch + sync state vs origin
+                                       uncommitted count + first 8 names
+                                       last 5 commits
+                                       Apps Script + PWA + SW versions
+                                       ⚠ DRIFT warning if Code.js ≠ VERSION.txt
+                                       ~305 ms locally
+  
+  .claude/statusline.sh              ← persistent display: <branch>[ *<dirty>] · <as-version>[⚠]
+                                       ~176 ms refresh
+  
+  .claude/skills/state/SKILL.md      ← /state — re-runs state-check on demand
+  .claude/skills/lint/SKILL.md       ← /lint — runs docs lint, reports cleanly
+  .claude/skills/deploy/SKILL.md     ← /deploy "<desc>" — orchestrates pre-flight +
+                                       deploy.sh + post-deploy commit + push
+  ```
+
+- **What's allowed vs prompted:**
+  - **Allowed (no prompt):** all read-only diagnostic git ops, `node --check`, the docs lint, `wc`/`ls`/`file`/`head`/`tail`. Anything that mutates state stays prompted.
+  - **Denied outright:** `rm -rf`, `git push --force` and variants, `git reset --hard`, `git clean -fd` and variants. Even if Claude tries to construct one of these, it won't execute.
+  - **Prompted (default):** `git commit`, `git push`, `git checkout`, `./apps-script/deploy.sh`, `clasp` commands, file mutations via shell.
+
+- **Edge cases handled:**
+  - Script run outside a git repo: `state-check.sh` exits 0 silently.
+  - No upstream branch: tolerated; "vs origin: no upstream tracked".
+  - Missing `VERSION.txt` or `Code.js`: lines just don't render.
+  - DRIFT detection: catches Code.js APP_SCRIPT_VERSION ≠ VERSION.txt (the v11.14-class incident pattern).
+  - Skill registration mid-session: known limitation — skills register at session START; skills added or merged in mid-session require a fresh session to be invocable. Documented in trip-up #30 + the existing `update-budget-docs` SKILL.md "Known limitation" section.
+
+- **Lesson:**
+  1. **Project-scoped Claude Code config is committed dev infrastructure.** Lives in `.claude/`, ships with the repo, every fresh session inherits it. Doesn't need any per-machine setup.
+  2. **Permissions tighten the trust boundary.** Allow-list reduces friction without weakening safety; deny-list catches typos before they execute. Default-prompt-everything is too noisy; default-allow-everything is too risky.
+  3. **The hook + status line + slash commands together compress the cold-open ritual** from ~5 manual commands to zero. The CLAUDE.md ritual was always right; relying on Claude to remember it was the failure mode.
+  4. **Skills register at session start.** Mid-session adds work but require restart to be invocable via `Skill()` — read SKILL.md directly and follow manually as the workaround.
 
 ---
 

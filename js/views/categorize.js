@@ -14,7 +14,7 @@ import { store } from '../store.js';
 import { periodForTimestamp, currentPeriod, allPeriods } from '../periods.js';
 import { showError, showSuccess } from '../ui.js';
 import { updateCategorizeBadge } from '../router.js';
-import { invalidateDashboardCache } from '../lib/budget.js';
+import { invalidateDashboardCache, peekDashboardCache, getDashboardData } from '../lib/budget.js';
 import { ensureIndexReady, suggest, invalidateSuggestIndex } from '../lib/suggest.js';
 import { attachSwipe } from '../lib/swipe.js';
 
@@ -75,6 +75,25 @@ const TEMPLATE = `
         </div>
       </div>
     </div>
+
+    <!-- v0.19.0 (Phase G): bottom category rail. Tap a chip to arm a
+         category, tap multiple txns to check them, tap Assign to batch-
+         categorize them all. When no chip is armed, tapping a txn falls
+         through to the existing picker (selectTransaction → categorize).
+         The rail is mounted always; CSS hides it on the Auto sub-tab,
+         and JS toggles its visibility based on category-load state. -->
+    <div id="cat-rail" hidden>
+      <div id="rail-status" role="status" aria-live="polite">
+        <div id="rail-status-left">
+          <span class="rail-status-hint">Tap a category to assign multiple at once</span>
+        </div>
+        <div id="rail-status-actions" hidden>
+          <button id="rail-cancel-btn" type="button">Cancel</button>
+          <button id="rail-commit-btn" type="button" disabled>Assign</button>
+        </div>
+      </div>
+      <div id="rail-scroll"></div>
+    </div>
   </section>
 
   <div id="loading" hidden>
@@ -95,13 +114,30 @@ const TEMPLATE = `
 `;
 
 // Module-level state.
-let selectedTimestamp = null;
-let selectedPeriodIdx = null;  // number; default = current period
+let selectedTimestamp = null;       // single-tap picker target; null when no picker open
+let selectedPeriodIdx = null;       // number; default = current period
 let refreshInFlight = false;
 let syncInFlight = false;
 let activeSubtab = 'manual';
 let calendarOpen = false;
 const rejectedThisSession = new Set();
+
+// v0.19.0 (Phase G) — multi-select rail state. activeCategory armed = chip
+// selected at the bottom rail. selectedTimestamps = Set of txn timestamps
+// the user has checked for batch-assign. When activeCategory is null,
+// tap-a-txn falls through to selectTransaction (the picker flow).
+//
+// State lifecycle: cleared on Cancel, Commit, chip-switch, period switch
+// (timestamps only), subtab switch, and onHide. NOT persisted across
+// reloads — selection is ephemeral by design (matches "I'm sorting
+// receipts right now" metaphor).
+let activeCategory = null;
+let selectedTimestamps = new Set();
+
+// v0.19.0 — chip data fetch promise. Populates chip budgeted/spent/
+// available info from the dashboard cache. Module-level so it's only
+// fired once per session (subsequent Categorize mounts reuse the cache).
+let chipDataPromise = null;
 
 // v0.15.4 perf state — shared across re-mounts for this module lifetime.
 // These avoid the duplicate-categories call + needless refetch-on-remount
@@ -117,7 +153,9 @@ let appSection, periodBarHost, transactionList, categoryPicker, categoryButtons,
     emptyRefreshBtn, undoBar, undoText, undoBtn, addCatBtn, addCatModal,
     mainCatSelect, newMainGroup, newMainInput, subCatInput,
     cancelAddCat, saveAddCat, periodEmptyState, autoEmptyState,
-    subtabManual, subtabAuto;
+    subtabManual, subtabAuto,
+    // v0.19.0 — rail refs
+    catRail, railStatusLeft, railStatusActions, railCancelBtn, railCommitBtn, railScroll;
 
 const SHORT_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -150,6 +188,17 @@ export default {
     autoEmptyState = root.querySelector('#auto-empty-state');
     subtabManual = root.querySelector('#subtab-manual');
     subtabAuto = root.querySelector('#subtab-auto');
+
+    // v0.19.0 — rail refs + handlers
+    catRail = root.querySelector('#cat-rail');
+    railStatusLeft = root.querySelector('#rail-status-left');
+    railStatusActions = root.querySelector('#rail-status-actions');
+    railCancelBtn = root.querySelector('#rail-cancel-btn');
+    railCommitBtn = root.querySelector('#rail-commit-btn');
+    railScroll = root.querySelector('#rail-scroll');
+
+    railCancelBtn.addEventListener('click', cancelBatch);
+    railCommitBtn.addEventListener('click', commitBatch);
 
     emptyRefreshBtn.addEventListener('click', () => refresh({ force: true }));
     cancelPick.addEventListener('click', () => deselectTransaction());
@@ -184,7 +233,15 @@ export default {
     // duplicate that shows as `Duplicate=Y` in ClientMetrics).
     if (!categoriesPromise) {
       categoriesPromise = api.fetchCategories()
-        .then(data => { store.setCategories(data.categories); renderCategories(); return data; })
+        .then(data => {
+          store.setCategories(data.categories);
+          renderCategories();
+          // v0.19.0 — also build chips for the rail; rail visibility
+          // depends on having categories loaded.
+          renderChips();
+          updateRailVisibility();
+          return data;
+        })
         .catch(err => {
           console.error('Category fetch failed:', err);
           if (store.categories.length === 0) {
@@ -204,6 +261,23 @@ export default {
         .catch(err => console.error('Suggest index warm-up failed:', err));
     }
 
+    // v0.19.0 — fire chip data fetch in background. Hits dashboard cache
+    // if fresh (10-min TTL), else does the parallel Budget+Saving dumpSheet
+    // (~2.5s on cold open). Fires once per module lifetime; subsequent
+    // re-mounts reuse the cache. Chip names render immediately; budget
+    // info populates when this resolves.
+    if (!chipDataPromise) {
+      chipDataPromise = getDashboardData({ forceRefresh: false })
+        .then(() => {
+          // Re-render chips with full data
+          if (catRail && !catRail.hidden) renderChips();
+        })
+        .catch(err => {
+          console.warn('Chip data fetch failed (chips render name-only):', err);
+          chipDataPromise = null;  // allow retry on next mount
+        });
+    }
+
     await refresh();
   },
 
@@ -212,17 +286,25 @@ export default {
   // tab. renderAll() is cheap (pure DOM updates from store; no API calls)
   // so this catches any state changes that happened while the user was on
   // another tab — e.g. saving goal archived, sync removed an item.
+  //
+  // v0.19.0 (Phase G): clear rail state on tab return. Selection is
+  // ephemeral by design (per the plan E13) — closing/leaving the app
+  // discards in-progress sorting, matching the "receipt-sorting" metaphor.
   onShow() {
+    activeCategory = null;
+    selectedTimestamps.clear();
     renderAll();
   },
 
   // Called when navigating away to another tab. Close any transient UI so
   // the user returning later doesn't see a half-open modal or dangling
-  // selection.
+  // selection. v0.19.0: also clear rail state (mirrors onShow).
   onHide() {
     closeAddCategoryModal();
     deselectTransaction();
     calendarOpen = false;
+    activeCategory = null;
+    selectedTimestamps.clear();
   },
 
   // Kept for source compatibility — no longer called by the router (views
@@ -243,8 +325,18 @@ function setSubtab(which) {
   activeSubtab = which;
   localStorage.setItem(SUBTAB_KEY, which);
   applySubtabState();
+
+  // v0.19.0 — clear rail state when switching sub-tabs. The Auto tab
+  // doesn't use the rail; carrying state across would surprise on return.
+  if (activeCategory || selectedTimestamps.size > 0) {
+    activeCategory = null;
+    selectedTimestamps.clear();
+  }
+
   deselectTransaction();
   renderTransactions();
+  updateRailVisibility();
+  updateRailStatus();
 
   // Lazy-warm the suggest index the first time the user flips to Auto.
   // ensureIndexReady() is internally idempotent — subsequent calls short-
@@ -317,11 +409,26 @@ function renderPeriodBar() {
   label.appendChild(eyebrow);
   label.appendChild(name);
 
+  // v0.18.1 (Phase D): today chip. Hidden via display:none in pixel.css's
+  // default rule for both themes; pixel theme re-shows via attribute scope.
+  // So: in mono this DOM is invisible; in pixel it renders "[27]" (amber
+  // brackets + day-of-month) for the current period or "PAST" otherwise.
+  // Same block also in dashboard.js renderPeriodBar — keep the two in sync.
+  const todayChip = document.createElement('span');
+  todayChip.className = 'period-today-chip' + (isCurrent ? ' is-current' : '');
+  if (isCurrent) {
+    const day = new Date().getDate();
+    todayChip.innerHTML = '<span class="today-bracket">[</span>' + day + '<span class="today-bracket">]</span>';
+  } else {
+    todayChip.textContent = 'PAST';
+  }
+
   const caret = document.createElement('span');
   caret.className = 'period-caret';
   caret.textContent = '▾';
 
   toggle.appendChild(label);
+  toggle.appendChild(todayChip);
   toggle.appendChild(caret);
 
   const next = document.createElement('button');
@@ -357,6 +464,10 @@ function shiftPeriod(delta) {
   const target = all[i + delta];
   if (!target) return;
   selectedPeriodIdx = target.idx;
+  // v0.19.0 — txns are period-scoped, so selection clears on period
+  // shift. Chip stays armed (user is probably moving to find more
+  // matching txns to assign to the same category).
+  selectedTimestamps.clear();
   deselectTransaction();
   renderAll();
 }
@@ -527,6 +638,35 @@ function undo() {
   }
   const last = store.lastCategorized;
   if (!last) return;
+
+  // v0.19.0 — batch undo. lastCategorized may have a `batch: [...]`
+  // field set by commitBatch(). Loop and restore each. If sync ran
+  // between commit and undo, some items will already be out of the
+  // syncQueue — we report the partial restore but don't error out
+  // (out-of-scope to issue server uncategorize for synced items).
+  if (last.batch && Array.isArray(last.batch)) {
+    let restoredCount = 0;
+    for (const txn of last.batch) {
+      const removed = store.removeFromSyncQueue(txn.timestamp);
+      if (removed) {
+        store.restoreTransaction({
+          timestamp: removed.timestamp,
+          date: removed.date,
+          merchant: removed.merchant,
+          amount: removed.amount,
+        });
+        restoredCount++;
+      }
+    }
+    if (restoredCount < last.batch.length) {
+      showError(restoredCount + ' of ' + last.batch.length + ' restored — others already synced');
+    }
+    store.clearLastCategorized();
+    renderAll();
+    return;
+  }
+
+  // Single undo (existing path)
   const restored = store.removeFromSyncQueue(last.timestamp);
   if (restored) {
     store.restoreTransaction({
@@ -585,6 +725,12 @@ function renderAll() {
   renderCategories();
   renderUndo();
   renderTransactions();
+  // v0.19.0 — rail rendering. Chips re-render whenever categories list
+  // changes; status reflects current selection state. Visibility based
+  // on subtab + categories loaded.
+  renderChips();
+  updateRailStatus();
+  updateRailVisibility();
 }
 
 function renderTransactions() {
@@ -622,9 +768,16 @@ function renderManualList(visible) {
   }
   periodEmptyState.hidden = true;
 
+  // v0.19.0 — when a chip is armed, txn rows show .armed cursor +
+  // .checked stripe for items in the multi-select. Selection state is
+  // ephemeral, so it's safe to read directly from selectedTimestamps.
+  const armed = !!activeCategory;
+
   for (const txn of visible) {
     const div = document.createElement('div');
     div.className = 'txn-item';
+    if (armed) div.classList.add('armed');
+    if (selectedTimestamps.has(txn.timestamp)) div.classList.add('checked');
     div.dataset.timestamp = txn.timestamp;
 
     const left = document.createElement('div');
@@ -762,8 +915,14 @@ function renderCategories() {
 }
 
 function renderUndo() {
-  if (store.lastCategorized) {
-    undoText.textContent = `${store.lastCategorized.merchant} → ${store.lastCategorized.category}`;
+  const last = store.lastCategorized;
+  if (last) {
+    // v0.19.0 — batch label "<N> → category"; single keeps "merchant → category"
+    if (last.batch && Array.isArray(last.batch)) {
+      undoText.textContent = last.batch.length + ' → ' + last.category;
+    } else {
+      undoText.textContent = `${last.merchant} → ${last.category}`;
+    }
     undoBar.hidden = false;
   } else {
     undoBar.hidden = true;
@@ -772,6 +931,13 @@ function renderUndo() {
 }
 
 function selectTransaction(txn) {
+  // v0.19.0 — if a chip is armed, route to multi-select instead of the
+  // picker. The two flows are mutually exclusive: picker only opens
+  // when no chip is armed (the original 2-tap quick-categorize path).
+  if (activeCategory) {
+    toggleSelectedTxn(txn);
+    return;
+  }
   selectedTimestamp = txn.timestamp;
   selectedMerchantEl.textContent = txn.merchant + ' · $' + Math.abs(txn.amount).toFixed(2);
   document.querySelectorAll('.txn-item').forEach(el => {
@@ -831,14 +997,337 @@ async function saveNewCategory() {
   const newCat = { main: mainCategory, sub: subCategory };
   store.addCategory(newCat);
   renderCategories();
+  // v0.19.0 — re-render the rail so the new chip appears, then auto-arm
+  // it (per Phase G plan E11). Common case: user added "Pastries" because
+  // they're about to assign a txn to it. Saves them the chip-tap step.
+  renderChips();
+  updateRailVisibility();
+  armCategory(subCategory);
 
   try {
     await api.addCategory(mainCategory, subCategory);
   } catch (err) {
     store.removeCategory(subCategory);
     renderCategories();
+    renderChips();
+    // If the auto-armed category got removed, gracefully disarm.
+    if (activeCategory === subCategory) disarmCategory();
+    updateRailVisibility();
     showError('Failed to add category: ' + err.message);
   }
 }
 
 function showLoading(show) { loadingEl.hidden = !show; }
+
+// ======================================================================
+// CATEGORY RAIL (v0.19.0 — Phase G)
+// ======================================================================
+//
+// State model:
+//   IDLE       — activeCategory=null, selectedTimestamps={}.
+//                Tap a txn → opens picker (existing single-tap flow).
+//                Tap a chip → arm + transition to ARMED.
+//   ARMED      — activeCategory='X', selectedTimestamps={}.
+//                Tap a txn → toggleSelectedTxn → ARMED+SEL.
+//                Tap same chip → disarm → IDLE.
+//                Tap different chip → arm new + clear selection.
+//   ARMED+SEL  — activeCategory='X', selectedTimestamps={t1, t2, ...}.
+//                Tap a txn → toggle in/out of selection.
+//                Cancel → disarm → IDLE.
+//                Commit → batch-categorize all → IDLE.
+//
+// All rail-level state changes go through one of: armCategory, disarmCategory,
+// toggleSelectedTxn, commitBatch, cancelBatch. The render helpers (renderChips,
+// updateChipActiveStates, updateTxnArmedStates, updateRailStatus,
+// updateRailVisibility) only read state and write DOM; they never mutate.
+
+function onChipTap(catName) {
+  if (activeCategory === catName) {
+    // Re-tap same chip = disarm
+    disarmCategory();
+  } else {
+    // Tap a different chip = arm + clear any pending selection.
+    // The mockup KEEPS selection on chip-switch; we override that — it's a
+    // footgun (user picks 5 coffee txns, accidentally taps Travel chip,
+    // assigns coffees to Travel). Safety > faithfulness here.
+    armCategory(catName);
+  }
+}
+
+function armCategory(catName) {
+  activeCategory = catName;
+  selectedTimestamps.clear();
+  // Mutually exclude with the picker. If picker is open (single-tap path
+  // mid-action), close it.
+  if (selectedTimestamp) deselectTransaction();
+  updateChipActiveStates();
+  updateTxnArmedStates();
+  updateRailStatus();
+}
+
+function disarmCategory() {
+  activeCategory = null;
+  selectedTimestamps.clear();
+  updateChipActiveStates();
+  updateTxnArmedStates();
+  updateRailStatus();
+}
+
+function cancelBatch() {
+  disarmCategory();
+}
+
+function toggleSelectedTxn(txn) {
+  const ts = txn.timestamp;
+  if (selectedTimestamps.has(ts)) {
+    selectedTimestamps.delete(ts);
+  } else {
+    selectedTimestamps.add(ts);
+  }
+  // Selective DOM update — flip the .checked class on this one item only.
+  // Rationale: tapping checkboxes should feel instant; full-list re-render
+  // is wasteful and would scroll-jump on long lists.
+  const item = findTxnItem(ts);
+  if (item) item.classList.toggle('checked', selectedTimestamps.has(ts));
+  updateRailStatus();
+}
+
+function commitBatch() {
+  if (!activeCategory || selectedTimestamps.size === 0) return;
+  if (syncInFlight) {
+    showError('Wait for sync to finish before committing.');
+    return;
+  }
+
+  // Snapshot first — selectedTimestamps is mutated by removeTransaction
+  // indirectly (via re-renders) and by our own clear at the end.
+  const snapshot = [...selectedTimestamps];
+  const category = activeCategory;
+
+  // Remove all from store.transactions, collect the removed objects so
+  // we can both queue them for sync and store them in lastCategorized
+  // for batch undo.
+  const batch = [];
+  for (const ts of snapshot) {
+    const removed = store.removeTransaction(ts);
+    if (removed) batch.push(removed);
+  }
+
+  if (batch.length === 0) {
+    // Nothing to commit — defensive (timestamps already gone)
+    disarmCategory();
+    return;
+  }
+
+  // Single localStorage write for the whole batch.
+  store.addBatchToSyncQueue(batch, category);
+  // Undo target: the whole batch as one unit. renderUndo handles the
+  // "<N> → category" label; undo() loops the batch on Undo tap.
+  store.setLastCategorized({ batch, category });
+
+  // Reset rail state.
+  activeCategory = null;
+  selectedTimestamps.clear();
+
+  renderAll();
+
+  showSuccess('✓ ' + batch.length + ' → ' + category);
+}
+
+function renderChips() {
+  if (!railScroll) return;
+  railScroll.innerHTML = '';
+
+  if (store.categories.length === 0) {
+    return;
+  }
+
+  // Group by main, preserving insertion order (matches Setup tab order).
+  const groups = [];
+  const idx = {};
+  for (const c of store.categories) {
+    if (!(c.main in idx)) {
+      idx[c.main] = groups.length;
+      groups.push({ main: c.main, subs: [] });
+    }
+    groups[idx[c.main]].subs.push(c);
+  }
+
+  // Pull budget data for the selected period if available. peekDashboardCache
+  // never fires a network call — getDashboardData() in mount() is what
+  // populates the cache. If the cache is empty, chips render name-only.
+  const selected = pickPeriod();
+  const cache = peekDashboardCache();
+  const chipDataMap = {};
+  if (cache && selected) {
+    const periodCats = (cache.data.categoriesByPeriod && cache.data.categoriesByPeriod[selected.label]) || [];
+    for (const pc of periodCats) {
+      chipDataMap[pc.sub] = pc;
+    }
+  }
+
+  groups.forEach((g, gi) => {
+    if (gi > 0) {
+      const div = document.createElement('div');
+      div.className = 'rail-divider';
+      railScroll.appendChild(div);
+    }
+    const groupLabel = document.createElement('div');
+    groupLabel.className = 'rail-group-label';
+    groupLabel.textContent = g.main;
+    railScroll.appendChild(groupLabel);
+    for (const c of g.subs) {
+      railScroll.appendChild(renderChip(c, chipDataMap[c.sub]));
+    }
+  });
+
+  // + Add chip at the end opens the same modal as the picker's add button.
+  const dividerEnd = document.createElement('div');
+  dividerEnd.className = 'rail-divider';
+  railScroll.appendChild(dividerEnd);
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'rail-add';
+  addBtn.textContent = '+ Add';
+  addBtn.addEventListener('click', () => openAddCategoryModal());
+  railScroll.appendChild(addBtn);
+}
+
+function renderChip(c, data) {
+  // c     = { main, sub } from store.categories
+  // data  = { budgeted, spent, available } from dashboard cache (may be undefined)
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rail-chip';
+  if (activeCategory === c.sub) btn.classList.add('active');
+  btn.dataset.sub = c.sub;
+  btn.setAttribute('aria-pressed', activeCategory === c.sub ? 'true' : 'false');
+  btn.addEventListener('click', () => onChipTap(c.sub));
+
+  const nameEl = document.createElement('div');
+  nameEl.className = 'chip-name';
+  nameEl.textContent = c.sub;
+  btn.appendChild(nameEl);
+
+  if (data) {
+    const over = data.available < 0;
+    const zero = !over && Math.abs(data.available) < 0.005;
+    const state = over ? 'over' : zero ? 'zero' : 'pos';
+    const pct = data.budgeted > 0 ? Math.min((data.spent || 0) / data.budgeted, 1) : 0;
+
+    const bar = document.createElement('div');
+    bar.className = 'chip-bar';
+    const fill = document.createElement('div');
+    fill.className = 'chip-bar-fill ' + state;
+    fill.style.width = (pct * 100).toFixed(1) + '%';
+    bar.appendChild(fill);
+    btn.appendChild(bar);
+
+    const amount = document.createElement('div');
+    amount.className = 'chip-amount ' + state;
+    const sign = over ? '−' : '';
+    amount.textContent = sign + '$' + Math.round(Math.abs(data.available));
+    btn.appendChild(amount);
+  }
+
+  return btn;
+}
+
+function updateChipActiveStates() {
+  if (!railScroll) return;
+  const chips = railScroll.querySelectorAll('.rail-chip');
+  chips.forEach(c => {
+    const isActive = c.dataset.sub === activeCategory;
+    c.classList.toggle('active', isActive);
+    c.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function updateTxnArmedStates() {
+  if (!transactionList) return;
+  const armed = !!activeCategory;
+  const items = transactionList.querySelectorAll('.txn-item');
+  items.forEach(item => {
+    item.classList.toggle('armed', armed);
+    const ts = item.dataset.timestamp;
+    item.classList.toggle('checked', selectedTimestamps.has(ts));
+  });
+}
+
+function updateRailStatus() {
+  if (!catRail || !railStatusLeft || !railStatusActions || !railCommitBtn) return;
+  const armed = !!activeCategory;
+  catRail.classList.toggle('armed', armed);
+
+  railStatusLeft.innerHTML = '';
+
+  if (!armed) {
+    const hint = document.createElement('span');
+    hint.className = 'rail-status-hint';
+    hint.textContent = 'Tap a category to assign multiple at once';
+    railStatusLeft.appendChild(hint);
+    railStatusActions.hidden = true;
+    return;
+  }
+
+  // ARMED: show count → category and (when count>0) the sum.
+  let sum = 0;
+  if (selectedTimestamps.size > 0) {
+    for (const txn of store.transactions) {
+      if (selectedTimestamps.has(txn.timestamp)) {
+        sum += Math.abs(txn.amount);
+      }
+    }
+  }
+
+  const count = selectedTimestamps.size;
+  const countEl = document.createElement('span');
+  countEl.className = 'rail-status-count';
+  countEl.textContent = count;
+
+  const arrow = document.createElement('span');
+  arrow.className = 'rail-status-arrow';
+  arrow.textContent = '→';
+
+  const cat = document.createElement('span');
+  cat.className = 'rail-status-active';
+  cat.textContent = activeCategory;
+
+  railStatusLeft.appendChild(countEl);
+  railStatusLeft.appendChild(arrow);
+  railStatusLeft.appendChild(cat);
+
+  if (count > 0) {
+    const sumEl = document.createElement('span');
+    sumEl.className = 'rail-status-sum';
+    sumEl.textContent = '$' + sum.toFixed(2);
+    railStatusLeft.appendChild(sumEl);
+  }
+
+  railStatusActions.hidden = false;
+  railCommitBtn.disabled = count === 0 || syncInFlight;
+  railCommitBtn.textContent = count > 0 ? 'Assign ' + count : 'Assign';
+  railCommitBtn.setAttribute(
+    'aria-label',
+    count > 0 ? 'Assign ' + count + ' to ' + activeCategory : 'Assign'
+  );
+}
+
+function updateRailVisibility() {
+  if (!catRail || !appSection) return;
+  const shouldShow = activeSubtab === 'manual' && store.categories.length > 0;
+  catRail.hidden = !shouldShow;
+  appSection.classList.toggle('with-rail', shouldShow);
+}
+
+// Linear scan to find a txn item by data-timestamp. Avoids needing
+// CSS.escape for timestamps that contain '#' (uniqueSuffix_).
+function findTxnItem(timestamp) {
+  if (!transactionList) return null;
+  const items = transactionList.querySelectorAll('.txn-item');
+  for (const item of items) {
+    if (item.dataset.timestamp === timestamp) return item;
+  }
+  return null;
+}
