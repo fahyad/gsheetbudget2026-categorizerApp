@@ -444,18 +444,10 @@ function renderFixedPanel(period) {
   const sheetTotal = (cachedData?.summaryCurrent?.fixedExpenses) || 0;
   const reconcileMismatch = Math.abs(clientTotal - sheetTotal) > 0.01;
 
-  // Header with the period total
-  const head = document.createElement('div');
-  head.className = 'fixed-panel-head';
-  const title = document.createElement('span');
-  title.className = 'fixed-panel-title';
-  title.textContent = `Fixed expenses · ${period.label}`;
-  const total = document.createElement('span');
-  total.className = 'fixed-panel-total' + (clientTotal < 0 ? ' negative' : '');
-  total.textContent = (clientTotal < 0 ? '−' : '') + formatCurrency(Math.abs(clientTotal));
-  head.appendChild(title);
-  head.appendChild(total);
-  panel.appendChild(head);
+  // v0.19.6: removed the .fixed-panel-head element ("FIXED EXPENSES ·
+  // <period> · <total>"). The total was already visible in the FIXED
+  // summary cell above; the period was already in the period bar.
+  // Header was visual noise; rows alone are cleaner.
 
   // Reconciliation warning (rare; means dueDatesInPeriod disagrees with
   // sheet's buildFixedExpensesFormula_ — usually a BUDGET_YEAR mismatch).
