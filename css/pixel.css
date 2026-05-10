@@ -249,10 +249,23 @@
    shadow more pronounced for the dark palette. */
 :root[data-theme="pixel"] .period-bar {
   border-bottom: 1px solid var(--rule);
-  position: sticky;
-  top: 0;
+  /* v0.19.5: sticky promoted to the host wrapper (#period-bar-host)
+     because .period-bar's containing block was shrink-to-fit — sticky
+     could only act within ~60 px before scrolling past the host. The
+     host rule below sticks across the whole dashboard scroll range. */
   z-index: 8;
   box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.55);
+}
+
+/* v0.19.5: #period-bar-host stays pinned to the viewport top across
+   the entire dashboard / categorize scroll. Both views render their
+   period bar into a #period-bar-host wrapper, so this single rule
+   covers both. z-index: 9 sits above the summary strip's 7 so the
+   host wins the overlap when both are stuck. */
+:root[data-theme="pixel"] #period-bar-host {
+  position: sticky;
+  top: 0;
+  z-index: 9;
 }
 
 /* The "↻ Parse" / "Sync N" pill inherits ink/border color from variables.
