@@ -10,8 +10,13 @@
 //   - Saving Goals section: one row per goal; tap to expand details.
 
 import { showError } from '../ui.js';
-import { allPeriods, currentPeriod } from '../periods.js';
+import { allPeriods, currentPeriod, dueDatesInPeriod } from '../periods.js';
 import { getDashboardData, formatCurrency } from '../lib/budget.js';
+
+// v0.17.2: persistence key for the summary-cell accordion state. Currently
+// only Fixed is expandable; future cells (Income, Budgeted) can join.
+const EXPANDED_SUMMARY_KEY = 'budget_dashboard_summary_expanded';
+const SHORT_MONTHS_UC = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
 const TEMPLATE = `
   <section id="dashboard-section">
@@ -33,6 +38,11 @@ let cachedData = null;
 let refreshInFlight = false;
 const expandedGroups = {};       // main name -> bool
 let expandedGoalIdx = null;      // which goal card is expanded
+
+// v0.17.2: which summary cells are accordion-expanded. Mirrors the
+// expandedGroups pattern but persisted to localStorage (survives reloads).
+// Default: nothing expanded (concise dashboard glance).
+const expandedSummary = readExpandedSummary_();
 
 // DOM refs.
 let periodBarHost, body;
@@ -277,14 +287,25 @@ function renderBody() {
 
   body.innerHTML = '';
 
-  // 4-col summary
+  // 4-col summary. Fixed cell is an accordion button (v0.17.2).
   const strip = document.createElement('div');
   strip.className = 'summary-strip';
   strip.appendChild(summaryCell('Income', summary.netIncome, false));
-  strip.appendChild(summaryCell('Fixed', summary.fixedExpenses, true));
+  strip.appendChild(summaryCell('Fixed', summary.fixedExpenses, true, false, {
+    expandable: true,
+    panelId: 'fixed-panel',
+    expandedKey: 'fixed',
+    onToggle: toggleFixedExpand,
+  }));
   strip.appendChild(summaryCell('Budgeted', summary.totalBudgeted, true));
   strip.appendChild(summaryCell('Ready', summary.readyToAssign, false, true));
   body.appendChild(strip);
+
+  // FIXED accordion panel (always present in DOM; `hidden` toggles
+  // visibility per WAI-ARIA APG accordion pattern). renderFixedPanel
+  // populates content from cachedData.fixedMonthlyExpenses + the period.
+  const fixedPanel = renderFixedPanel(selected);
+  body.appendChild(fixedPanel);
 
   // Category groups
   const groups = {};
@@ -326,13 +347,41 @@ function renderBody() {
   body.appendChild(tail);
 }
 
-function summaryCell(label, amount, showMinus, ready = false) {
-  const cell = document.createElement('div');
+function summaryCell(label, amount, showMinus, ready = false, accordion = null) {
+  // v0.17.2: when `accordion` is provided, the cell becomes a real
+  // <button> with WAI-ARIA accordion attributes (aria-expanded,
+  // aria-controls). Whole cell is the tap target (touch-action:
+  // manipulation in CSS to kill 300ms double-tap delay). Default
+  // <button> chrome (border, bg, font) is overridden in CSS so the
+  // visual still reads as the original .summary-cell layout.
+  //
+  // Pattern from WAI-ARIA APG accordion (https://www.w3.org/WAI/ARIA/apg/patterns/accordion/):
+  //   button + aria-expanded + aria-controls → panel + role="region" + aria-labelledby.
+  // Skipped <details>/<summary> per known iOS Safari bugs in grid contexts.
+  const cell = document.createElement(accordion ? 'button' : 'div');
   cell.className = 'summary-cell' + (ready ? ' ready' : '');
+  if (accordion) {
+    cell.classList.add('summary-cell-toggle');
+    cell.type = 'button';
+    cell.id = label.toLowerCase() + '-button';
+    cell.setAttribute('aria-controls', accordion.panelId);
+    cell.setAttribute('aria-expanded', String(!!expandedSummary[accordion.expandedKey]));
+    cell.addEventListener('click', accordion.onToggle);
+  }
 
   const lab = document.createElement('div');
   lab.className = 'label';
   lab.textContent = label;
+
+  if (accordion) {
+    // Append chevron inside the label so it sits next to "FIXED" rather
+    // than next to the dollar value. ▸ collapsed / ▾ expanded.
+    const chev = document.createElement('span');
+    chev.className = 'summary-chevron';
+    chev.setAttribute('aria-hidden', 'true');
+    chev.textContent = expandedSummary[accordion.expandedKey] ? ' ▾' : ' ▸';
+    lab.appendChild(chev);
+  }
 
   const val = document.createElement('div');
   val.className = 'value' + (ready && amount < 0 ? ' negative' : '');
@@ -342,6 +391,124 @@ function summaryCell(label, amount, showMinus, ready = false) {
   cell.appendChild(lab);
   cell.appendChild(val);
   return cell;
+}
+
+// ============================================================================
+// FIXED accordion panel (v0.17.2)
+// ============================================================================
+//
+// Tap the FIXED summary cell → expandedSummary.fixed flips → re-render.
+// Persisted to localStorage so the user's preference survives reloads.
+// Reconciliation: client total (sum of items rendered here) should equal
+// summary.fixedExpenses (sheet's Budget!B4); we surface a small ⚠ if not.
+
+function toggleFixedExpand() {
+  expandedSummary.fixed = !expandedSummary.fixed;
+  writeExpandedSummary_();
+  renderBody();
+}
+
+function renderFixedPanel(period) {
+  const expanded = !!expandedSummary.fixed;
+  const panel = document.createElement('div');
+  panel.id = 'fixed-panel';
+  panel.className = 'fixed-panel';
+  panel.setAttribute('role', 'region');
+  panel.setAttribute('aria-labelledby', 'fixed-button');
+  panel.hidden = !expanded;
+
+  if (!expanded) return panel;
+
+  const items = (cachedData?.fixedMonthlyExpenses || [])
+    .map(e => ({ ...e, dueDates: dueDatesInPeriod(e.dueDay, period.start, period.end) }));
+
+  const dueRows = items
+    .filter(e => e.dueDates.length > 0)
+    .flatMap(e => e.dueDates.map(date => ({ name: e.name, amount: e.amount, date })))
+    .sort((a, b) => a.date - b.date);
+
+  const clientTotal = dueRows.reduce((s, r) => s + r.amount, 0);
+  const sheetTotal = (cachedData?.summaryCurrent?.fixedExpenses) || 0;
+  const reconcileMismatch = Math.abs(clientTotal - sheetTotal) > 0.01;
+
+  // Header with the period total
+  const head = document.createElement('div');
+  head.className = 'fixed-panel-head';
+  const title = document.createElement('span');
+  title.className = 'fixed-panel-title';
+  title.textContent = `Fixed expenses · ${period.label}`;
+  const total = document.createElement('span');
+  total.className = 'fixed-panel-total' + (clientTotal < 0 ? ' negative' : '');
+  total.textContent = (clientTotal < 0 ? '−' : '') + formatCurrency(Math.abs(clientTotal));
+  head.appendChild(title);
+  head.appendChild(total);
+  panel.appendChild(head);
+
+  // Reconciliation warning (rare; means dueDatesInPeriod disagrees with
+  // sheet's buildFixedExpensesFormula_ — usually a BUDGET_YEAR mismatch).
+  if (reconcileMismatch) {
+    const warn = document.createElement('div');
+    warn.className = 'fixed-panel-warn';
+    warn.textContent = `⚠ List total $${Math.abs(clientTotal).toFixed(2)} doesn't match dashboard's $${Math.abs(sheetTotal).toFixed(2)}. periods.js BUDGET_YEAR may be out of sync with apps-script/Code.js.`;
+    panel.appendChild(warn);
+  }
+
+  if (dueRows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'fixed-panel-empty';
+    empty.textContent = 'No fixed expenses due this period.';
+    panel.appendChild(empty);
+    return panel;
+  }
+
+  for (const r of dueRows) {
+    const row = document.createElement('div');
+    row.className = 'fixed-row';
+
+    const dateEl = document.createElement('span');
+    dateEl.className = 'fixed-row-date';
+    const m = SHORT_MONTHS_UC[r.date.getUTCMonth()];
+    const d = r.date.getUTCDate();
+    dateEl.textContent = `${m} ${d}`;
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'fixed-row-name';
+    nameEl.textContent = r.name;
+
+    const amtEl = document.createElement('span');
+    amtEl.className = 'fixed-row-amount' + (r.amount < 0 ? ' negative' : '');
+    const sign = r.amount < 0 ? '−' : '';
+    amtEl.textContent = sign + formatCurrency(Math.abs(r.amount));
+
+    row.appendChild(dateEl);
+    row.appendChild(nameEl);
+    row.appendChild(amtEl);
+    panel.appendChild(row);
+  }
+
+  return panel;
+}
+
+// ----- expandedSummary persistence helpers -----
+
+function readExpandedSummary_() {
+  try {
+    const raw = localStorage.getItem(EXPANDED_SUMMARY_KEY);
+    if (!raw) return { fixed: false };
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return { fixed: !!parsed.fixed };
+    }
+  } catch (e) { /* QuotaExceededError, SecurityError (private mode), JSON parse — ignore */ }
+  return { fixed: false };
+}
+
+function writeExpandedSummary_() {
+  try {
+    localStorage.setItem(EXPANDED_SUMMARY_KEY, JSON.stringify(expandedSummary));
+  } catch (e) {
+    console.warn('expandedSummary persist failed (quota or private mode):', e);
+  }
 }
 
 function renderGroup(main, subs) {

@@ -735,6 +735,116 @@ header h1,
 }
 .summary-cell.ready .value.negative { color: var(--red); }
 
+/* v0.17.2 — FIXED accordion. Summary cell becomes a button.
+   Override default <button> chrome so the visual matches the prior <div>
+   layout. touch-action: manipulation kills iOS's 300ms double-tap delay
+   (research: research.smashing/touch-targets, WAI-ARIA APG accordion). */
+.summary-cell-toggle {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  display: flex;
+  flex-direction: column;
+  /* Match the implicit grid-cell stretch of the original <div> */
+  align-items: stretch;
+  justify-content: flex-start;
+}
+.summary-cell-toggle:active { background: var(--bg-selected); }
+.summary-chevron {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 0.85em;
+  transition: color 0.12s ease;
+}
+.summary-cell-toggle[aria-expanded="true"] .summary-chevron {
+  color: var(--ink);
+}
+
+/* The expandable panel itself. `hidden` is set/cleared via JS — no
+   animation in v0.17.2 (snap), matches the existing category-group
+   collapse behavior. */
+.fixed-panel {
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  padding: 0;
+}
+.fixed-panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 14px 20px 10px;
+  border-bottom: 1px solid var(--rule);
+}
+.fixed-panel-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 500;
+}
+.fixed-panel-total {
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.fixed-panel-total.negative { color: var(--red); }
+.fixed-panel-empty {
+  padding: 18px 20px;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+.fixed-panel-warn {
+  padding: 8px 20px;
+  font-size: 11px;
+  color: var(--red);
+  background: rgba(185, 28, 28, 0.08);
+  border-bottom: 1px solid var(--rule);
+}
+.fixed-row {
+  display: grid;
+  grid-template-columns: 70px 1fr auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--rule);
+}
+.fixed-row:last-child { border-bottom: none; }
+.fixed-row-date {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.fixed-row-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fixed-row-amount {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.fixed-row-amount.negative { color: var(--red); }
+
 /* Category groups (collapsible) */
 
 .cat-group { background: transparent; }

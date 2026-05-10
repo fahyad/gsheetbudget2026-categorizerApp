@@ -124,3 +124,60 @@ export function periodForTimestamp(timestamp) {
   if (isNaN(ms)) return null;
   return periodFromMs(ms);
 }
+
+// ============================================================================
+// Fixed Monthly Expenses — period matching (added 2026-05-09 for v0.17.2)
+// ============================================================================
+//
+// Mirrors the sheet's `buildFixedExpensesFormula_` logic exactly so the
+// PWA's fixed-expense breakdown total reconciles with Budget tab B4 (which
+// renders via that formula). The sheet iterates m=1..13 with a fixed
+// BUDGET_YEAR constant, computing DATE(BUDGET_YEAR, m, dueDay) and counting
+// hits that fall within [period.start, period.end]. We do the same below.
+//
+// IMPORTANT: BUDGET_YEAR here MUST match `var BUDGET_YEAR = 2026;` in
+// apps-script/Code.js (around line 40). Bump both together at annual
+// rollover. Mismatched values would mean the PWA's breakdown total
+// disagrees with the dashboard's Fixed cell — silently wrong.
+
+export const BUDGET_YEAR = 2026;
+
+/**
+ * Returns the Date(s) when a fixed expense with the given dueDay falls
+ * inside the given period. For our 14-day pay periods this returns 0 or 1
+ * dates (rare 2 in degenerate cases). The result is sorted chronologically.
+ *
+ * Inputs:
+ *   dueDay      — number 1..31 (the day-of-month from FixedExpenses_DueDay)
+ *   periodStart — Date (UTC midnight, inclusive)
+ *   periodEnd   — Date (UTC midnight, inclusive)
+ *
+ * Returns: Date[] (UTC dates), possibly empty.
+ *
+ * Edge cases handled:
+ *   - dueDay 31 in months with <31 days: skipped (Date constructor would
+ *     overflow Feb 31 → Mar 3; we detect and discard).
+ *   - Period spans two months (typical for bi-weekly periods): both months
+ *     checked.
+ *   - Period spans two years (Dec → Jan): m=13 in JS rolls to next year's
+ *     January, matching the sheet's behavior.
+ */
+export function dueDatesInPeriod(dueDay, periodStart, periodEnd) {
+  if (!Number.isFinite(dueDay) || dueDay < 1 || dueDay > 31) return [];
+  if (!(periodStart instanceof Date) || !(periodEnd instanceof Date)) return [];
+  const startMs = periodStart.getTime();
+  const endMs = periodEnd.getTime();
+  const dates = [];
+  // m runs 0..12 (JS 0-indexed). Sheet's m=13 == JS's m=12 (next-year Jan
+  // via constructor rollover). Total 13 iterations matches the sheet.
+  for (let m = 0; m <= 12; m++) {
+    const candidate = new Date(Date.UTC(BUDGET_YEAR, m, dueDay));
+    // Overflow detection: if dueDay overflowed (Feb 31 → Mar 3), the
+    // constructor's resulting day != dueDay. Skip those silently — they
+    // mean "this date doesn't exist in this month."
+    if (candidate.getUTCDate() !== dueDay) continue;
+    const ts = candidate.getTime();
+    if (ts >= startMs && ts <= endMs) dates.push(candidate);
+  }
+  return dates;
+}
