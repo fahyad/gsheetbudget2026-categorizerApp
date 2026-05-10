@@ -1725,3 +1725,100 @@ The Budget tab gains an explicit "Rolled Over" column between Spent and Availabl
   2. **Schema changes propagate through every consumer that reads by index.** Saving tab and sheet-side formulas use named ranges and survive transparently. The PWA reads raw arrays from `dumpSheet` and breaks immediately. Plan paired updates whenever `rebuildBudgetInternal_`'s column count changes.
   3. **"By design" + "user can't see it" can both be true.** The original embedded-SUMIFS Available formula was correct AND opaque. Correctness doesn't preclude the need for visibility.
   4. **Math-doesn't-look-right reports are usually visibility issues.** When the user said "Groceries math doesn't add up," the bug wasn't math — it was the missing term. Look for hidden inputs before assuming the formula is wrong.
+
+### FIXED Summary-Cell Accordion (PWA v0.19.4 → v0.19.6)
+
+The dashboard's `Fixed −$1,948.00` summary cell turned into an accordion: tap to expand a sticky inline panel listing each Fixed Monthly Expense due in the selected period. Architecturally the smallest visible change; in practice it touched the data layer (third parallel `dumpSheet` call), the period model (client-side mirror of the sheet's fixed-expenses formula), and the layout model (sticky stack ladder with safe-area-aware offsets).
+
+- **Symptom (in user terms):** Dashboard summary strip showed `Fixed −$1,948.00` with no way to ask "what fixed expenses are due in this period?" without opening the sheet. User wanted everything-on-one-page (categories toggled + fixed expenses toggled) OR concise (everything collapsed) — choosing what's visible without tab-switching round-trips.
+
+- **Design iterations (3, only #3 shipped):**
+  ```
+  #1 Sub-tab control bar          rejected — adds new bar
+  #2 Drill-down view + back btn   rejected — round-trip cost
+  #3 Inline accordion in cell     ACCEPTED — info on-demand, no nav
+  ```
+
+- **Research informed the implementation:**
+  - Avoid `<details>`/`<summary>` — Safari has known grid-layout bugs with them
+  - Use the WAI-ARIA APG accordion pattern: `<button>` + `aria-expanded` + `aria-controls` + panel with `role="region"` + `aria-labelledby` + `hidden` attribute toggle
+  - Skip animation on first cut (was going to add later if user asked; never asked)
+  - Persist open/closed state to localStorage so re-mounts don't snap shut
+  - `display: none` (via `hidden`), NOT opacity:0 — screen readers + tab order should ignore the closed panel
+
+- **Fix (v0.19.4 — accordion infrastructure):**
+  - `js/views/dashboard.js`:
+    - Module state: `expandedSummary` (Set<string>; persisted to `budget_dashboard_summary_expanded` localStorage key via `readExpandedSummary_`/`writeExpandedSummary_`).
+    - `summaryCell()` extended to render as `<button class="summary-cell-toggle" aria-expanded aria-controls>` when called with accordion config, plain `<div>` otherwise. Same visual surface; one becomes interactive.
+    - `toggleFixedExpand` flips state, calls `renderFixedPanel`, persists to localStorage.
+    - `renderFixedPanel` walks `data.fixedMonthlyExpenses` filtered through `dueDatesInPeriod`, formats each row, returns HTML for the panel content.
+  - `js/lib/budget.js`:
+    - `BUDGET_RANGE` extended to `A1:G215` (col shift from v11.19's Rolled Over insertion).
+    - New `FIXED_RANGE = 'A2:C50'`.
+    - `fetchFresh()` parallelizes a third `dumpSheet` call (Budget + Saving + Fixed Monthly Expenses).
+    - `parseDashboard` returns new `fixedMonthlyExpenses` field (array of `{name, amount, dueDay}`).
+    - Cache key bumped to `_v3` (every shape change → invalidate prior cached payloads).
+  - `js/periods.js`:
+    - `BUDGET_YEAR = 2026` constant exported.
+    - `dueDatesInPeriod(dueDay, periodStart, periodEnd)` mirrors `buildFixedExpensesFormula_` exactly: iterates m=0..12, computes `Date.UTC(BUDGET_YEAR, m, dueDay)`, filters by period range, detects month overflow (e.g., Feb 30 → Mar 2 should NOT count as "Feb's due date"). Returns array of dates inside the period.
+    - Sanity check: dashboard sums the panel and warns to console if total disagrees with sheet's Fixed value (catches BUDGET_YEAR drift between PWA and Apps Script — both have the constant, both have to bump in lockstep on Dec 31).
+
+- **Fix (v0.19.5 — sticky containment):**
+  User reported the period bar wasn't sticking when scrolling — it scrolled away after ~60 px. Root cause: `.period-bar` had `position: sticky; top: 0`, but its containing block `#period-bar-host` was a thin shrink-to-fit `<div>`. Sticky elements only float within their containing block's box; once the wrapper's bottom passes the sticky `top` offset, the sticky child scrolls off as if it were `position: static`. Promoted the sticky property to `#period-bar-host` itself — the wrapper now has the full scroll-extent of the page to stick within.
+
+  ```css
+  /* Before — sticky on inner; wrapper is shrink-to-fit, only ~60px stick range */
+  #period-bar-host { /* no sticky */ }
+  .period-bar { position: sticky; top: 0; }
+
+  /* After — sticky on wrapper; full-page stick range */
+  #period-bar-host { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 9; }
+  .period-bar { /* no sticky needed */ }
+  ```
+
+  This pattern was reapplied to the FIXED panel in v0.19.6 (next sub-version).
+
+- **Fix (v0.19.6 — sticky panel + header removal + open-state highlight):**
+  User feedback on the open panel:
+  1. Make the panel itself sticky too (anything toggled from a sticky element should remain sticky)
+  2. Remove the grey "Fixed expenses Apr 29 – May 12" header inside the panel (redundant with the period bar above)
+  3. Highlight the FIXED button when toggled open
+
+  Implementation:
+  ```css
+  /* Sticky stack ladder: period bar above, fixed panel below, no overlap */
+  #period-bar-host { z-index: 9; top: env(safe-area-inset-top, 0px); }
+  .fixed-panel    { z-index: 6; top: calc(env(safe-area-inset-top, 0px) + 108px); position: sticky; }
+
+  /* Open-state highlight on the toggle button */
+  .summary-cell-toggle[aria-expanded="true"] {
+    background: var(--bg-period);  /* tan tint matches period bar */
+    /* + amber label color + amber chevron */
+  }
+  ```
+
+  Plus: `.fixed-panel-head` element removed entirely (DOM + CSS). A stale-read race during the v0.19.6 commit required a follow-up commit (`ed7da6e`) to actually delete the head element after the initial commit (`6d9650e`) only got the CSS + version bumps. Caught by visually inspecting the deployed PWA.
+
+- **Pixel UI graduation to main (2026-05-09):**
+  After v0.19.6 verified working on phone, user asked to graduate the pixel branch. Plan: `--no-ff` merge to preserve history (vs. force-push), tag the pre-merge state for rollback, keep the branch on remote as a snapshot.
+  - Merge conflicts on `js/config.js`, `sw.js`, `js/views/dashboard.js` (header removal) — all resolved by taking pixel's version (the desired state). Doc files auto-merged cleanly because pixel had absorbed main's docs earlier in the arc.
+  - Tag `main-pre-pixel-merge` created as rollback handle.
+  - `pwa/pixel-ui-redesign` branch preserved on remote per user request, but inactive — future PWA work happens on main.
+  - Post-merge: APP_VERSION on main = v0.19.6, CACHE_VERSION = v36, force-pixel via early `<head>` script in `index.html`, no in-app theme toggle.
+
+- **Edge cases handled:**
+  - Period switch with panel open: `renderFixedPanel` re-runs against new period's `dueDatesInPeriod` filter; panel content updates in place, open state preserved.
+  - Empty period (no fixed expenses due): panel renders an empty-state row; total shows $0; sanity check passes ($0 == sheet's $0).
+  - Cold open with prior open state: localStorage read in `mount()`; panel renders open if state persisted; first paint matches user's last-seen state.
+  - Panel sticky overlapping a category card: tested at scroll positions where a category card is exactly under the sticky panel — z-index stack handles it (panel z-index 6, cards default z-index 0).
+  - Safe-area-aware offset on iPhone 16 Pro: `env(safe-area-inset-top, 0px) + 108px` keeps the panel below the period bar regardless of Dynamic Island inset.
+  - Dec 31 due day in a Jan 2027 period: `dueDatesInPeriod` walks m=0..12 inclusive of m=12 (Dec of year+1 = Jan next year), so the next year's January period correctly receives this period's Dec 31 expense — verified by sanity check matching sheet total.
+  - `BUDGET_YEAR` drift between PWA constant and Apps Script `BUDGET_YEAR` constant: sanity check warns to console; doesn't block render but flags the issue. Annual rollover touches both files.
+
+- **Lesson:**
+  1. **Sticky containment is a containing-block constraint, not a viewport constraint.** A sticky child only floats within its parent's box. If the parent is shrink-to-fit, the sticky child can only stick within those few pixels. When adding sticky, audit the containing-block chain — promote sticky to the tallest available wrapper. Codified as trip-up #33.
+  2. **Sticky stack ladders need explicit z-index + top.** Period bar at `z-index: 9` + `top: env-inset` and fixed panel at `z-index: 6` + `top: env-inset + 108px` form a deterministic visual stack. Without the offset math, the panel would float over the period bar; without z-index, scroll-overlapping content would leak through.
+  3. **Mirror, don't re-derive.** The PWA's `dueDatesInPeriod` doesn't reinvent the math — it intentionally mirrors the sheet's `buildFixedExpensesFormula_` line-for-line, including the m=0..12 boundary and the month-overflow guard. The sanity check on totals catches drift between the two implementations on real data, every render. Re-deriving would have introduced subtle off-by-month bugs that only show up in edge-case periods (Feb 30, Dec 31).
+  4. **WAI-ARIA APG over `<details>`/`<summary>`.** The native HTML elements would be one less line of code, but Safari grid bugs + the inability to style the disclosure triangle exactly + the incompatibility with our existing `summaryCell()` function made the manual ARIA pattern a clear win. Manual ARIA = `<button aria-expanded aria-controls>` + panel `<div role="region" aria-labelledby hidden>` + JS toggling `hidden` and `aria-expanded` in lockstep. That's it.
+  5. **Persist UI state when re-mounts are common.** The dashboard view re-mounts on every navigation back to `#/dashboard`; without localStorage persistence the panel would always start closed, and the user's "I want it open" preference would be lost on every nav. Three lines of code: `readExpandedSummary_` on mount, `writeExpandedSummary_` on toggle.
+  6. **Look for stale-read races on Edit-after-Edit sequences.** During v0.19.6 the header-removal Edit succeeded structurally but pulled an outdated file snapshot — the deployed PWA still showed the header until commit `ed7da6e`. The fix: always re-Read before Edit if there's been any intervening tool-state change. Verifying the actual deploy (not just the diff) caught it.
