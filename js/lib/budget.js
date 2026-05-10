@@ -12,16 +12,24 @@
 import * as api from '../api.js';
 import { recordEvent } from './metrics.js';
 
-// v0.17.1: bumped cache key suffix to invalidate pre-v11.19 cached data
-// that has the old 6-col Budget shape. Without this bump, returning
-// users would see the cached row-shape until the 10-min TTL expires.
-const CACHE_KEY = 'budget_dashboard_cache_v2';
-const FETCHED_AT_KEY = 'budget_dashboard_fetched_at_v2';
+// v0.17.2: bumped cache key to v3 because the parsed dashboard data now
+// includes a fixedMonthlyExpenses field (added for the FIXED accordion).
+// Pre-v0.17.2 cached data lacks the field; force a fresh fetch on first
+// load so the dropdown isn't empty until TTL expires.
+//
+// History: v0.17.1 bumped to v2 for the Budget tab Rolled Over column
+// shift (v11.19). The bump pattern is: every parseDashboard shape change
+// → cache key suffix bump → returning users get a clean re-fetch.
+const CACHE_KEY = 'budget_dashboard_cache_v3';
+const FETCHED_AT_KEY = 'budget_dashboard_fetched_at_v3';
 const TTL_MS = 10 * 60 * 1000;
 
-// Layouts match apps-script/Code.js (rebuildBudgetInternal_ / rebuildSavingInternal_).
-const BUDGET_RANGE = 'A1:F215';
+// Layouts match apps-script/Code.js (rebuildBudgetInternal_ / rebuildSavingInternal_ / Fixed Monthly Expenses tab).
+// Budget extended to col G in v11.19 (Rolled Over inserted at F).
+const BUDGET_RANGE = 'A1:G215';
 const SAVING_RANGE = 'A1:I105';
+// Fixed Monthly Expenses tab: col A = name, B = amount, C = due day. Up to 50 rows.
+const FIXED_RANGE = 'A2:C50';
 
 const currencyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -94,13 +102,19 @@ function writeCache(data) {
 
 /**
  * Core fetch + parse. Returns normalized dashboard data.
+ *
+ * v0.17.2: third parallel dumpSheet for "Fixed Monthly Expenses" — adds
+ * ~100 ms server time but runs concurrent with the existing two so user-
+ * perceived cost is ~0. Used by the FIXED accordion dropdown to render the
+ * per-period breakdown that reconciles to Budget tab B4.
  */
 async function fetchFresh() {
-  const [budget, saving] = await Promise.all([
+  const [budget, saving, fixed] = await Promise.all([
     api.dumpSheet('Budget', BUDGET_RANGE),
     api.dumpSheet('Saving', SAVING_RANGE),
+    api.dumpSheet('Fixed Monthly Expenses', FIXED_RANGE),
   ]);
-  return parseDashboard(budget.values, saving.values);
+  return parseDashboard(budget.values, saving.values, fixed.values);
 }
 
 /**
@@ -117,7 +131,7 @@ async function fetchFresh() {
  *   - row 4 (sheet row 5): header row
  *   - row 5+ (sheet row 6+): goal rows (name, cat, target, targetPeriod, ...)
  */
-function parseDashboard(budgetRows, savingRows) {
+function parseDashboard(budgetRows, savingRows, fixedRows) {
   const sheetPeriod = String(budgetRows[0]?.[1] ?? '').trim();
   const progress = String(budgetRows[0]?.[5] ?? '').trim();
 
@@ -174,12 +188,30 @@ function parseDashboard(budgetRows, savingRows) {
     });
   }
 
+  // v0.17.2: Fixed Monthly Expenses — array of { name, amount, dueDay }.
+  // Skip blank rows (caller already passes A2:C50, so no header to skip).
+  // Amount is parsed as currency (negative); dueDay as int 1..31.
+  // Used by dashboard.js's FIXED accordion to render the per-period
+  // breakdown via periods.js `dueDatesInPeriod`. Reconciles to
+  // summaryCurrent.fixedExpenses (sheet's Budget!B4).
+  const fixedMonthlyExpenses = [];
+  for (let i = 0; i < (fixedRows || []).length; i++) {
+    const row = fixedRows[i];
+    const name = String(row[0] ?? '').trim();
+    if (!name) continue; // blank row → end of data (or gap; either way skip)
+    const amount = parseCurrency(row[1]);
+    const dueDay = parseInt(row[2], 10);
+    if (!Number.isFinite(dueDay) || dueDay < 1 || dueDay > 31) continue;
+    fixedMonthlyExpenses.push({ name, amount, dueDay });
+  }
+
   return {
     sheetPeriod,
     progress,
     summaryCurrent,
     categoriesByPeriod,
     savingGoals,
+    fixedMonthlyExpenses,
   };
 }
 
