@@ -72,6 +72,17 @@ The production deployment ID is `AKfycbw2EbHNk_Co2NN_RQknwLLAVXTtm7lPpKHjJqmvDw3
 - **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2: cold Categorize mount uses the new `bootstrap` Apps Script action, with transparent fallback to the v0.15.4 dual-fetch pattern on any failure (old Apps Script during a deploy gap, partial server failure, network error). Saves one ~2.5 s round-trip per cold mount. v0.19.7 added two PWA-only Phase 29.1 wins: `<link rel="preconnect">` to `script.google.com` + `script.googleusercontent.com` (warms TLS while HTML parses), and cache-first paint on Dashboard cold open (peeks localStorage cache and renders immediately, then refreshes in background — turns a 5-7 s spinner into a <50 ms paint when cache exists). Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; the dedicated branch is preserved on remote as a snapshot). Force-pixel via the early `<head>` script in `index.html`; no in-app toggle. v0.19.6 added the FIXED summary-cell accordion. v0.19.3 paired with Apps Script v11.19 (col layout shift). v0.19.0 added Phase G multi-select category rail. v0.18.0 → v0.18.2 introduced theme infrastructure + dashboard polish + period-bar today-chip + terminal calendar styling. v0.17.0 was Phase 2 of time-driven email parsing. v0.16.0 introduced persistent views; v0.15.4 was cold-start optimization.
 - **Workflow tooling:** `.claude/settings.json` (permission allow-list for ~18 read-only Bash commands, deny-list for 9 destructive ones) + SessionStart hook (`.claude/state-check.sh` injects branch + sync state + version drift on every new session) + 3 slash commands as skills (`/state`, `/lint`, `/deploy`) + status line (`.claude/statusline.sh` shows branch + dirty count + AS version). Lives on main; merged into pixel branch. New Claude sessions in this repo land with state in mind, no manual checks needed.
 
+## Editor
+
+Primary editor is **VS Code** (`code ~/gsheetbudget2026-categorizerApp`). Workspace config lives in `.vscode/` and is partially tracked — `settings.json`, `extensions.json`, `tasks.json` are shared via git; per-user state (sessions, local launch configs) is `.gitignore`d.
+
+- **Recommended extensions** (declared in `.vscode/extensions.json`, VS Code prompts on first open): Anthropic Claude Code, GitLens, Markdown All in One. ESLint + Prettier are in `unwantedRecommendations` — keep them suppressed to honor the no-build-step principle.
+- **Tasks** (`Cmd+Shift+P` → "Tasks: Run Task"): "Serve PWA locally on :8080", "Lint docs", "State check". Apps Script deploy is intentionally NOT a task — run `deploy "vNN — description"` from the integrated terminal so the alias + interactive prompts work normally.
+- **Claude Code via extension** (recommended) gives chat panel + inline diff approval + `@file` references. The CLI still works from the integrated terminal if you prefer that workflow for some tasks.
+- **Pre-commit hook** fires identically from VS Code's Source Control panel as from terminal — it's git-level, not editor-level.
+
+Everything else about the workflow (`clasp`, `deploy.sh`, `~/.clasprc.json` boundary, pre-commit lint, statusline, skills) is unchanged.
+
 ## Common commands
 
 ```bash

@@ -4,8 +4,14 @@
 # macOS
 .DS_Store
 
-# Editor
-.vscode/
+# Editor — share project-level VS Code config, ignore per-user state.
+# Negation entries un-ignore the three shared files (settings, recommended
+# extensions, tasks). Anything else under .vscode/ (sessions, local state,
+# personal launch configs) stays out of git.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
 .idea/
 
 # Logs
