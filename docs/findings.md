@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.19 Apps Script** (Phase 27 — Budget tab Rolled Over column added between Spent and Available; Available formula simplified to `F + D - E`; new `Budget_RolledOver` named range; v11.18 Goal archive flow + Setup col F filter in `rebuildBudgetInternal_`; v11.17 read-only `handleParseAndFetch_` with opt-in `?withParse=1`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.6 PWA on `main`** (cache v36; pixel UI graduated from `pwa/pixel-ui-redesign` to canonical on 2026-05-09 — overlay scoped via `:root[data-theme="pixel"]`, multi-select category rail, force-pixel default, FIXED summary-cell accordion with sticky panel; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available, `row[5]` as new `rolledOver` field). v0.16.0 introduced persistent views; v0.15.4 was cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.6) is documented under "Pixel UI Theme System" and "Multi-Select Category Rail". Workflow tooling (settings + hooks + slash commands + status line) is under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) is under "Budget Tab Schema Evolution".**
+> Reference document. Sections describe the system as it currently exists: **v11.20 Apps Script** (Phase 29 — new `bootstrap` action returning categories + parseAndFetch in one round-trip, halves cold-mount network cost in the PWA; v11.19 Phase 27 Budget tab Rolled Over column; v11.18 Goal archive flow + Setup col F filter; v11.17 read-only `handleParseAndFetch_`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.8 PWA on `main`** (cache v38; Phase 29.2 — Categorize cold mount uses bootstrap with transparent fallback to v0.15.4 dual fetch; Phase 29.1 — preconnect to script.google.com + cache-first Dashboard paint; pixel UI graduated to canonical on 2026-05-09 — multi-select category rail, FIXED summary-cell accordion with sticky panel; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available). v0.16.0 introduced persistent views; v0.15.4 was the original cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.6) is documented under "Pixel UI Theme System", "Multi-Select Category Rail", and "FIXED Summary-Cell Accordion". Workflow tooling under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) under "Budget Tab Schema Evolution". Cold-Start Round 2 (Phase 29) under "Cold-Start Round 2".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1822,3 +1822,139 @@ The dashboard's `Fixed −$1,948.00` summary cell turned into an accordion: tap 
   4. **WAI-ARIA APG over `<details>`/`<summary>`.** The native HTML elements would be one less line of code, but Safari grid bugs + the inability to style the disclosure triangle exactly + the incompatibility with our existing `summaryCell()` function made the manual ARIA pattern a clear win. Manual ARIA = `<button aria-expanded aria-controls>` + panel `<div role="region" aria-labelledby hidden>` + JS toggling `hidden` and `aria-expanded` in lockstep. That's it.
   5. **Persist UI state when re-mounts are common.** The dashboard view re-mounts on every navigation back to `#/dashboard`; without localStorage persistence the panel would always start closed, and the user's "I want it open" preference would be lost on every nav. Three lines of code: `readExpandedSummary_` on mount, `writeExpandedSummary_` on toggle.
   6. **Look for stale-read races on Edit-after-Edit sequences.** During v0.19.6 the header-removal Edit succeeded structurally but pulled an outdated file snapshot — the deployed PWA still showed the header until commit `ed7da6e`. The fix: always re-Read before Edit if there's been any intervening tool-state change. Verifying the actual deploy (not just the diff) caught it.
+
+### Cold-Start Round 2 (Apps Script v11.20 + PWA v0.19.7 → v0.19.8)
+
+After the rulepop architecture comparison surfaced "what could we borrow?", three perf proposals were evaluated against measured data, two implemented (plus a third PWA-only win that emerged from inspection). The validation step mattered — the highest-profile proposal (build step / Vite) turned out to be a workflow change disguised as a perf change once the bytes-vs-round-trips question got asked properly.
+
+- **Symptom (in user terms):** Cold-open Categorize takes 7-9 s to first paint. v0.15.4 closed the duplicate-fetch + suggest-index gaps. The remaining ~7 s floor is entirely round-trip cost: two awaited Apps Script calls (`fetchCategories` + `parseAndFetch`), each paying the documented ~2.5 s 302+TLS network tax. Apps Script web apps redirect from `script.google.com` to `script.googleusercontent.com`, and TLS handshake + redirect dominate the per-call cost regardless of container warmth (Phase 22 finding: parallel fetches don't help — single-threaded Apps Script container serializes them anyway).
+
+- **What was evaluated and rejected:**
+  - **Build step (Vite/esbuild):** total JS = 131 KB uncompressed → ~50 KB gzipped already. Even minify+treeshake to 25 KB saves ~25 KB on first install only — ~100 ms on 4G. Zero impact on the 7-9 s cold-start floor. Cost: breaks the "edit + git push" workflow, adds CI, makes phone debugging harder. Verdict: workflow polish disguised as perf. Defer indefinitely.
+  - **CSS attribute period filtering:** pre-rendering all 26 periods upfront and flipping a `body[data-period="N"]` selector to switch periods. Period-switch is currently pure client-side, sub-100 ms, no measured complaint. Pre-rendering 26× more DOM upfront would regress the cold mount we're trying to fix. Verdict: actively harmful. Skip.
+
+- **Fix #1 — Preconnect (PWA v0.19.7):**
+  Two `<link rel="preconnect">` tags in `index.html` for `script.google.com` and `script.googleusercontent.com` (the latter is the 302-redirect target). Browser warms the TLS handshake while the rest of the HTML parses; the first API call after cold open finds the connection ready. Saves ~100-500 ms on the first call.
+
+  ```html
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+  ```
+
+  `crossorigin` matches the actual fetch (which is CORS-enabled). Without it the browser warms a separate non-CORS connection and the actual fetch creates a new one anyway. Both hosts are baked into the deployment ID and have been stable for years.
+
+- **Fix #2 — Cache-first dashboard paint (PWA v0.19.7):**
+  Pre-fix `dashboard.js mount()`: render skeleton spinner → `await load()` → `getDashboardData()` returns cached if <10 min old, else fetches. With cache >10 min old the user sees a 5-7 s spinner before any dashboard content. Now `mount()` reads localStorage synchronously via `peekDashboardCache()` (which already existed since v0.19.0 for the chip rail), paints immediately if any cache exists, then calls `load()` in the background — same pattern `store.transactions` got in v0.15.4 Fix #3.
+
+  ```js
+  // js/views/dashboard.js — new mount() head
+  const peeked = peekDashboardCache();
+  if (peeked) {
+    cachedData = peeked.data;
+    cachedData._fetchedAt = peeked.fetchedAt;
+    renderPeriodBar();
+    renderBody();
+    load({ forceRefresh: false }).catch(err => console.error('Dashboard refresh failed', err));
+  } else {
+    renderPeriodBar();
+    await load({ forceRefresh: false });
+  }
+  ```
+
+  Risk inspected: cache could be days old, dollar amounts off. Acceptable — that's the entire point of stale-while-revalidate. `selectedPeriodIdx` is set from `currentPeriod()` at mount, so the right period renders even from stale cache.
+
+- **Fix #3 — Bootstrap endpoint (Apps Script v11.20 + PWA v0.19.8):**
+  This is the headline change. New Apps Script action `bootstrap` returns categories + parseAndFetch in one round-trip. Server-side it's pure dispatch: `handleBootstrap_` calls `handleCategories_()` + `handleParseAndFetch_()` (both lock-free, both read different tabs — no overlap), parses each handler's response, and merges into one JSON envelope with per-section error fields:
+
+  ```js
+  function handleBootstrap_(params) {
+    var catResponse = handleCategories_();
+    var txnResponse = handleParseAndFetch_(params);
+    var cat, txn, catErr, txnErr;
+    try {
+      var pc = JSON.parse(catResponse.getContent());
+      if (pc.success) cat = pc.categories; else catErr = pc.error;
+    } catch (e) { catErr = 'parse: ' + e; }
+    try {
+      var pt = JSON.parse(txnResponse.getContent());
+      if (pt.success) { txn = pt.transactions; /* + parsed, parseErrors */ } else txnErr = pt.error;
+    } catch (e) { txnErr = 'parse: ' + e; }
+    return jsonResponse_({
+      success: true,
+      categories: cat || [],
+      categoriesError: catErr,
+      transactions: txn || [],
+      transactionsError: txnErr,
+      parsed: parsed,
+      parseErrors: parseErrors,
+      _bootstrapMs: Date.now() - bootstrapStart
+    });
+  }
+  ```
+
+  PWA-side, `js/views/categorize.js` got a `startBootstrap_({withParse})` helper that tries `api.bootstrap` first; on any failure (including old Apps Script returning "Unknown action: bootstrap" during a deploy gap) falls back to the v0.15.4 `Promise.all([fetchCategories, parseAndFetch])` pattern transparently:
+
+  ```js
+  async function startBootstrap_({ withParse = false } = {}) {
+    let result;
+    try {
+      const data = await api.bootstrap({ withParse });
+      if (!data.categoriesError && !data.transactionsError) {
+        result = { categories: data.categories, transactions: data.transactions, ... viaBootstrap: true };
+      }
+    } catch (err) {
+      console.warn('bootstrap unavailable, falling back:', err.message);
+    }
+    if (!result) {
+      const [catData, txnData] = await Promise.all([
+        api.fetchCategories(),
+        api.parseAndFetch({ withParse })
+      ]);
+      result = { categories: catData.categories, transactions: txnData.transactions, ... viaBootstrap: false };
+    }
+    store.setCategories(result.categories);
+    renderCategories(); renderChips(); updateRailVisibility();
+    return result;
+  }
+  ```
+
+  `bootstrapPromise` (renamed from `categoriesPromise`) is the module-level singleton; mount() fires it; refresh() awaits on non-force, replaces with a fresh `withParse:true` call on force.
+
+- **Why bootstrap actually wins (the validation step):**
+  - 2 × ~2,500 ms network tax → 1 × ~2,500 ms = ~2,500 ms saved per cold mount
+  - Server-side total work is the SUM of categories + parseAndFetch internals (no parallelism gain because Apps Script container is single-threaded — verified in Phase 22). So the server pays the same compute; the client pays one TLS+302 instead of two.
+  - Combined response size: categories ≤100 rows × 2 cols + uncategorized txns typically <100 = ~2-50 KB. Two orders of magnitude under Apps Script's 10 MB response limit.
+  - Lock-free: neither underlying handler takes a lock, so combining them doesn't introduce contention.
+  - Backward compatible by construction: bootstrap is a NEW action, so old PWAs never call it; new PWAs fall back transparently when the action is unknown.
+
+- **Edge cases handled:**
+  - **Old Apps Script + new PWA (deploy-window transient):** `api.bootstrap` returns `{success:false, error:"Unknown action: bootstrap"}`, `request()` throws, fallback fires. User pays one wasted ~2.5 s round-trip on first cold mount during the deploy window. Mitigation: deploy Apps Script first, then push PWA.
+  - **Partial failure (e.g., categories OK but parseAndFetch threw):** combined response has `transactionsError` set, `categoriesError` null. Current implementation falls back fully if EITHER section errored — simpler and safer than partial use. Could optimize to use the OK section + supplement the failed one separately later.
+  - **Force refresh:** refresh() with `force=true` replaces `bootstrapPromise` with a fresh `startBootstrap_({withParse:true})` call. The old promise still settles but no one awaits it. No leak.
+  - **bootstrap AND fallback both fail:** `bootstrapPromise = null` so the next refresh attempts a fresh fire instead of awaiting a rejected promise forever. Same retry semantics as v0.15.4 `categoriesPromise`.
+  - **Re-mount within session:** the `bootstrapPromise` singleton is reused. Combined with the existing 60 s `REFRESH_THROTTLE_MS`, re-mounts within 60 s are no-ops (preserves Phase 22 win).
+  - **Network timeout:** the 30 s timeout in `request()` (api.js) applies to bootstrap too. Timeouts trigger the fallback path.
+
+- **What this does NOT touch:**
+  - Dashboard's 3 parallel `dumpSheet` calls (Budget + Saving + Fixed) — different code path, different cache TTL, different lifecycle. Adding to bootstrap would couple Categorize cold-start latency to Dashboard schema. Keep separate.
+  - `batchCategorize` sync flow (separate concern, different lock model)
+  - `addCategory` modal (already client-side store update + single API call)
+  - `version`, `logClientMetrics`, archive endpoints (orthogonal)
+
+- **Rollback handles:**
+  - PWA v0.19.7 (Phase 29.1): revert the commit. 4 files (index.html, dashboard.js, config.js, sw.js); cache-first paint and preconnect are independent.
+  - PWA v0.19.8 (Phase 29.2): revert the commit. 4 files (api.js, categorize.js, config.js, sw.js). Apps Script unchanged — `bootstrap` action stays live but unused.
+  - Apps Script v11.20: rollback not needed (additive). To roll back: redeploy v11.19, the new `bootstrap` action becomes "Unknown action", and PWAs fall back to dual fetch automatically.
+
+- **Verification (post-deploy, requires real ClientMetrics):**
+  - `bootstrap` rows in ClientMetrics with `Ok=true`, `ServerMs` ≈ sum of (categories + parseAndFetch ServerMs) — confirms server-side work is unchanged
+  - `mount:categorize` `ClientTotalMs` ≈ 4,800 ms ± 1 s on cold sessions (down from 7,300+)
+  - Fallback path verifiable by temporarily breaking the bootstrap action — ensure PWA recovers without user-visible failure
+  - Dashboard cold-open with stale localStorage cache paints in <200 ms (vs the 5-7 s spinner pre-v0.19.7)
+
+- **Lesson:**
+  1. **Validate proposals against measured data before implementing.** The build-step proposal sounded compelling ("3-4× smaller bundle!") until the data showed bytes weren't the bottleneck — the 2.5 s per-call network tax dominates everything. The CSS period-filter proposal sounded clever until the data showed period-switch wasn't slow. Validation killed two proposals, saved weeks of incorrect work, AND surfaced a fourth proposal (cache-first dashboard) that hadn't been on the list.
+  2. **Apps Script web app perf is dominated by round-trip count, not server work.** Each call pays ~2.5 s for the 302 + TLS handshake regardless of container warmth. Reducing call count is the only lever that actually moves the needle for cold-start. Server-side optimization (cache, faster handlers) only matters once round-trips are minimized.
+  3. **Backward-compatible by construction beats backward-compatible by versioning.** The bootstrap endpoint is purely additive — old endpoints stay live forever. New PWA detects unknown action and falls back. No version negotiation, no feature flags, no contract migration. Compare to a hypothetical "bootstrap REPLACES categories+parseAndFetch" design that would have required a synchronized deploy. Ours can deploy Apps Script and PWA hours apart with no user-visible breakage (just a one-time 2.5 s penalty during the gap).
+  4. **Keep the side-effect application close to the data.** `startBootstrap_` applies `store.setCategories` + render side-effects inside the helper, not at the call site. This means cold mount renders the chip rail as soon as categories arrive — even before refresh() finishes filtering transactions through the sync queue. Centralizing the side-effect prevented a class of "rail flickers because categories arrived but render didn't fire" bugs.
+  5. **Workflow improvements aren't perf improvements.** Build steps, content-hashed assets, automated cache-busting — all real wins for developer experience but invisible to the user opening the app. When the perf complaint is "cold open is slow," look for round-trips, not bytes.

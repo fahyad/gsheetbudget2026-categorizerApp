@@ -11,7 +11,7 @@
 
 import { showError } from '../ui.js';
 import { allPeriods, currentPeriod, dueDatesInPeriod } from '../periods.js';
-import { getDashboardData, formatCurrency } from '../lib/budget.js';
+import { getDashboardData, formatCurrency, peekDashboardCache } from '../lib/budget.js';
 
 // v0.17.2: persistence key for the summary-cell accordion state. Currently
 // only Fixed is expandable; future cells (Income, Budgeted) can join.
@@ -56,8 +56,24 @@ export default {
     const cur = currentPeriod();
     if (cur && selectedPeriodIdx == null) selectedPeriodIdx = cur.idx;
 
-    renderPeriodBar();
-    await load({ forceRefresh: false });
+    // v0.19.7: cache-first paint. If localStorage has dashboard data
+    // (even past the 10-min TTL), paint it immediately and refresh in
+    // the background. Saves the ~5-7s spinner on cold open with a
+    // stale cache — same pattern as store.transactions got in v0.15.4.
+    // getDashboardData inside load() returns cached data if still within
+    // TTL, falls through to network fetch otherwise; either way the
+    // pre-painted screen stays visible until fresh data arrives.
+    const peeked = peekDashboardCache();
+    if (peeked) {
+      cachedData = peeked.data;
+      cachedData._fetchedAt = peeked.fetchedAt;
+      renderPeriodBar();
+      renderBody();
+      load({ forceRefresh: false }).catch(err => console.error('Dashboard refresh failed', err));
+    } else {
+      renderPeriodBar();
+      await load({ forceRefresh: false });
+    }
   },
 
   // Persistent-view lifecycle (v0.16.0). The router keeps the Dashboard's

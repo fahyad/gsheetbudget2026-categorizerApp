@@ -140,9 +140,10 @@ let selectedTimestamps = new Set();
 let chipDataPromise = null;
 
 // v0.15.4 perf state — shared across re-mounts for this module lifetime.
-// These avoid the duplicate-categories call + needless refetch-on-remount
-// pattern confirmed in ClientMetrics.
-let categoriesPromise = null;    // mount's in-flight fetch; reused by first refresh()
+// These avoid the needless refetch-on-remount pattern confirmed in
+// ClientMetrics. v0.19.8: replaced categoriesPromise with bootstrapPromise
+// (the bootstrap endpoint returns categories + transactions in one call).
+let bootstrapPromise = null;     // mount's in-flight fetch; reused by first refresh()
 let didInitialRefresh = false;   // true after first successful refresh this session
 let lastRefreshMs = 0;           // clock of last successful refresh()
 const REFRESH_THROTTLE_MS = 60 * 1000;  // silent re-mount refresh skip window
@@ -228,28 +229,14 @@ export default {
     // parseAndFetch. refresh() will merge server state when it returns.
     renderAll();
 
-    // Categories fetch — fire once per module lifetime. refresh() reuses
-    // this same promise instead of firing a second identical call (the
-    // duplicate that shows as `Duplicate=Y` in ClientMetrics).
-    if (!categoriesPromise) {
-      categoriesPromise = api.fetchCategories()
-        .then(data => {
-          store.setCategories(data.categories);
-          renderCategories();
-          // v0.19.0 — also build chips for the rail; rail visibility
-          // depends on having categories loaded.
-          renderChips();
-          updateRailVisibility();
-          return data;
-        })
-        .catch(err => {
-          console.error('Category fetch failed:', err);
-          if (store.categories.length === 0) {
-            showError('Could not load categories. Check connection and refresh.');
-          }
-          categoriesPromise = null;  // allow retry on next mount
-          throw err;
-        });
+    // v0.19.8: bootstrap pre-warm — fires the combined categories+txns
+    // round-trip ASAP so refresh() can await it instead of paying the
+    // network tax twice. On any failure (including old Apps Script
+    // returning "Unknown action: bootstrap"), startBootstrap_ falls
+    // back to the v0.15.4 dual-fetch pattern transparently. Module-
+    // level so re-mounts within session reuse the same promise.
+    if (!bootstrapPromise) {
+      bootstrapPromise = startBootstrap_({ withParse: false });
     }
 
     // Suggest index is only needed for the Auto sub-tab. Warm it eagerly
@@ -546,18 +533,23 @@ function renderCalendar(period) {
 /**
  * Refreshes categories (from server) + uncategorized txns (from parseAndFetch).
  *
- * v0.15.4 changes (measured against v0.15.3 ClientMetrics):
+ * v0.19.8 changes:
+ *   - Single round-trip via bootstrap endpoint (1 network tax instead of 2).
+ *     Falls back to parallel fetchCategories + parseAndFetch on any failure.
+ *   - Non-force refresh awaits the mount's in-flight bootstrapPromise.
+ *   - Force refresh fires a fresh bootstrap call with withParse=true and
+ *     replaces bootstrapPromise so future awaits see the latest data.
+ *
+ * v0.15.4 changes (still in effect):
  *   - Silent re-mounts within REFRESH_THROTTLE_MS = 60s are no-ops.
  *     Users cross-navigating to Dashboard + back no longer pay ~5s.
- *   - First refresh reuses the mount's in-flight categoriesPromise instead
- *     of firing a duplicate `categories` call (~3s saved per cold mount).
  *   - Server's txn list is installed via store.setTransactions() (replace),
  *     which correctly evicts stale-cached items that were categorized
  *     elsewhere. Previously addTransactions()+filter could leave phantoms.
  *
  * opts.force = true forces a full refetch (used by Parse pill + empty-state
- * Refresh button). This always re-fetches categories AND parseAndFetch,
- * ignoring throttle and cached categories promise.
+ * Refresh button). Always fires fresh data AND tells the server to scan
+ * Gmail for new infoalerts.
  */
 async function refresh({ force = false } = {}) {
   if (refreshInFlight) return;
@@ -575,39 +567,30 @@ async function refresh({ force = false } = {}) {
   renderPeriodBar();
 
   try {
-    // Categories. Three cases:
-    //   1. force: re-fetch from server (user may have added a category in
-    //      the sheet between now and the last cold open).
-    //   2. first refresh + mount's promise already in flight: await it.
-    //   3. first refresh + no promise: fire a new one (recovery path if
-    //      mount's fetch somehow failed AND retry was cleared).
-    try {
-      if (force) {
-        const catData = await api.fetchCategories();
-        store.setCategories(catData.categories);
-        renderCategories();
-      } else if (categoriesPromise) {
-        await categoriesPromise;  // already updates store + renders
-      }
-    } catch (e) {
-      console.error('Category fetch failed:', e);
-      if (store.categories.length === 0) {
-        showError('Could not load categories. Check connection and refresh.');
-      }
-      // Don't abort refresh — parseAndFetch can still succeed with no cats.
+    // Pick the right bootstrap promise:
+    //   force=true:  fire fresh (withParse=true); replace cached promise
+    //                so subsequent non-force awaits see latest data
+    //   force=false + bootstrapPromise exists: await the in-flight one
+    //   force=false + no promise (recovery): fire fresh
+    let promise;
+    if (force) {
+      bootstrapPromise = startBootstrap_({ withParse: true });
+      promise = bootstrapPromise;
+    } else if (bootstrapPromise) {
+      promise = bootstrapPromise;
+    } else {
+      bootstrapPromise = startBootstrap_({ withParse: false });
+      promise = bootstrapPromise;
     }
 
-    // Authoritative uncategorized list, with anything in the syncQueue
-    // excluded (those are already queued for server write).
-    //
-    // v0.17.0: the Apps Script hourly trigger (v11.16) keeps the sheet
-    // fresh, so default refresh is read-only (~200 ms server vs ~1-3 s
-    // when also scanning Gmail). force=true (Parse pill, empty-state
-    // Refresh) means the user is explicitly asking for "right now"
-    // freshness, so we tell the server to also run the parser.
-    const data = await api.parseAndFetch({ withParse: force });
+    const result = await promise;
+
+    // Apply transactions side-effect with sync-queue filtering. (Categories
+    // side-effect already applied inside startBootstrap_ when the promise
+    // resolved — needed for renderChips during cold mount before refresh
+    // even completes.)
     const queued = store.getSyncQueueTimestamps();
-    store.setTransactions(data.transactions.filter(t => !queued.has(t.timestamp)));
+    store.setTransactions(result.transactions.filter(t => !queued.has(t.timestamp)));
 
     lastRefreshMs = Date.now();
     didInitialRefresh = true;
@@ -620,6 +603,82 @@ async function refresh({ force = false } = {}) {
     emptyRefreshBtn.disabled = false;
     renderPeriodBar();
   }
+}
+
+/**
+ * v0.19.8: fires a bootstrap call (one round-trip → categories + txns)
+ * with transparent fallback to the v0.15.4 dual-fetch pattern. Applies
+ * the categories side-effect (store + renderCategories + renderChips +
+ * updateRailVisibility) as soon as the data is in hand so cold mount can
+ * render the rail immediately. Returns {categories, transactions, parsed,
+ * parseErrors, viaBootstrap}; the caller applies the transactions side-
+ * effect (with sync-queue filtering).
+ *
+ * Failure modes handled:
+ *   - Old Apps Script returns {success:false, error:"Unknown action..."}
+ *     → request() throws → catch fires fallback path
+ *   - Bootstrap returns 200 with categoriesError or transactionsError set
+ *     → fall through to fallback for the failed section(s)
+ *     (current impl: full fallback if either errored — simpler + safe)
+ *   - Network error / timeout → catch fires fallback
+ *   - Fallback also fails → throw; caller surfaces toast
+ */
+async function startBootstrap_({ withParse = false } = {}) {
+  let result;
+  try {
+    const data = await api.bootstrap({ withParse });
+    if (!data.categoriesError && !data.transactionsError) {
+      result = {
+        categories: data.categories,
+        transactions: data.transactions,
+        parsed: data.parsed || 0,
+        parseErrors: data.parseErrors || 0,
+        viaBootstrap: true
+      };
+    } else {
+      console.warn('bootstrap partial failure (falling back):',
+        'cat=' + data.categoriesError, 'txn=' + data.transactionsError);
+    }
+  } catch (err) {
+    console.warn('bootstrap unavailable, falling back to dual fetch:', err.message || err);
+  }
+
+  if (!result) {
+    // Dual-fetch fallback (the v0.15.4 path). Promise.all so both fire
+    // in parallel from the client; server-side they serialize (Apps
+    // Script single-threaded container — see Phase 22 findings).
+    try {
+      const [catData, txnData] = await Promise.all([
+        api.fetchCategories(),
+        api.parseAndFetch({ withParse })
+      ]);
+      result = {
+        categories: catData.categories,
+        transactions: txnData.transactions,
+        parsed: txnData.parsed || 0,
+        parseErrors: txnData.parseErrors || 0,
+        viaBootstrap: false
+      };
+    } catch (err) {
+      // Both bootstrap AND fallback failed. Clear cached promise so the
+      // next refresh attempts a fresh fire instead of awaiting a rejected
+      // promise forever.
+      bootstrapPromise = null;
+      if (store.categories.length === 0) {
+        showError('Could not load categories. Check connection and refresh.');
+      }
+      throw err;
+    }
+  }
+
+  // Apply categories side-effect now (before caller awaits). Cold mount's
+  // renderChips/updateRailVisibility paths need them.
+  store.setCategories(result.categories);
+  renderCategories();
+  renderChips();
+  updateRailVisibility();
+
+  return result;
 }
 
 function categorize(timestamp, category) {

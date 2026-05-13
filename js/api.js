@@ -93,3 +93,17 @@ export async function dumpSheet(tab, range) {
   if (range) params.range = range;
   return request('dumpSheet:' + tab, buildUrl('dumpSheet', params));
 }
+
+// v0.19.8: combo endpoint that returns categories + parseAndFetch in a
+// single round-trip. Halves the cold-mount network cost (the ~2.5s
+// 302-redirect+TLS tax is paid once instead of twice). Backward-compatible
+// — if the server doesn't know this action it returns
+// {success:false, error:"Unknown action: bootstrap"} and the caller can
+// fall back to the dual-fetch pattern. See handleBootstrap_ in Code.js.
+//
+// Honors withParse the same way parseAndFetch() does — only force-refresh
+// flows pass true so the inline Gmail scan runs.
+export async function bootstrap({ withParse = false } = {}) {
+  const extra = withParse ? { withParse: '1' } : {};
+  return request('bootstrap', buildUrl('bootstrap', extra));
+}

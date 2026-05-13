@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.19';
+var APP_SCRIPT_VERSION = 'v11.20';
 var APP_SCRIPT_LAST_EDITED = '2026-05-04 04:42 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -84,6 +84,7 @@ function onOpen() {
 function routeAction_(action, params) {
   if (action === 'parseAndFetch')    return handleParseAndFetch_(params);
   if (action === 'categories')       return handleCategories_();
+  if (action === 'bootstrap')        return handleBootstrap_(params);
   if (action === 'categorize')       return handleCategorize_(params);
   if (action === 'uncategorize')     return handleUncategorize_(params);
   if (action === 'addCategory')      return handleAddCategory_(params);
@@ -281,6 +282,72 @@ function handleCategories_() {
   }
 
   return jsonResponse_({ success: true, categories: categories });
+}
+
+/**
+ * bootstrap (v11.20): single-call combo of `categories` + `parseAndFetch`.
+ *
+ * Why: cold-mount in the PWA awaits two sequential network calls. Each call
+ * pays a ~2.5 s 302-redirect+TLS tax (script.google.com → script.googleuser
+ * content.com). Combining the two server-side payloads into one round-trip
+ * cuts that cost ~50 % per cold mount (Phase 22 measurement: 7.3 s → ~4.8 s
+ * projected). Both underlying handlers are read-only when withParse is
+ * false, share no locks, and read different tabs (Setup vs. Transactions),
+ * so combining them is purely additive on the server.
+ *
+ * Backward compat: this is a NEW action — old PWAs never call it. New PWAs
+ * call it first; on any failure (including "Unknown action: bootstrap"
+ * from old Apps Script during a deploy gap) the PWA falls back to the
+ * original parallel `fetchCategories` + `parseAndFetch` pattern.
+ *
+ * Honors `withParse` — passes through to handleParseAndFetch_. Per-section
+ * error fields (`categoriesError`, `transactionsError`) let the client
+ * recover from partial failures without falling back to the dual-fetch
+ * path unless necessary.
+ */
+function handleBootstrap_(params) {
+  var bootstrapStart = Date.now();
+
+  var catResponse = handleCategories_();
+  var txnResponse = handleParseAndFetch_(params);
+
+  var cat = null, txn = null, parsed = 0, parseErrors = 0;
+  var catErr = null, txnErr = null;
+
+  try {
+    var parsedCat = JSON.parse(catResponse.getContent());
+    if (parsedCat.success) {
+      cat = parsedCat.categories;
+    } else {
+      catErr = parsedCat.error || 'Unknown categories error';
+    }
+  } catch (e) {
+    catErr = 'categories JSON parse: ' + e.toString();
+  }
+
+  try {
+    var parsedTxn = JSON.parse(txnResponse.getContent());
+    if (parsedTxn.success) {
+      txn = parsedTxn.transactions;
+      parsed = parsedTxn.parsed || 0;
+      parseErrors = parsedTxn.parseErrors || 0;
+    } else {
+      txnErr = parsedTxn.error || 'Unknown parseAndFetch error';
+    }
+  } catch (e) {
+    txnErr = 'parseAndFetch JSON parse: ' + e.toString();
+  }
+
+  return jsonResponse_({
+    success: true,
+    categories: cat || [],
+    categoriesError: catErr,
+    transactions: txn || [],
+    transactionsError: txnErr,
+    parsed: parsed,
+    parseErrors: parseErrors,
+    _bootstrapMs: Date.now() - bootstrapStart
+  });
 }
 
 /**

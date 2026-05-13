@@ -2,9 +2,9 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.19 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut, defined in `scripts/deploy-alias.sh`). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.19 adds the Rolled Over column to the Budget tab (col F, between Spent and Available). Available formula simplified to `F + D - E`; carryover lookup extracted to `buildRolledOverFormula_`. New `Budget_RolledOver` named range; `Budget_Available` moves F → G. PWA needs paired v0.19.3 (parses row[6] as available). v11.18 adds `Archive Goal...` / `Unarchive Goal...` menu items + a `rebuildBudgetInternal_` filter that drops archived sub-categories out of the Budget tab. v11.17 makes `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 makes Budget B1 auto-snap to today's period on every refresh. v11.14 added `handleArchiveGoal_`/`handleUnarchiveGoal_`. v11.13 added `_elapsedMs` echo + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.20 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.20 adds the `bootstrap` action: returns categories + parseAndFetch in one call so the PWA cold-mount pays the ~2.5 s 302+TLS network tax once instead of twice. Old endpoints stay live forever (additive only). v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
-> **PWA:** v0.19.6 (cache v36) on `main` — pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
+> **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
 > **Workflow tooling:** project-level `.claude/settings.json` (permissions + SessionStart hook), `.claude/state-check.sh` (state snapshot), `.claude/statusline.sh` (persistent display), three slash-command skills (`/state`, `/lint`, `/deploy`). On main, also merged into pixel branch.
 >
@@ -1678,3 +1678,46 @@ Steps executed:
 - **User next step:** switch GitHub Pages source from `pwa/pixel-ui-redesign` back to `main` in repo Settings → Pages (if it was previously pointed at the pixel branch for preview).
 - No Apps Script change in this session (still v11.19 @44).
 - Rollback path (unused): `git checkout main && git reset --hard main-pre-pixel-merge && git push origin main --force` (force-push needs explicit user permission since it's denied by `.claude/settings.json`).
+
+---
+
+## Session: 2026-05-13 — Cold-Start Round 2 (Apps Script v11.20 + PWA v0.19.7 → v0.19.8)
+
+### Setup
+After the rulepop architecture comparison surfaced "what could we borrow?", user asked which of the three perf proposals were actually worth implementing. Re-verified each against measured data before writing any code:
+- Pulled Phase 22 ClientMetrics findings: cold Categorize mount = 7,348-9,038 ms; per-call network tax = ~2,500 ms; period switch = pure client-side, no measured complaint.
+- Counted commits touching `sw.js`: 38 — most are CACHE_VERSION bumps. Real workflow tax but each is one line.
+- Audited bytes: total JS = 131 KB uncompressed, ~50 KB gzipped already.
+
+Outcome: build step rejected (workflow change disguised as perf), CSS period filter rejected (pre-rendering 26 periods would regress cold mount), bootstrap endpoint validated (~2.5 s saved per cold mount on documented network tax). One bonus emerged from inspection: cache-first paint on Dashboard cold open. Plus a free preconnect hint.
+
+### What shipped
+
+**Phase 29.1 (PWA v0.19.7, no Apps Script changes):**
+- `index.html`: two `<link rel="preconnect">` tags for `script.google.com` + `script.googleusercontent.com`. Browser warms TLS while HTML parses; first call after cold open finds the connection ready (~100-500 ms saved).
+- `js/views/dashboard.js mount()`: synchronous `peekDashboardCache()` (already exists since v0.19.0) → paint immediately if cache exists → `load()` runs in background. Same pattern `store.transactions` got in v0.15.4 Fix #3. Cold open with stale cache: 5-7 s spinner → <50 ms paint.
+- Bumped APP_VERSION v0.19.6 → v0.19.7, CACHE_VERSION v36 → v37.
+
+**Phase 29.2 (Apps Script v11.20 + PWA v0.19.8):**
+- `apps-script/Code.js`: new `handleBootstrap_(params)` wrapping `handleCategories_()` + `handleParseAndFetch_()` and returning merged JSON with per-section error fields. Wired into `routeAction_` as `'bootstrap'`. Honors `withParse`. Echoes `_bootstrapMs`. Both underlying handlers are lock-free and read different tabs — combining is purely additive on the server.
+- `js/api.js`: new `bootstrap({withParse})` function.
+- `js/views/categorize.js`: `categoriesPromise` → `bootstrapPromise`. New `startBootstrap_({withParse})` helper tries `api.bootstrap` first; on any failure (including old Apps Script returning "Unknown action: bootstrap" during a deploy gap, partial server failure, network error) falls back to the v0.15.4 `Promise.all([fetchCategories, parseAndFetch])` pattern transparently. Categories side-effect (`store.setCategories` + render) applied inside the helper so cold mount's chip rail populates before refresh completes.
+- Bumped APP_SCRIPT_VERSION v11.19 → v11.20, APP_VERSION v0.19.7 → v0.19.8, CACHE_VERSION v37 → v38.
+
+### Backward compat verified
+- Old PWA + new Apps Script: PWA never calls bootstrap. Works.
+- New PWA + old Apps Script: bootstrap fails with "Unknown action", `request()` throws, fallback fires. ~2.5 s wasted on first cold mount during deploy window only — mitigation is to deploy Apps Script BEFORE pushing PWA.
+- New PWA + new Apps Script: bootstrap path used, ~2.5 s saved per cold mount.
+
+### Status — code complete + syntax-clean, awaiting deploy
+- Apps Script v11.20 must deploy from user's laptop FIRST: `cd apps-script && ./deploy.sh "v11.20 — bootstrap endpoint for cold-mount perf"`. The `clasp` workflow constraint hasn't changed.
+- PWA v0.19.7 + v0.19.8 changes auto-deploy when pushed to main.
+- Verification post-deploy (real ClientMetrics): `bootstrap` rows with `Ok=true`, `mount:categorize ClientTotalMs` ≈ 4,800 ms ± 1 s on cold sessions (down from 7,300+), Dashboard cold-open with stale cache paints in <200 ms.
+- Phase 29 entry in task_plan.md.
+- Findings architecture section "Cold-Start Round 2" added — covers all three fixes, validation methodology, edge cases, rollback handles, and 5 lessons.
+- No new trip-up added (the lessons here are validation methodology + perf-vs-workflow distinction; both belong in findings, not in the bug-trap list).
+
+### Rollback handles
+- PWA v0.19.7: `git revert <v0.19.7-commit>` (touches index.html, dashboard.js, config.js, sw.js).
+- PWA v0.19.8: `git revert <v0.19.8-commit>` (touches api.js, categorize.js, config.js, sw.js). Apps Script unchanged.
+- Apps Script v11.20: not needed (additive). To roll back: redeploy v11.19, bootstrap becomes "Unknown action", PWAs fall back to dual fetch.

@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Budget Categorizer</title>
   <link rel="manifest" href="manifest.json">
+  <!-- v0.19.7: preconnect to the Apps Script origins so the TLS handshake +
+       302 redirect to script.googleusercontent.com is warmed while the rest
+       of the HTML parses. Saves ~100-500ms on the first API call after a
+       cold open. Both hosts are stable + baked into the deployment ID. -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
