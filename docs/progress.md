@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.21 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.22 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.22 (Phase 31) refreshes the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1827,3 +1827,29 @@ The 29-entry coverage gap is **upstream** of the project — Scotiabank info-ale
 ### Rollback (unused)
 - Apps Script: redeploy v11.20 via clasp (cleanup function becomes dangling menu reference, no other effect).
 - Cleanup script run: Google Sheets revision history (`File → Version history → See version history` → restore to a point before 2026-05-17).
+
+---
+
+## Session: 2026-05-17 (later) — Instructions tab refresh (Apps Script v11.22)
+
+### Setup
+User: "the instructions sheet on the google sheet needs to be updated." Last comprehensive rewrite was Phase 13b (v10.3) — 11 Apps Script versions ago. Drift catalog:
+- Missing menu items: `Archive Goal...`, `Unarchive Goal...` (v11.18), `Setup Email Trigger`, `Remove Email Trigger` (v11.16), `Dedupe + Normalize Transactions (rescue)` (v11.21)
+- Missing tab: `ClientMetrics` (v11.13)
+- DAILY USE step "Tap Refresh — pulls new uncategorized transactions" obsolete since v11.17 made parseAndFetch read-only (hourly trigger handles parsing)
+- SAVING GOALS "When goal is achieved: just stop budgeting" — outdated; v11.18 added the atomic `Archive Goal...` menu
+- DO NOT formula-cols warning "B, E, F" missed Budget col G (Rolled Over added v11.19)
+- FOR DEVELOPERS deploy command was the long form; `deploy "vXX"` shell alias is shorter and now standard
+
+### What shipped (v11.22, content-only — no behavioral change)
+Targeted refresh of 7 sections in `buildInstructionsTab_` rows[] array. No function structure changes; just content updates.
+
+### Status — awaiting deploy + Update Script
+Same pattern as Phase 30:
+1. `./apps-script/deploy.sh "v11.22 — instructions refresh"`
+2. User runs `Budget Tools → 3. Update Script (safe)` to re-render the Instructions tab.
+
+After Step 2, eyeball the Instructions tab to confirm new menu entries appear.
+
+### Rollback
+Trivial — redeploy any prior version. No data side effects. Tab protection is warning-only, so user can also edit individual lines manually if a single entry is wrong.
