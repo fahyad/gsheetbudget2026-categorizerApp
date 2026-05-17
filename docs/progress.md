@@ -1785,3 +1785,45 @@ No PWA changes — backend-only fix preserves existing contract.
 - Trip-up #35: "Apps Script Date written to a sheet col keeps its time portion — formulas comparing against midnight Dates break on period boundaries."
 
 ### Phase 30 entry in task_plan.md; full architecture section in findings.md.
+
+---
+
+## Session: 2026-05-17 — Phase 30 deploy + cleanup verification + statement cross-reference
+
+### What ran
+- `./apps-script/deploy.sh "v11.21 — dup parsing + period bug fix"` — deployed to `@46` (still 7 total deployments — no accidental new URL). Production endpoint returned `{version: "v11.21", _elapsedMs: 374}`.
+- Auto-commit of post-deploy timestamp bump (`667499e`).
+- Pushed `81d6f74` + `667499e` to origin/main. GitHub raw VERSION.txt confirmed `v11.21`.
+- User ran `Budget Tools → 3. Update Script (safe)` (installs new INT() Period formula across all 999 rows).
+- User ran `Budget Tools → Dedupe + Normalize Transactions (rescue)` (cleanup of 19 phantom rows + 8 stranded 'Unassigned').
+- User attached Scotiabank statement xlsx (`Scene_Visa_card_9017_051726.xlsx`) covering Apr 7-30 billing cycle as a third source of truth.
+
+### Cleanup verification (sheet re-pulled via dumpSheet post-cleanup)
+| Check | Before | After | Expected |
+|---|---|---|---|
+| Sheet rows | 133 | **114** | 114 (−19 phantom rows) ✓ |
+| Duplicate timestamps | 15 groups | **0** | 0 ✓ |
+| 'Unassigned' period rows | 8 | **0** | 0 ✓ |
+| Date column time portions | All rows | **0** | 0 ✓ |
+
+Phase 30 worked exactly as designed. Both Bug 1 (duplicate parsing) and Bug 2 (last-day silent loss) are resolved in existing data + the parser is defended against future re-occurrence.
+
+### Statement cross-reference findings (NEW issue surfaced, not Phase 30)
+Cross-referenced 93 statement debits against the post-cleanup sheet rows in the same date window:
+- **61 exact matches** (same date + amount)
+- **3 date-offset matches** (auth date ±1-2 days from post date — normal credit card behavior; the matching code was overly strict on date equality)
+- **29 statement entries with no Gmail info-alert ever fired** = $1,627 of spending invisible to PWA
+- **9 sheet entries with no matching statement line** — mix of: (a) other card (`4537*****606****` is a different card from the statement's `9017`), (b) gas/hotel pre-auths that settled for lower amounts, (c) txns from older billing cycle
+
+The 29-entry coverage gap is **upstream** of the project — Scotiabank info-alerts predominantly fire for in-person card-present transactions (chip/tap) but skip many online merchants (Amazon, Apple Bill, ChatGPT, Zotero, ClickUp, etc.), recurring subscriptions, and some transit/parking apps. Documented as "Statement vs PWA Coverage Gap" observation in findings.md.
+
+### Status — VERIFIED WORKING (Phase 30 fully complete)
+- Apps Script v11.21 live at deployment `@46`.
+- All Phase 30 commits pushed to origin/main.
+- Phase 30 status in task_plan.md updated from "awaiting deploy" → "complete + verified working".
+- New "Statement vs PWA Coverage Gap" observation added to findings.md covering the 29-txn upstream gap + pre-auth-vs-settled + two-card setup nuances.
+- No follow-up coding work needed. If user wants to close the upstream coverage gap, options (statement import, manual entry, third-party data source) are noted but explicitly NOT in Phase 30 scope.
+
+### Rollback (unused)
+- Apps Script: redeploy v11.20 via clasp (cleanup function becomes dangling menu reference, no other effect).
+- Cleanup script run: Google Sheets revision history (`File → Version history → See version history` → restore to a point before 2026-05-17).

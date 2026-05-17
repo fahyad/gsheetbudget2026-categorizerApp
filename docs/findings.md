@@ -2080,3 +2080,39 @@ User reported duplicate transactions in the PWA. Investigation (Gmail connector 
   4. **Investigate with no assumptions — the first bug found isn't always the only one.** The period bug was discovered WHILE investigating the duplicate bug (noticed `period='Unassigned'` on May 12 in the dump, asked "why?"). If the investigation had stopped at "duplicates found, here's the fix," the period silent-loss bug would have continued unnoticed. The user's instruction to "double-check assumptions and look for other issues" directly produced the Bug 2 discovery.
   5. **Cross-reference the source of truth, not just the affected layer.** Pulling Gmail directly confirmed (a) the parser query works as documented, (b) every email exists in the sheet (no missing data), (c) the duplicates are downstream of Gmail (not Gmail re-delivering). Without the source-side verification, hypothesizing the root cause from sheet data alone could have led to wrong fix.
   6. **`dedup_skip` logging is a permanent feedback loop on the fix.** Beyond fixing the bug, the log line tells us whether the upstream behavior changed on its own (count drops to 0) or whether the dedup is doing active rescue work (count stays > 0). Either signal informs future architectural decisions.
+
+### Statement vs PWA Coverage Gap (observation, post-Phase 30 verification)
+
+Surfaced 2026-05-17 during Phase 30 post-deploy verification. User provided their Scotiabank statement xlsx as a third source of truth (Gmail = source of alert data, Sheet = parsed result, Statement = bank's actual settled-transaction ledger). Cross-reference revealed a coverage gap that is NOT a bug — it's an upstream limitation of Scotiabank's info-alert system that has always existed but wasn't quantified until now.
+
+- **Setting:** 93 debit transactions in one billing cycle's statement (Apr 7-30 = $3,855.17). PWA parsed 64 of them = 69% coverage by exact or fuzzy match. Remaining 29 transactions ($1,627) never produced a Gmail info-alert.
+
+- **Pattern of what Scotiabank info-alerts SKIP:**
+  - **Online / card-not-present transactions:** Amazon (6 entries × ~$22 avg), Apple Bill ($184), ChatGPT Plus ($26), Zotero ($30), ClickUp ($15), RockAuto ($230)
+  - **Recurring subscriptions:** Apple, ChatGPT, Zotero, ClickUp, Movelearnplay
+  - **Mobile transit/parking apps:** AHS UAH Park By Phone (9 entries × $15 = $135), ARC Transit ($30), Espotpark ($70)
+  - **International / unusual merchants:** "cr awuk" London ($370), Ubu Psychological ($235)
+
+- **Pattern of what DOES alert reliably:** physical in-person card-present transactions (chip-and-PIN, tap-to-pay at retail terminals). E.g. SHOPPERS DRUG MART, TIM HORTONS, SAFEWAY, PETRO-CANADA pump terminals — these all alert consistently.
+
+- **Implications for budget accuracy:**
+  - Budget tab's Spent column on the affected card UNDER-counts actual spending by ~$1,627/cycle = ~$3,250/month (assuming similar gap each cycle).
+  - Categories used predominantly by online merchants (Subscriptions, Online Shopping, etc.) are systematically under-budgeted.
+  - In-person categories (Groceries, Eating Out, Gas) are accurately captured.
+
+- **Secondary observations from the same cross-reference:**
+  1. **Auth date ≠ post date:** Info-alert fires on authorization (instant); statement shows posted date (1-2 days later for some merchants). Cleanup-comparison code matching on exact date misses these; ±2-day fuzzy matching catches them. The sheet has the auth date (per Scotiabank email), the statement has the posted date. Both are correct depending on interpretation; the sheet is more "real-time accurate" but the statement is what reconciles to your monthly bill.
+  2. **Gas pump pre-auths over-count:** $250 pre-auth at gas pumps generates an info-alert; the actual fill (~$50-80) generates a SECOND alert. Both end up as separate rows in the sheet. Statement shows only the settled amount. Visible in cross-reference: 2-3 "sheet not in statement" entries are pre-auths that never settled at the pre-auth amount.
+  3. **Two-card setup is invisible:** the Gmail data has alerts from at least two cards (account masks `4537*****197****` and `4537*****606****`). The PWA shows both intermingled with no card filter. The statement is only for ONE card (the file name's `9017` ID).
+
+- **Fix options (NOT in Phase 30 scope — open for future decision):**
+  1. **Monthly statement import script** — read the Scotiabank xlsx, identify transactions not already in the sheet (match by amount + ±2 day window), add them as parser-style rows with a different flag. Best effort to close the 29-txn gap. Requires the user to download a statement xlsx each cycle and trigger an import.
+  2. **Manual entry workflow** — add a "Manual Transaction" form to the PWA. User adds known online charges as they happen. Tedious but bulletproof.
+  3. **Direct bank integration via Plaid / MX** — out of scope; paid API + complex auth flow.
+  4. **Pre-auth dedup heuristic** — for SHELL / PETRO-CANADA / hotel merchants where amount changes between auth and settle, after N days drop pre-auth rows that don't have a matching settled-amount-categorize. Risk: false drops.
+  5. **Card filter in PWA** — store card-account-mask in a new column, add a filter chip in the period bar. Requires schema change.
+
+- **Lesson:**
+  1. **Three sources of truth beats two.** Gmail + Sheet alone showed "duplicates exist" but couldn't quantify what % of real spending was being captured. Statement-as-third-source made the upstream limitation visible and measurable. Future debugging where the data pipeline matters: think about what additional source could disambiguate.
+  2. **"Working as designed" can still be unsatisfying.** Scotiabank's info-alert system is doing exactly what it advertises — alerting on authorizations of certain transaction types. But the PWA inherits that limitation as ~30% coverage gap in real spending. The fix isn't in our code; it's a product-level decision about whether to accept the gap, add a different data source, or change the architecture.
+  3. **Pre-auth vs settled amounts are a hidden cost.** Gas pump $250 pre-auth + actual $69.65 settle = $319.65 "spent" if we naively trust auth alerts. Most users won't notice until they compare to the statement. Pattern is worth flagging in the categorize UI: large round amounts at gas/hotel merchants are likely pre-auths and may be over-counted.
