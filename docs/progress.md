@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.20 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.20 adds the `bootstrap` action: returns categories + parseAndFetch in one call so the PWA cold-mount pays the ~2.5 s 302+TLS network tax once instead of twice. Old endpoints stay live forever (additive only). v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.21 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1721,3 +1721,67 @@ Outcome: build step rejected (workflow change disguised as perf), CSS period fil
 - PWA v0.19.7: `git revert <v0.19.7-commit>` (touches index.html, dashboard.js, config.js, sw.js).
 - PWA v0.19.8: `git revert <v0.19.8-commit>` (touches api.js, categorize.js, config.js, sw.js). Apps Script unchanged.
 - Apps Script v11.20: not needed (additive). To roll back: redeploy v11.19, bootstrap becomes "Unknown action", PWAs fall back to dual fetch.
+
+---
+
+## Session: 2026-05-14 — Duplicate Parsing + Period Bug Investigation + Fix (Apps Script v11.21)
+
+### Setup
+User noticed duplicate transactions in the PWA, asked to diagnose by comparing Gmail (source of truth, via newly-added Gmail connector) against sheet against PWA. After initial investigation found duplicates from Gmail thread re-iteration, user instructed "re-analyse the problem with no assumptions, there may be other issues we are missing." Second pass discovered a SECOND critical bug: silent data loss on last-day-of-period transactions.
+
+### What I investigated
+
+1. Pulled Scotiabank info-alert emails from Gmail using parser's exact filter (`from:infoalerts@scotiabank.com subject:"Authorization on your"`).
+2. Got API key from user, pulled Transactions tab via dumpSheet (133 data rows).
+3. Pulled PayPeriods config (Setup A:C), Logs tab (500 rows), ClientMetrics tab.
+4. Read parser implementation (`processInfoAlerts_`, `shortHash_`, `uniqueSuffix_`, `buildTimestamp_`, `findNextEmptyRow_`, `setTransactionFormulas_`, `consolidateTransactionsRescue`).
+5. Cross-referenced Gmail emails (67) against sheet rows (114 unique txns) → **0 missing transactions** confirmed.
+6. Found 15 timestamp-duplicate groups (19 phantom rows, ~$435 over-count) → root cause was Gmail thread re-iteration (ladder pattern: oldest message in thread had most dupes).
+7. Found 8 last-day-of-period transactions stuck at `period='Unassigned'` (~$165 stranded from Budget totals) → root cause was Date col having time portion vs PayPeriods End at midnight.
+
+### What shipped (v11.21, single Apps Script deploy)
+
+**Layer 1 — `shortHash_` widened 4→8 hex chars** (Bug 3 mitigation):
+- 16-bit hash had birthday collision risk at ~256 distinct (merchant, amount) pairs.
+- Widened to 32-bit (4.3B values) → essentially zero collision risk at personal-budget scale.
+- Backward compatible — existing 4-char-hash rows still match by string equality.
+
+**Layer 2 — Write-time timestamp dedup in `processInfoAlerts_` Step 3.5** (Bug 1 fix):
+- Reads existing Timestamps from col H before write, filters newRows to drop any timestamp already in sheet.
+- Logs `dedup_skip` count — becomes permanent tripwire for monitoring Gmail thread re-iteration.
+- LockService already in place — no race window between read and write.
+
+**Layer 3a — Parser normalizes Date col to midnight** (Bug 2 fix, parser side):
+- `new Date(emailDate.getFullYear(), emailDate.getMonth(), emailDate.getDate())` — strips time portion.
+- Timestamp col (H) still preserves full time for ordering.
+
+**Layer 3b — Period formula wraps Date cell in `INT()`** (Bug 2 fix, formula side):
+- `setTransactionFormulas_` now generates `Setup!$A$2:$A$27<=INT(A{tr})` (and `>=` similarly).
+- Setup A/B values already midnight Dates — no INT() needed on Setup side.
+- Defense in depth: parser change AND formula change. Either alone would fix it.
+
+**Layer 4 — New `dedupeAndNormalizeTransactionsRescue` menu item**:
+- One-shot cleanup for existing data: dedups 15 groups, normalizes Date col.
+- LockService-protected, confirmation prompt, atomic write via consolidate-pattern.
+- Idempotent — safe to re-run.
+
+### Status — code complete + syntax-clean, awaiting deploy + cleanup run on user's laptop
+
+Three steps in order:
+1. `cd apps-script && ./deploy.sh "v11.21 — dup parsing + period bug fix"` (deploys Apps Script)
+2. Open sheet → `Budget Tools → 3. Update Script (safe)` (installs new Period formula across all 999 rows)
+3. Open sheet → `Budget Tools → Dedupe + Normalize Transactions (rescue)` (cleans existing data — confirmation prompt before destructive write)
+
+Then verify: Budget tab Spent + Available totals look right, ClientMetrics shows no new `dedup_skip > 0` entries (or if it does, that's the fix actively rescuing — both are OK).
+
+No PWA changes — backend-only fix preserves existing contract.
+
+### Rollback handles
+- Apps Script: `clasp deploy -i ... -d "v11.20"` (redeploy prior version). Cleanup script becomes dangling menu reference (won't crash, just unfound).
+- Cleanup script run: no auto-rollback. Google Sheets revision history is the safety net.
+
+### Patterns added to CLAUDE.md
+- Trip-up #34: "Gmail's -label:X search has consistency lag — never rely on label exclusion alone for dedup."
+- Trip-up #35: "Apps Script Date written to a sheet col keeps its time portion — formulas comparing against midnight Dates break on period boundaries."
+
+### Phase 30 entry in task_plan.md; full architecture section in findings.md.

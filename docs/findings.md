@@ -1,6 +1,6 @@
 # Findings & Decisions
 
-> Reference document. Sections describe the system as it currently exists: **v11.20 Apps Script** (Phase 29 — new `bootstrap` action returning categories + parseAndFetch in one round-trip, halves cold-mount network cost in the PWA; v11.19 Phase 27 Budget tab Rolled Over column; v11.18 Goal archive flow + Setup col F filter; v11.17 read-only `handleParseAndFetch_`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.8 PWA on `main`** (cache v38; Phase 29.2 — Categorize cold mount uses bootstrap with transparent fallback to v0.15.4 dual fetch; Phase 29.1 — preconnect to script.google.com + cache-first Dashboard paint; pixel UI graduated to canonical on 2026-05-09 — multi-select category rail, FIXED summary-cell accordion with sticky panel; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available). v0.16.0 introduced persistent views; v0.15.4 was the original cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.6) is documented under "Pixel UI Theme System", "Multi-Select Category Rail", and "FIXED Summary-Cell Accordion". Workflow tooling under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) under "Budget Tab Schema Evolution". Cold-Start Round 2 (Phase 29) under "Cold-Start Round 2".**
+> Reference document. Sections describe the system as it currently exists: **v11.21 Apps Script** (Phase 30 — duplicate-parsing fix + period-boundary fix: write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` (4→8 hex) + parser normalizes Date col to midnight + Period formula wraps in `INT()` + `dedupeAndNormalizeTransactionsRescue` menu item for one-shot cleanup of 15 duplicate-timestamp groups + 8 stranded "Unassigned" rows; v11.20 Phase 29 — new `bootstrap` action returning categories + parseAndFetch in one round-trip, halves cold-mount network cost in the PWA; v11.19 Phase 27 Budget tab Rolled Over column; v11.18 Goal archive flow + Setup col F filter; v11.17 read-only `handleParseAndFetch_`; v11.16 hourly `processInfoAlertsTrigger`; v11.15 Budget B1 auto-snap; v11.14 archive endpoints; v11.13 `_elapsedMs` + `logClientMetrics` + ClientMetrics tab) + **v0.19.8 PWA on `main`** (cache v38; Phase 29.2 — Categorize cold mount uses bootstrap with transparent fallback to v0.15.4 dual fetch; Phase 29.1 — preconnect to script.google.com + cache-first Dashboard paint; pixel UI graduated to canonical on 2026-05-09 — multi-select category rail, FIXED summary-cell accordion with sticky panel; v0.19.3 paired with v11.19 — `parseDashboard` reads `row[6]` as available). v0.16.0 introduced persistent views; v0.15.4 was the original cold-start optimization. Single-ledger architecture + Saving tab with adaptive per-period formula. Bug-fix sub-sections are historical postmortems — the bugs are fixed, but the lessons are kept for future debugging. **v0.12 → v0.15.4 PWA restructure + redesign + metrics + cold-start optimization is documented below in "PWA Restructure (v0.12 → v0.14)", "Minimal Monochrome Redesign", "Client Metrics Pipeline", and "Cold-Start Optimization (v0.15.4)". Pixel UI overlay (v0.18.0 → v0.19.6) is documented under "Pixel UI Theme System", "Multi-Select Category Rail", and "FIXED Summary-Cell Accordion". Workflow tooling under "Claude Code Workflow Tooling". Budget tab Rolled Over column (v11.19) under "Budget Tab Schema Evolution". Cold-Start Round 2 (Phase 29) under "Cold-Start Round 2".**
 >
 > For current state and workflow: see `CLAUDE.md` (root) and `docs/task_plan.md`.
 > For the integrated review work that produced v11.3-v11.6: see `docs/progress.md` 2026-04-19 entry.
@@ -1958,3 +1958,125 @@ After the rulepop architecture comparison surfaced "what could we borrow?", thre
   3. **Backward-compatible by construction beats backward-compatible by versioning.** The bootstrap endpoint is purely additive — old endpoints stay live forever. New PWA detects unknown action and falls back. No version negotiation, no feature flags, no contract migration. Compare to a hypothetical "bootstrap REPLACES categories+parseAndFetch" design that would have required a synchronized deploy. Ours can deploy Apps Script and PWA hours apart with no user-visible breakage (just a one-time 2.5 s penalty during the gap).
   4. **Keep the side-effect application close to the data.** `startBootstrap_` applies `store.setCategories` + render side-effects inside the helper, not at the call site. This means cold mount renders the chip rail as soon as categories arrive — even before refresh() finishes filtering transactions through the sync queue. Centralizing the side-effect prevented a class of "rail flickers because categories arrived but render didn't fire" bugs.
   5. **Workflow improvements aren't perf improvements.** Build steps, content-hashed assets, automated cache-busting — all real wins for developer experience but invisible to the user opening the app. When the perf complaint is "cold open is slow," look for round-trips, not bytes.
+
+### Duplicate Parsing + Period Bug (Apps Script v11.21 — Phase 30)
+
+User reported duplicate transactions in the PWA. Investigation (Gmail connector + dumpSheet against API key) discovered TWO critical bugs causing the Budget tab totals to be wrong in opposite directions.
+
+- **Symptom (in user terms):** PWA list showed the same merchant+amount+date appearing 2-4 times, e.g. "LS MISSION FUN & GAMES $114.29 (2026-04-29)" listed twice. Three concrete cases the user pointed at: LS MISSION ×2, TIM HORTONS #7546 $12.87 ×2 (actually 3 in sheet — 1 categorized + 2 uncategorized), PETRO-CANADA 85969 $50.00 ×2.
+
+- **Investigation methodology (the "no assumptions" pass):**
+  1. **Source (Gmail):** queried `from:infoalerts@scotiabank.com subject:"Authorization on your" newer_than:30d` → 67 emails, all with `Budget/Processed` label applied. Same query with `-label:Budget-Processed` → 0 results (label exclusion currently works).
+  2. **Sheet (Transactions tab via dumpSheet):** 133 data rows; 15 distinct Timestamp strings with multiple rows (some 2×, some 3×, one 4×); ~$435 of phantom over-counted spending.
+  3. **Logs tab:** 27 `triggerParseEmails` runs, each shows `parsed:N threads:1` where N varies 1-4. 0 lock timeouts. 0 parser errors.
+  4. **Completeness check:** all 67 Gmail emails present in sheet at least once → no missing transactions; the only problem is over-counting.
+  5. **Ladder pattern discovered:** within Gmail thread `19decb304f53f0f7` (May 3-4, 4 messages), 1st (oldest) message has 4 sheet rows, 2nd has 3, 3rd has 2, 4th has 1 — each new message triggers re-parse of all prior messages in the thread.
+  6. **Period anomaly noticed in the same dump:** several rows have `period='Unassigned'` despite the Date being clearly inside a known period. Found 100% of last-day-of-period transactions affected — Mar 31, Apr 14, Apr 28, May 12 all show 'Unassigned' regardless of categorization status.
+
+- **Bug 1 — Duplicate parsing (root cause):**
+  Scotiabank info-alerts all share the literal same subject ("Authorization on your credit account"), causing Gmail to bundle them into single threads. The parser's loop:
+
+  ```js
+  for (var t = 0; t < allMessages.length; t++) {
+    for (var m = 0; m < allMessages[t].length; m++) {   // <-- iterates ALL messages
+      var msg = allMessages[t][m];
+      // ... parse and push to newRows
+    }
+  }
+  ```
+
+  When a NEW message arrives in an already-`Budget/Processed`-labeled thread, Gmail's negative-label search briefly re-matches the thread (eventual consistency between message-add and label-inheritance for new messages in existing labeled threads). On the re-match, the inner loop iterates ALL messages — old AND new. The S3 hash-suffix mechanism (Phase 14) was designed to dedup within a batch using a per-call collision counter (`batchKeys`), but the counter resets per call, so cross-batch re-processing produces byte-identical timestamps.
+
+- **Bug 2 — Last-day-of-period silent loss (concurrent discovery):**
+  The parser wrote `emailDate` to col A as a full Date object including time (e.g. `May 12 2026 12:50:00`). The Period formula at `setTransactionFormulas_` line 2674 compared this against PayPeriods stored at midnight:
+
+  ```
+  =IF(A{tr}="", "", IFERROR(FILTER(Setup!$C$2:$C$27,
+    Setup!$A$2:$A$27 <= A{tr},          ← Start <= Date (works any time of day)
+    Setup!$B$2:$B$27 >= A{tr}           ← End >= Date (FAILS on last day with time)
+  ), "Unassigned"))
+  ```
+
+  On the LAST day of a period: `End (May 12 midnight) >= A (May 12 12:50)` → FALSE → no period matches → "Unassigned" → row silently excluded from `Budget!Spent` SUMIFS keyed on Period+Category. Mid-period transactions worked because End was a future date. Only last-day transactions failed.
+
+- **Bug 3 — Hash birthday collision (latent, mitigated):**
+  `shortHash_` used 4 hex chars (16 bits, 65,536 values). Birthday paradox: ~256 distinct (merchant, amount) pairs → 50% collision probability. Not actively a problem yet, but became a latent false-drop risk under the new write-time dedup: if a real new transaction's hash collided with an existing row's hash, the dedup would skip the real transaction.
+
+- **Fix (v11.21 — single deploy, three layers):**
+
+  ```js
+  // Layer 1: widened shortHash_ from 2 → 4 MD5 bytes (4 → 8 hex chars).
+  // Backward compatible — existing 4-char-hash rows still match by string equality.
+  function shortHash_(input) {
+    var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, input);
+    var hex = '';
+    for (var i = 0; i < 4; i++) {  // was 2
+      var b = bytes[i] & 0xff;
+      hex += (b < 16 ? '0' : '') + b.toString(16);
+    }
+    return hex;
+  }
+
+  // Layer 2: write-time timestamp dedup in processInfoAlerts_ Step 3.5.
+  // LockService already in place — no race window between read and write.
+  if (newRows.length > 0) {
+    var existingTimestamps = {};
+    var lastRowForDedup = txn.getLastRow();
+    if (lastRowForDedup >= 2) {
+      var existingH = txn.getRange(2, 8, lastRowForDedup - 1, 1).getValues();
+      for (var ei = 0; ei < existingH.length; ei++) {
+        var ets = existingH[ei][0];
+        if (ets !== '' && ets !== null && ets !== undefined) {
+          existingTimestamps[String(ets)] = true;
+        }
+      }
+    }
+    var beforeDedup = newRows.length;
+    newRows = newRows.filter(function (r) { return !existingTimestamps[r.timestamp]; });
+    var skipped = beforeDedup - newRows.length;
+    if (skipped > 0) {
+      logActivity_('processInfoAlerts', 0, 'dedup_skip',
+        'skipped ' + skipped + ' duplicate rows (already in sheet)', '');
+    }
+  }
+
+  // Layer 3a: parser writes Date column at midnight (no time portion).
+  var dateOnly = new Date(
+    emailDate.getFullYear(),
+    emailDate.getMonth(),
+    emailDate.getDate()
+  );
+  newRows.push({ date: dateOnly, ... });
+
+  // Layer 3b: Period formula wraps A{tr} in INT() so comparison tolerates time.
+  // Setup A/B values are already midnight Dates — no INT() needed on Setup side.
+  '=IF(A' + tr + '="","",IFERROR(FILTER(Setup!$C$2:$C$27,'
+    + 'Setup!$A$2:$A$27<=INT(A' + tr + '),'
+    + 'Setup!$B$2:$B$27>=INT(A' + tr + ')),"Unassigned"))'
+  ```
+
+  Plus `dedupeAndNormalizeTransactionsRescue` — one-shot menu item for existing data. LockService-protected. Groups by Timestamp string, picks "best" row per group (any non-empty Category wins; multi-categorized warns), normalizes Date to midnight, atomic write via existing consolidate-pattern (clear A/D/F/H → write back, leave E/G formulas alone).
+
+- **Edge cases handled:**
+  - Manual rows (Timestamp blank) pass through cleanup untouched — different identity rule.
+  - Multi-categorized duplicate groups (user fixed two siblings manually) — kept first, warning logged.
+  - Hash format change doesn't break PWA — `handleBatchCategorize_` matches by exact Timestamp string equality regardless of hash length.
+  - `dedup_skip` log entries become a permanent tripwire — if they stay > 0 post-deploy, Gmail thread re-iteration is still happening (just rescued by dedup); if 0, root cause stopped on its own.
+  - Cleanup is idempotent — re-running drops no rows (no dupes left) and re-normalizes no dates (already midnight).
+  - Future regression in either Date normalization OR Period formula can't reintroduce Bug 2 alone — needs both to fail simultaneously.
+  - Same (timestamp, merchant, amount) tuple in two real distinct emails (e.g. two simultaneous taps at a vending machine same second): with widened hash, the per-batch collision counter would still produce `#xxxx-2` for the second one, distinguishing them; cross-batch case is still a false-drop, but the probability is now astronomically low given 32-bit hash.
+
+- **Verification methodology before any code change:**
+  - Queried Gmail with parser's exact filter → 0 unlabeled emails → label exclusion working NOW.
+  - Listed Gmail labels → confirmed `Label_3 = Budget/Processed` (not stale).
+  - Pulled PayPeriods config → confirmed row 10: "Apr 29, 2026 → May 12, 2026" → May 12 IS within "Apr 29 - May 12" period → 'Unassigned' is a bug, not a config gap.
+  - Counted 'Unassigned' rows by date → 8 found, all on last-of-period dates → 100% correlation.
+  - Cross-referenced 67 Gmail emails vs sheet → 0 missing → bug is purely over-count, never under-count.
+
+- **Lesson:**
+  1. **Never trust upstream dedup alone; dedup at the write site.** Gmail's label exclusion was correct most of the time but had eventual-consistency lag for newly-arriving messages in already-labeled threads. The parser had no defensive write-time check, so the entire correctness depended on Gmail's search index. Anywhere downstream of an "external system says it's safe" gate, add a local check too. Codified as trip-up #34.
+  2. **Date objects written to spreadsheet columns carry their time portion — formulas comparing against midnight Dates break on boundaries.** Two-layer fix (normalize at write + INT() in formula) means either layer alone fixes it; both together means a future regression in either can't reintroduce the bug. Codified as trip-up #35.
+  3. **Hash strength matters when a hash becomes part of a dedup contract.** The original 4-char hash was fine for "distinguish two charges arriving the same second within one batch" but became a latent false-drop risk under the new cross-batch write-time dedup. Strengthening from 16 → 32 bits eliminated the risk for ~zero code cost.
+  4. **Investigate with no assumptions — the first bug found isn't always the only one.** The period bug was discovered WHILE investigating the duplicate bug (noticed `period='Unassigned'` on May 12 in the dump, asked "why?"). If the investigation had stopped at "duplicates found, here's the fix," the period silent-loss bug would have continued unnoticed. The user's instruction to "double-check assumptions and look for other issues" directly produced the Bug 2 discovery.
+  5. **Cross-reference the source of truth, not just the affected layer.** Pulling Gmail directly confirmed (a) the parser query works as documented, (b) every email exists in the sheet (no missing data), (c) the duplicates are downstream of Gmail (not Gmail re-delivering). Without the source-side verification, hypothesizing the root cause from sheet data alone could have led to wrong fix.
+  6. **`dedup_skip` logging is a permanent feedback loop on the fix.** Beyond fixing the bug, the log line tells us whether the upstream behavior changed on its own (count drops to 0) or whether the dedup is doing active rescue work (count stays > 0). Either signal informs future architectural decisions.

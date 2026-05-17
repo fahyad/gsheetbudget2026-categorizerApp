@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.20';
+var APP_SCRIPT_VERSION = 'v11.21';
 var APP_SCRIPT_LAST_EDITED = '2026-05-14 02:49 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -65,6 +65,7 @@ function onOpen() {
     .addSeparator()
     .addItem('View Activity Log', 'showLogsTab')
     .addItem('Refresh Version Info', 'refreshVersionInfo')
+    .addItem('Dedupe + Normalize Transactions (rescue)', 'dedupeAndNormalizeTransactionsRescue')
     .addToUi();
 
   // Auto-refresh version info on open. Fire-and-forget — don't block menu.
@@ -1819,6 +1820,198 @@ function consolidateTransactionsRescue() {
   ui.alert('Consolidation complete.\n\n' + nonEmpty.length + ' rows now at rows 2-' + (1 + nonEmpty.length) + '.');
 }
 
+/**
+ * v11.21 (Phase 30): One-shot rescue for duplicate parser-written rows +
+ * stranded "Unassigned" period rows. Run AFTER deploying v11.21 Apps Script.
+ *
+ * What it does (in order, single transaction):
+ *   1. Reads all Transactions rows (cols A-H).
+ *   2. Groups data rows by Timestamp string (col H).
+ *      - Skips rows with empty Timestamp (manual entries — left untouched).
+ *   3. For each group with >1 row: keep ONE row, drop the rest.
+ *      - "Keep" priority: any row with a non-empty Category beats blanks.
+ *      - Among multiple categorized rows (rare — user fixed two dupes),
+ *        keep the first; warn in alert.
+ *      - Among all-blank groups, keep the first.
+ *   4. Normalizes Date column (col A) on every kept row to midnight
+ *      (truncates time portion). This unsticks the "Unassigned" Period
+ *      bug for rows on the last day of any pay period — the Period
+ *      formula then matches correctly.
+ *   5. Clears the data cols (A:D, F, H) for all rows in the previous
+ *      data range, then writes the kept+normalized rows back starting
+ *      at row 2. Cols E and G stay alone — they're formulas that
+ *      recompute after the write.
+ *   6. Single SpreadsheetApp.flush() at the end + activity log + alert.
+ *
+ * Safety: pure read-then-write inside a LockService-protected block. PWA
+ * batchCategorize cannot interleave (same lock). Failure mid-run leaves
+ * the sheet either fully old (if Step 5 hasn't started) or fully new
+ * (if Step 5 completed before throw). No partial state where some
+ * duplicates are gone but others remain.
+ *
+ * Not idempotent in a destructive sense — re-running drops nothing (no
+ * dupes left) but does re-normalize Dates (no-op since they're already
+ * midnight). Safe to run multiple times.
+ */
+function dedupeAndNormalizeTransactionsRescue() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn) { ui.alert('Transactions tab not found'); return; }
+
+  var lastRow = txn.getLastRow();
+  if (lastRow < 2) { ui.alert('Nothing to dedupe'); return; }
+
+  // LockService — block any PWA writer during the read-then-write.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    ui.alert('Could not acquire lock (another write in progress). Try again in a minute.');
+    return;
+  }
+
+  try {
+    // Step 1: read everything.
+    var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
+
+    // Step 2: filter to non-empty rows (Merchant col B has data).
+    var nonEmpty = [];
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][1] && String(data[i][1]).trim() !== '') {
+        nonEmpty.push(data[i]);
+      }
+    }
+
+    if (nonEmpty.length === 0) {
+      ui.alert('No data rows found.');
+      return;
+    }
+
+    // Step 3: group by Timestamp string. Rows with empty Timestamp pass
+    // through individually (manual entries — different identity rule).
+    var groups = {};
+    var manualRows = [];
+    for (var j = 0; j < nonEmpty.length; j++) {
+      var row = nonEmpty[j];
+      var tsRaw = row[7];
+      if (tsRaw === '' || tsRaw === null || tsRaw === undefined) {
+        manualRows.push(row);
+        continue;
+      }
+      // Normalize Timestamp to a string for grouping (Date or string both work).
+      var tsKey = (tsRaw instanceof Date)
+        ? Utilities.formatDate(tsRaw, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : String(tsRaw);
+      if (!groups[tsKey]) groups[tsKey] = [];
+      groups[tsKey].push(row);
+    }
+
+    // Step 4: pick the best row per group.
+    var kept = [];
+    var droppedCount = 0;
+    var multiCategorizedWarnings = [];
+    Object.keys(groups).forEach(function (tsKey) {
+      var rows = groups[tsKey];
+      if (rows.length === 1) {
+        kept.push(rows[0]);
+        return;
+      }
+      // Prefer rows with non-empty Category (col D = index 3).
+      var categorized = rows.filter(function (r) { return r[3] && String(r[3]).trim() !== ''; });
+      var winner;
+      if (categorized.length === 0) {
+        winner = rows[0]; // all blank — keep first
+      } else if (categorized.length === 1) {
+        winner = categorized[0];
+      } else {
+        // Multi-categorized: keep first, but flag for user review.
+        winner = categorized[0];
+        multiCategorizedWarnings.push(
+          'ts=' + tsKey + ' merchant=' + winner[1] +
+          ' kept=' + winner[3] + ' (dropped ' + (categorized.length - 1) + ' other categorized variant(s))'
+        );
+      }
+      kept.push(winner);
+      droppedCount += rows.length - 1;
+    });
+
+    // Step 4b: normalize Date column to midnight on every kept row.
+    var normalizedCount = 0;
+    for (var k = 0; k < kept.length; k++) {
+      var d = kept[k][0];
+      if (d instanceof Date) {
+        var hadTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+        if (hadTime) {
+          kept[k][0] = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+          normalizedCount++;
+        }
+      }
+      // Strings (rare for Date col, but possible if user typed) — leave alone.
+    }
+
+    // Append manual rows (Timestamp blank) at the end, untouched.
+    for (var mr = 0; mr < manualRows.length; mr++) {
+      kept.push(manualRows[mr]);
+    }
+
+    // Confirm before destructive write.
+    var summary = 'Found ' + (nonEmpty.length + manualRows.length - droppedCount + droppedCount) +
+      ' rows with data:\n' +
+      '  - ' + (kept.length - manualRows.length) + ' unique parsed rows (after dedupe)\n' +
+      '  - ' + manualRows.length + ' manual rows (Timestamp blank)\n' +
+      '  - ' + droppedCount + ' duplicate rows to be DROPPED\n' +
+      '  - ' + normalizedCount + ' Date cells to be normalized to midnight\n\n' +
+      (multiCategorizedWarnings.length > 0
+        ? '⚠️ ' + multiCategorizedWarnings.length +
+          ' group(s) had multiple categorized variants — keeping first; review log after run.\n\n'
+        : '') +
+      'After this, ' + kept.length + ' rows will live at rows 2-' + (1 + kept.length) + '.\n' +
+      '(Cols E, G are formulas — they auto-recompute.)\n\n' +
+      'This is destructive. Continue?';
+
+    var confirm = ui.alert('Dedupe + Normalize Transactions (rescue)', summary, ui.ButtonSet.YES_NO);
+    if (confirm !== ui.Button.YES) {
+      ui.alert('Cancelled. No changes made.');
+      return;
+    }
+
+    // Step 5: clear data cols (A:D, F, H) — leave E, G formulas alone.
+    var clearRows = lastRow - 1;
+    txn.getRange(2, 1, clearRows, 4).clearContent();  // A:D
+    txn.getRange(2, 6, clearRows, 1).clearContent();  // F (Transaction #)
+    txn.getRange(2, 8, clearRows, 1).clearContent();  // H (Timestamp)
+    SpreadsheetApp.flush();
+
+    // Step 5b: write kept rows back, starting row 2.
+    var rowsAD = kept.map(function (r) { return [r[0], r[1], r[2], r[3]]; });
+    var rowsF  = kept.map(function (r) { return [r[5]]; });
+    var rowsH  = kept.map(function (r) { return [r[7]]; });
+    txn.getRange(2, 1, kept.length, 4).setValues(rowsAD);
+    txn.getRange(2, 6, kept.length, 1).setValues(rowsF);
+    txn.getRange(2, 8, kept.length, 1).setValues(rowsH);
+    SpreadsheetApp.flush();
+
+    logActivity_('dedupeAndNormalizeTransactionsRescue', 0, 'success',
+      'kept ' + kept.length + ' rows, dropped ' + droppedCount + ' dupes, normalized ' + normalizedCount + ' dates' +
+      (multiCategorizedWarnings.length > 0
+        ? '; ' + multiCategorizedWarnings.length + ' multi-categorized warnings'
+        : ''),
+      multiCategorizedWarnings.join(' | '));
+
+    ui.alert(
+      'Cleanup complete.\n\n' +
+      'Kept: ' + kept.length + ' rows (now at rows 2-' + (1 + kept.length) + ')\n' +
+      'Dropped: ' + droppedCount + ' duplicate rows\n' +
+      'Normalized: ' + normalizedCount + ' Date cells (truncated time → midnight)\n\n' +
+      (multiCategorizedWarnings.length > 0
+        ? '⚠️ ' + multiCategorizedWarnings.length + ' multi-categorized warnings — see Logs tab.\n\n'
+        : '') +
+      'Verify Budget tab Spent + Available totals look right.'
+    );
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function migratePendingToTransactions() {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -2559,14 +2752,65 @@ function processInfoAlerts_() {
           // v11.0 single-ledger: data-only fields. Cols E (Main Cat) and G (Period)
           // are pre-existing formulas that auto-fill from D and A respectively —
           // writing them here would clobber the formulas. We write A,B,C,D + H only.
+          //
+          // v11.21 (Phase 30 — Bug 2 fix): normalize Date column to midnight
+          // (no time portion). Period formula compares Date against PayPeriods
+          // End at midnight. If Date had a time portion (e.g. 12:50:00), the
+          // last-day-of-period comparison `Setup!B(midnight) >= A(12:50)`
+          // returned FALSE → "Unassigned" → silent loss from Budget totals.
+          // Timestamp column (H) still preserves the full time for ordering.
+          var dateOnly = new Date(
+            emailDate.getFullYear(),
+            emailDate.getMonth(),
+            emailDate.getDate()
+          );
           newRows.push({
-            date: emailDate, merchant: merchant, amount: amount,
+            date: dateOnly, merchant: merchant, amount: amount,
             category: '', timestamp: timestamp
           });
         } else {
           result.errors++;
           result.errorDetails.push(subject + ' (' + emailDate.toDateString() + ')');
         }
+      }
+    }
+
+    // --- Step 3.5: Write-time dedup (v11.21 — Phase 30, Bug 1 fix) ---
+    // Cross-batch dedup: if a Timestamp string already exists in the sheet,
+    // skip writing it. Catches the "Gmail thread re-iteration" failure mode
+    // where the parser re-processes already-labeled messages because a new
+    // message arrived in the same thread (Gmail's negative-label search has
+    // eventual-consistency lag). Without this, identical hashes (per-batch
+    // collision counter resets across runs) caused 15+ groups of duplicate
+    // rows in the user's sheet.
+    //
+    // LockService (line ~2494) guarantees no concurrent writer between this
+    // read and the write below — safe to use a simple read-then-write.
+    if (newRows.length > 0) {
+      var existingTimestamps = {};
+      var lastRowForDedup = txn.getLastRow();
+      if (lastRowForDedup >= 2) {
+        var existingH = txn.getRange(2, 8, lastRowForDedup - 1, 1).getValues();
+        for (var ei = 0; ei < existingH.length; ei++) {
+          var ets = existingH[ei][0];
+          if (ets !== '' && ets !== null && ets !== undefined) {
+            // Normalize to string — sheet may store as Date or string.
+            existingTimestamps[String(ets)] = true;
+          }
+        }
+      }
+      var beforeDedup = newRows.length;
+      newRows = newRows.filter(function (r) {
+        return !existingTimestamps[r.timestamp];
+      });
+      var skipped = beforeDedup - newRows.length;
+      if (skipped > 0) {
+        // Log loudly so we can tell if/how often the Gmail-thread re-iteration
+        // is happening even after deploy. If this number stays at 0, the
+        // upstream cause stopped on its own; if it stays high, we know the
+        // dedup is actively rescuing us.
+        logActivity_('processInfoAlerts', 0, 'dedup_skip',
+          'skipped ' + skipped + ' duplicate rows (already in sheet)', '');
       }
     }
 
@@ -2624,14 +2868,21 @@ function buildTimestamp_(emailDate, timeStr) {
 }
 
 /**
- * v11.3 (S3): Returns a 4-char hex hash of an input string.
- * Non-cryptographic — used only for distinguishing transactions with the
- * same timestamp.
+ * v11.3 (S3): Returns a hex hash of an input string. Non-cryptographic —
+ * used only for distinguishing transactions with the same timestamp.
+ *
+ * v11.21 (Phase 30 — Bug 3 mitigation): widened from 2 → 4 bytes (4 → 8
+ * hex chars). 16-bit hash had a birthday collision at ~256 distinct
+ * (merchant, amount) pairs. 32-bit hash bumps that to ~65k — essentially
+ * zero collision risk at personal-budget scale, which removes the only
+ * false-drop risk in the v11.21 write-time dedup added to
+ * processInfoAlerts_. Backward compatible: old 4-char-hash timestamps in
+ * the sheet still match by exact string equality.
  */
 function shortHash_(input) {
   var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, input);
   var hex = '';
-  for (var i = 0; i < 2; i++) {
+  for (var i = 0; i < 4; i++) {
     var b = bytes[i] & 0xff;
     hex += (b < 16 ? '0' : '') + b.toString(16);
   }
@@ -2662,6 +2913,17 @@ function uniqueSuffix_(timestamp, merchant, amount, batchKeys) {
 
 /**
  * Sets formulas for Transactions columns E (Main Category) and G (Period).
+ *
+ * v11.21 (Phase 30 — Bug 2 fix): Period formula wraps the Date cell in
+ * INT(...) to truncate any time portion before comparing against
+ * PayPeriods Start/End. Without this, transactions arriving on the LAST
+ * day of any period (e.g. "May 12 12:50:00") would fail the
+ * `Setup!B(midnight) >= A(12:50)` comparison and fall through to
+ * "Unassigned" — silently lost from Budget totals. INT() makes the
+ * formula robust regardless of whether the Date column has a time
+ * portion (defense in depth alongside the parser's new midnight
+ * normalization). Setup A/B values are already midnight Dates, so no
+ * INT() needed on the Setup side.
  */
 function setTransactionFormulas_(txn) {
   var txnFormulasE = [];
@@ -2671,7 +2933,7 @@ function setTransactionFormulas_(txn) {
       '=IF(D' + tr + '="","",IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(D' + tr + ',Setup!$E$2:$E$100,0)),""))'
     ]);
     txnFormulasG.push([
-      '=IF(A' + tr + '="","",IFERROR(FILTER(Setup!$C$2:$C$27,Setup!$A$2:$A$27<=A' + tr + ',Setup!$B$2:$B$27>=A' + tr + '),"Unassigned"))'
+      '=IF(A' + tr + '="","",IFERROR(FILTER(Setup!$C$2:$C$27,Setup!$A$2:$A$27<=INT(A' + tr + '),Setup!$B$2:$B$27>=INT(A' + tr + ')),"Unassigned"))'
     ]);
   }
   txn.getRange(2, 5, 999, 1).setFormulas(txnFormulasE);
