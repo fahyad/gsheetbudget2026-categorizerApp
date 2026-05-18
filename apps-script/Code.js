@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.24';
+var APP_SCRIPT_VERSION = 'v11.25';
 var APP_SCRIPT_LAST_EDITED = '2026-05-17 20:08 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -2364,8 +2364,10 @@ function buildWorkbook() {
   // --- Create / get tabs ---
   // (Pending tab removed in v11.0 — single-ledger architecture; Transactions
   // is now the source of truth, with empty Category = "needs categorization".)
-  // Reports tab added v11.23 (Phase 32) — spending summary by category.
-  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions', 'Saving', 'Reports'];
+  // (Reports tab existed v11.23-v11.24 / Phase 32, removed v11.25 / Phase 33 —
+  // user adopted native Sheets slicers on Transactions tab as a simpler
+  // alternative for the common "show me Category X / Period Y" filtering.)
+  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions', 'Saving'];
   var sheets = {};
   for (var t = 0; t < tabNames.length; t++) {
     var name = tabNames[t];
@@ -2530,15 +2532,9 @@ function buildWorkbook() {
   // Build Saving tab (one-time goal tracker)
   buildSavingTab_(sheets['Saving'], ss);
 
-  // Build Reports tab (v11.23 — Phase 32). Must come AFTER setNamedRanges_
-  // because formulas reference PayPeriods_*, CategoryList, CategoryMain,
-  // FixedExpenses_*, Transactions_*. Named ranges are set inside the prior
-  // build steps; if any are missing the Reports formulas will show #NAME?.
-  buildReportsTab_(sheets['Reports'], ss);
-
   ui.alert(
     'Workbook built!\n\n' +
-    '7 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Saving, Reports\n' +
+    '6 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Saving\n' +
     'Logs tab will be created on first API call.\n' +
     '4 fixed expenses defined (add more anytime — no script needed)\n' +
     '16 named ranges defined\n\n' +
@@ -2627,14 +2623,6 @@ function updateWorkbook() {
   } else {
     refreshSavingTab_(saving, ss);
   }
-
-  // --- Reports tab (v11.23 — Phase 32) ---
-  // Always rebuild (no user-entered data outside D4/D5 custom-range cells,
-  // and we want any schema changes to land on Update Script). Same
-  // setNamedRanges_-must-come-first concern as Saving tab.
-  var reports = ss.getSheetByName('Reports');
-  if (!reports) reports = ss.insertSheet('Reports');
-  buildReportsTab_(reports, ss);
 
   // --- Update Budget category formulas ---
   // v11.12: replaced the in-place per-row refresh loop with a full rebuild
@@ -3339,469 +3327,6 @@ function applySavingStructure_(saving, ss) {
 }
 
 // ================================================================
-// REPORTS TAB BUILDER (v11.23 — Phase 32)
-// ================================================================
-//
-// Layout (6 cols A-F):
-//   Row 1     REPORTS — Spending by Category   [section header]
-//   Row 2     Time frame: | <dropdown>     | | From: | <date formula>
-//   Row 3                 | <small note>   | | To:   | <date formula>
-//   Row 4                 | Custom range:  | | From: | <yellow user input>
-//   Row 5                 |                | | To:   | <yellow user input>
-//   [Frozen at row 5]
-//   Row 6     SUMMARY                                            [section header]
-//   Row 7     Total income | $X | Total spent | $Y
-//   Row 8     Net (inc-spent) | $Z | Total txns | N
-//   Row 9     (blank)
-//   Row 10    INCOME                                             [section header]
-//   Row 11    Main | Sub | Amount | Count | Sparkline | %
-//   Row 12-16 (income data — LET spills, up to ~5 rows)
-//   Row 17    (blank)
-//   Row 18    SPENDING BY CATEGORY (sorted by Spent, descending) [section header]
-//   Row 19    Main | Sub | Spent | Count | Sparkline | %
-//   Row 20-49 (variable spending data — LET spills, up to 30 rows)
-//   Row 50    Uncategorized | (needs categorization in PWA) | $ | N | bar | %    (v11.24)
-//   Row 51    Fixed | Fixed Expenses (scheduled) | $ | — | bar | %
-//   Row 52    TOTAL row
-//   Row 53    (blank)
-//   Row 54    DRILL-DOWN — Transactions for Selected Category    [section header]
-//   Row 55    Category: | <dropdown>
-//   Row 56    (blank)
-//   Row 57    Date | Merchant | Amount | (blank) | Period | Timestamp
-//   Row 58-87 (drill-down spill — up to 30 transactions)
-//   Row 88    Total in [category] | $
-//
-// Reactive data flow:
-//   - User picks B2 dropdown → D2/D3 formulas recompute From/To
-//   - All SUMIFS / FILTER / SPARKLINE / heat-map references propagate
-//   - User picks B55 dropdown → drill-down FILTER recomputes
-//
-// All zero-spent categories are filtered out by the FILTER in the
-// spending LET. No row hiding needed.
-
-function buildReportsTab_(reports, ss) {
-  reports.clear();
-  reports.setTabColor('#5c6bc0'); // A1a — indigo (matches Budget tab family)
-
-  // Hide unused columns past F.
-  if (reports.getMaxColumns() > 6) {
-    reports.hideColumns(7, reports.getMaxColumns() - 6);
-  }
-
-  // Column widths (tuned for the 6-col layout per mockup).
-  // D is wider than purely-Count would need so it can hold Period strings
-  // in the drill-down section (e.g., "Apr 29 - May 12").
-  reports.setColumnWidth(1, 170); // A: Main / Date
-  reports.setColumnWidth(2, 200); // B: Sub / Merchant
-  reports.setColumnWidth(3, 120); // C: Spent / Amount
-  reports.setColumnWidth(4, 130); // D: Count (spending), Period (drill)
-  reports.setColumnWidth(5, 160); // E: Sparkline
-  reports.setColumnWidth(6, 100); // F: % text
-
-  applyReportsStructure_(reports, ss);
-
-  reports.setFrozenRows(5);
-}
-
-/**
- * Writes the Reports tab structure: section headers, controls, formulas,
- * data validation, conditional formatting. Safe to re-run — overwrites
- * everything. (Reports has no user-entered data outside the optional
- * custom date range cells D4/D5 which are preserved if you call
- * refreshReportsTab_ instead — for v1 we just rebuild on Update Script.)
- */
-function applyReportsStructure_(reports, ss) {
-  // -------------------------- Section header style --------------------------
-  // A2a default — dark indigo bg + white text bold 11pt.
-  var SECTION_BG = '#1a237e';
-  var SECTION_FG = '#ffffff';
-  var SUBHEADER_BG = '#e8eaf6';
-  var SUBHEADER_FG = '#1a237e';
-  var YELLOW_INPUT = '#fff8e1';
-  var INCOME_GREEN = '#137333';
-
-  // ============================================================
-  // ZONE 1: CONTROLS (rows 1-5)
-  // ============================================================
-
-  // Row 1 — main section header (merged A1:F1)
-  reports.getRange('A1:F1').merge()
-    .setValue('REPORTS — Spending by Category')
-    .setBackground(SECTION_BG).setFontColor(SECTION_FG)
-    .setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('left').setVerticalAlignment('middle');
-  reports.setRowHeight(1, 26);
-
-  // Row 2: Time frame
-  reports.getRange('A2').setValue('Time frame:').setFontColor('#5f6368');
-  // B2: dropdown — populated by data validation below
-  reports.getRange('D2').setValue('From:').setFontColor('#5f6368');
-  // Row 3
-  reports.getRange('B3').setValue('(pick "Custom" to enter your own dates below)')
-    .setFontColor('#5f6368').setFontStyle('italic').setFontSize(9);
-  reports.getRange('D3').setValue('To:').setFontColor('#5f6368');
-  // Row 4: Custom range From input
-  reports.getRange('B4').setValue('Custom range — only used when "Custom" selected:')
-    .setFontColor('#5f6368').setFontStyle('italic').setFontSize(9);
-  reports.getRange('D4').setValue('From:').setFontColor('#5f6368');
-  reports.getRange('E4').setBackground(YELLOW_INPUT).setNumberFormat('mmm d, yyyy');
-  // Row 5: Custom range To input
-  reports.getRange('D5').setValue('To:').setFontColor('#5f6368');
-  reports.getRange('E5').setBackground(YELLOW_INPUT).setNumberFormat('mmm d, yyyy');
-
-  // Time-frame dropdown — data validation on B2
-  var timeFrames = [
-    'Today',
-    'This Week',
-    'Last 7 Days',
-    'This Month',
-    'Last Month',
-    'This Period',
-    'Last Period',
-    'YTD',
-    'Last Year',
-    'All Time',
-    'Custom'
-  ];
-  var tfRule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(timeFrames, true)
-    .setAllowInvalid(false)
-    .build();
-  reports.getRange('B2').setDataValidation(tfRule).setValue('This Period');
-
-  // E2 / E3 — computed From/To formulas based on B2 (and E4/E5 when Custom).
-  reports.getRange('E2').setFormula(buildReportsFromFormula_()).setNumberFormat('mmm d, yyyy');
-  reports.getRange('E3').setFormula(buildReportsToFormula_()).setNumberFormat('mmm d, yyyy');
-
-  // ============================================================
-  // ZONE 2: SUMMARY (rows 6-51)
-  // ============================================================
-
-  // Row 6 — SUMMARY section header (merged)
-  reports.getRange('A6:F6').merge()
-    .setValue('SUMMARY')
-    .setBackground(SECTION_BG).setFontColor(SECTION_FG)
-    .setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('left');
-
-  // Row 7-8: totals strip. Uses E2/E3 as From/To.
-  // Total income = SUMIFS Transactions Amount > 0 in date range
-  reports.getRange('A7:B7').merge().setValue('Total income')
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('C7').setFormula(
-    '=IFERROR(SUMIFS(Transactions_Amount,Transactions_Amount,">0",' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3),0)'
-  ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setFontColor(INCOME_GREEN).setHorizontalAlignment('right');
-  reports.getRange('D7:E7').merge().setValue('Total spent')
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  // Total spent = (-1 * sum of negatives) + Fixed Expenses scheduled in range
-  reports.getRange('F7').setFormula(
-    '=IFERROR(-SUMIFS(Transactions_Amount,Transactions_Amount,"<0",' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3)+$C$51,0)'
-  ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right');
-
-  // Row 8: Net + Txn count
-  reports.getRange('A8:B8').merge().setValue('Net (income − spent)')
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('C8').setFormula('=$C$7-$F$7')
-    .setNumberFormat('$#,##0.00;[Red]-$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right');
-  reports.getRange('D8:E8').merge().setValue('Total txns')
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('F8').setFormula(
-    '=IFERROR(COUNTIFS(Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
-    'Transactions!D2:D1000,"<>"),0)'
-  ).setNumberFormat('0').setFontWeight('bold').setHorizontalAlignment('right');
-
-  // Row 10: INCOME section header (merged)
-  reports.getRange('A10:F10').merge()
-    .setValue('INCOME')
-    .setBackground(SECTION_BG).setFontColor(SECTION_FG)
-    .setFontWeight('bold').setFontSize(11);
-
-  // Row 11: Income subheader
-  var incomeHeaders = [['Main', 'Sub', 'Amount', 'Count', 'Sparkline', '% of total']];
-  reports.getRange('A11:F11').setValues(incomeHeaders)
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('C11:D11').setHorizontalAlignment('right');
-
-  // Row 12: Income LET formula — dynamically lists income categories
-  // (Main, Sub, Amount, Count) for positive-amount rows in range, sorted desc.
-  reports.getRange('A12').setFormula(
-    '=IFERROR(LET(' +
-      'fromDate,$E$2,toDate,$E$3,' +
-      'spent,BYROW(CategoryList,LAMBDA(cat,' +
-        'IF(cat="",0,IFERROR(SUMIFS(Transactions_Amount,Transactions_Category,cat,' +
-        'Transactions!A2:A1000,">="&fromDate,Transactions!A2:A1000,"<="&toDate,' +
-        'Transactions_Amount,">0"),0)))),' +
-      'count,BYROW(CategoryList,LAMBDA(cat,' +
-        'IF(cat="",0,IFERROR(COUNTIFS(Transactions_Category,cat,' +
-        'Transactions!A2:A1000,">="&fromDate,Transactions!A2:A1000,"<="&toDate,' +
-        'Transactions_Amount,">0"),0)))),' +
-      'combined,{CategoryMain,CategoryList,spent,count},' +
-      'filtered,FILTER(combined,spent>0),' +
-      'SORT(filtered,3,FALSE)' +
-    '),"")'
-  );
-  // Pre-fill income sparkline + percent for rows 12-16
-  for (var ir = 12; ir <= 16; ir++) {
-    reports.getRange('C' + ir).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-      .setFontColor(INCOME_GREEN).setHorizontalAlignment('right');
-    reports.getRange('D' + ir).setNumberFormat('0').setHorizontalAlignment('right');
-    reports.getRange('E' + ir).setFormula(
-      '=IF(C' + ir + '="","",SPARKLINE(C' + ir + '/MAX($C$12:$C$16),' +
-      '{"charttype","bar";"color1","#137333";"max",1}))'
-    );
-    reports.getRange('F' + ir).setFormula(
-      '=IF(C' + ir + '="","",IF($C$7=0,"",TEXT(C' + ir + '/$C$7,"0.0%")))'
-    ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
-  }
-
-  // Row 18: SPENDING section header (merged)
-  reports.getRange('A18:F18').merge()
-    .setValue('SPENDING BY CATEGORY (sorted by Spent, descending)')
-    .setBackground(SECTION_BG).setFontColor(SECTION_FG)
-    .setFontWeight('bold').setFontSize(11);
-
-  // Row 19: Spending subheader
-  var spendHeaders = [['Main', 'Sub', 'Spent', 'Count', 'Sparkline', '% of total']];
-  reports.getRange('A19:F19').setValues(spendHeaders)
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('C19:D19').setHorizontalAlignment('right');
-
-  // Row 20: Spending LET formula — variable spending categories.
-  // Identical structure to income LET but filters Amount<0, then ABS the sum.
-  reports.getRange('A20').setFormula(
-    '=IFERROR(LET(' +
-      'fromDate,$E$2,toDate,$E$3,' +
-      'spent,BYROW(CategoryList,LAMBDA(cat,' +
-        'IF(cat="",0,IFERROR(ABS(SUMIFS(Transactions_Amount,Transactions_Category,cat,' +
-        'Transactions!A2:A1000,">="&fromDate,Transactions!A2:A1000,"<="&toDate,' +
-        'Transactions_Amount,"<0")),0)))),' +
-      'count,BYROW(CategoryList,LAMBDA(cat,' +
-        'IF(cat="",0,IFERROR(COUNTIFS(Transactions_Category,cat,' +
-        'Transactions!A2:A1000,">="&fromDate,Transactions!A2:A1000,"<="&toDate,' +
-        'Transactions_Amount,"<0"),0)))),' +
-      'combined,{CategoryMain,CategoryList,spent,count},' +
-      'filtered,FILTER(combined,spent>0),' +
-      'SORT(filtered,3,FALSE)' +
-    '),"")'
-  );
-  // Pre-fill sparkline + percent for rows 20-49
-  for (var sr = 20; sr <= 49; sr++) {
-    reports.getRange('C' + sr).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-      .setHorizontalAlignment('right');
-    reports.getRange('D' + sr).setNumberFormat('0').setHorizontalAlignment('right');
-    reports.getRange('E' + sr).setFormula(
-      '=IF(C' + sr + '="","",SPARKLINE(C' + sr + '/$F$7,' +
-      '{"charttype","bar";"color1","#5c6bc0";"max",1}))'
-    );
-    reports.getRange('F' + sr).setFormula(
-      '=IF(C' + sr + '="","",IF($F$7=0,"",TEXT(C' + sr + '/$F$7,"0.0%")))'
-    ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
-  }
-
-  // Row 50: Uncategorized — surfaces transactions with empty Category (col D)
-  // in the selected date range. v11.24: added to make the breakdown reconcile
-  // to Total Spent in F7. Previously the per-category BYROW loop iterated
-  // CategoryList only, so uncategorized txns were counted in F7 but invisible
-  // in the breakdown (the math didn't add up by ~$N per uncategorized total).
-  // Now always visible; if 0 it shows "$0.00 / 0 txns" as a passive reminder.
-  reports.getRange('A50').setValue('Uncategorized').setFontStyle('italic').setFontColor('#b45309');
-  reports.getRange('B50').setValue('(needs categorization in PWA)').setFontStyle('italic').setFontColor('#b45309').setFontSize(9);
-  reports.getRange('C50').setFormula(
-    '=IFERROR(ABS(SUMIFS(Transactions_Amount,Transactions_Category,"",' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
-    'Transactions_Amount,"<0")),0)'
-  ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right').setFontColor('#b45309');
-  reports.getRange('D50').setFormula(
-    '=IFERROR(COUNTIFS(Transactions_Category,"",' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
-    'Transactions_Amount,"<0"),0)'
-  ).setNumberFormat('0').setHorizontalAlignment('right').setFontColor('#b45309');
-  reports.getRange('E50').setFormula(
-    '=IF($C$50=0,"",SPARKLINE($C$50/$F$7,{"charttype","bar";"color1","#b45309";"max",1}))'
-  );
-  reports.getRange('F50').setFormula(
-    '=IF(OR($C$50=0,$F$7=0),"",TEXT($C$50/$F$7,"0.0%"))'
-  ).setHorizontalAlignment('right').setFontColor('#b45309').setFontSize(9);
-
-  // Row 51: Fixed Expenses (scheduled) — single row, computed via SUMPRODUCT.
-  // Q1a: one summary line, not per-merchant.
-  reports.getRange('A51').setValue('Fixed').setFontWeight('normal');
-  reports.getRange('B51').setValue('Fixed Expenses (scheduled)').setFontStyle('italic');
-  reports.getRange('C51').setFormula(buildFixedExpensesFormulaByRange_('$E$2', '$E$3'))
-    .setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right');
-  reports.getRange('D51').setValue('—').setHorizontalAlignment('right').setFontColor('#5f6368');
-  reports.getRange('E51').setFormula(
-    '=IF($C$51=0,"",SPARKLINE($C$51/$F$7,{"charttype","bar";"color1","#5c6bc0";"max",1}))'
-  );
-  reports.getRange('F51').setFormula(
-    '=IF($F$7=0,"",TEXT($C$51/$F$7,"0.0%"))'
-  ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
-
-  // Row 52: TOTAL row
-  reports.getRange('A52:B52').merge().setValue('TOTAL').setFontWeight('bold');
-  reports.getRange('C52').setFormula('=$F$7')
-    .setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right');
-  reports.getRange('D52').setFormula('=$F$8')
-    .setNumberFormat('0').setFontWeight('bold').setHorizontalAlignment('right');
-  reports.getRange('A52:F52').setBackground('#f1f3f4');
-
-  // ============================================================
-  // ZONE 3: DRILL-DOWN (rows 54-88)
-  // ============================================================
-
-  // Row 54: section header
-  reports.getRange('A54:F54').merge()
-    .setValue('DRILL-DOWN — Transactions for Selected Category')
-    .setBackground(SECTION_BG).setFontColor(SECTION_FG)
-    .setFontWeight('bold').setFontSize(11);
-
-  // Row 55: Category dropdown
-  reports.getRange('A55').setValue('Category:').setFontColor('#5f6368');
-  reports.getRange('B55').setBackground(SUBHEADER_BG).setFontWeight('bold');
-  var catRule = SpreadsheetApp.newDataValidation()
-    .requireValueInRange(ss.getSheetByName('Setup').getRange('E2:E100'), true)
-    .setAllowInvalid(false)
-    .build();
-  reports.getRange('B55').setDataValidation(catRule);
-  reports.getRange('C55:F55').merge()
-    .setValue('(any category from your Setup list — drill-down shows all matching transactions in the selected date range)')
-    .setFontColor('#5f6368').setFontStyle('italic').setFontSize(9);
-
-  // Row 57: Drill-down subheader (4 visible cols — Date | Merchant | Amount | Period)
-  var drillHeaders = [['Date', 'Merchant', 'Amount', 'Period', '', '']];
-  reports.getRange('A57:F57').setValues(drillHeaders)
-    .setBackground(SUBHEADER_BG).setFontColor(SUBHEADER_FG).setFontWeight('bold');
-  reports.getRange('C57').setHorizontalAlignment('right');
-
-  // Row 58: Drill-down FILTER formula — spills transaction rows.
-  // Selects (Date, Merchant, Amount, Period) cols from Transactions
-  // where Category=B55 AND Date in [E2,E3]. Sorted by Date descending.
-  // Timestamp dropped per design refinement — Date already conveys time
-  // of transaction; Timestamp is parser-trace data the user doesn't need
-  // in a Report view.
-  reports.getRange('A58').setFormula(
-    '=IFERROR(SORT(FILTER({' +
-      'Transactions!A2:A1000,Transactions!B2:B1000,Transactions!C2:C1000,' +
-      'Transactions!G2:G1000' +
-    '},' +
-      'Transactions!D2:D1000=$B$55,' +
-      'Transactions!A2:A1000>=$E$2,' +
-      'Transactions!A2:A1000<=$E$3' +
-    '),1,FALSE),' +
-    '"(no transactions in this category for the selected range)")'
-  );
-
-  // Pre-format drill-down spill area (rows 58-87)
-  reports.getRange('A58:A87').setNumberFormat('mmm d, yyyy');
-  reports.getRange('C58:C87').setNumberFormat('$#,##0.00;[Red]-$#,##0.00').setHorizontalAlignment('right');
-  reports.getRange('D58:D87').setFontColor('#5f6368').setFontSize(9);
-
-  // Row 88: Drill-down total
-  reports.getRange('A88:B88').merge().setFormula(
-    '="Total in "&IF($B$55="","(no category selected)",$B$55)&" for selected range"'
-  ).setFontWeight('bold');
-  reports.getRange('C88').setFormula(
-    '=IFERROR(SUMIFS(Transactions_Amount,Transactions_Category,$B$55,' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
-    'Transactions_Amount,"<0")*-1,0)'
-  ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11).setHorizontalAlignment('right');
-  reports.getRange('A88:F88').setBackground('#f1f3f4');
-
-  // ============================================================
-  // CONDITIONAL FORMATTING (A5c — heat map on Spent column)
-  // ============================================================
-
-  // Remove any prior CF rules on this tab (idempotent rebuild).
-  reports.clearConditionalFormatRules();
-
-  var rules = [];
-
-  // Heat map on spending Spent column (C20:C49 — variable spending)
-  // Light-to-dark indigo gradient based on value.
-  rules.push(SpreadsheetApp.newConditionalFormatRule()
-    .setGradientMinpointWithValue('#ffffff', SpreadsheetApp.InterpolationType.NUMBER, '0')
-    .setGradientMaxpointWithValue('#5c6bc0', SpreadsheetApp.InterpolationType.PERCENTILE, '100')
-    .setRanges([reports.getRange('C20:C49')])
-    .build());
-
-  // Heat map on Fixed Expenses row (C51 — was C50 pre-v11.24; shifted when
-  // Uncategorized row added at row 50). Same gradient, anchored to F7.
-  rules.push(SpreadsheetApp.newConditionalFormatRule()
-    .setGradientMinpointWithValue('#ffffff', SpreadsheetApp.InterpolationType.NUMBER, '0')
-    .setGradientMaxpointWithValue('#5c6bc0', SpreadsheetApp.InterpolationType.NUMBER, '=$F$7')
-    .setRanges([reports.getRange('C51')])
-    .build());
-
-  reports.setConditionalFormatRules(rules);
-
-  // Protection — warning only (user may want to edit cells occasionally)
-  var existing = reports.getProtections(SpreadsheetApp.ProtectionType.SHEET);
-  for (var i = 0; i < existing.length; i++) existing[i].remove();
-  reports.protect().setDescription('Reports — formula-driven, mostly read-only').setWarningOnly(true);
-}
-
-/**
- * v11.23 (Phase 32): Returns the From-date formula for Reports E2.
- * Evaluates the B2 dropdown selection to compute the appropriate start
- * date, OR reads from E4 when "Custom" is selected.
- */
-function buildReportsFromFormula_() {
-  return '=IFERROR(LET(' +
-    'tf,$B$2,' +
-    'customFrom,$E$4,' +
-    'today,TODAY(),' +
-    'IFS(' +
-      'tf="Today",today,' +
-      'tf="This Week",today-WEEKDAY(today,2)+1,' +
-      'tf="Last 7 Days",today-6,' +
-      'tf="This Month",DATE(YEAR(today),MONTH(today),1),' +
-      'tf="Last Month",DATE(YEAR(today),MONTH(today)-1,1),' +
-      'tf="This Period",IFERROR(INDEX(PayPeriods_Start,MATCH(1,(PayPeriods_Start<=today)*(PayPeriods_End>=today),0)),today),' +
-      'tf="Last Period",IFERROR(INDEX(PayPeriods_Start,MATCH(1,(PayPeriods_Start<=today)*(PayPeriods_End>=today),0)-1),today),' +
-      'tf="YTD",DATE(YEAR(today),1,1),' +
-      'tf="Last Year",DATE(YEAR(today)-1,1,1),' +
-      'tf="All Time",INDEX(PayPeriods_Start,1),' +
-      'tf="Custom",IF(ISBLANK(customFrom),today-30,customFrom),' +
-      'TRUE,today-30' +
-    ')' +
-  '),TODAY()-30)';
-}
-
-/**
- * v11.23 (Phase 32): Returns the To-date formula for Reports E3.
- * Mirrors buildReportsFromFormula_ for the end of the range.
- */
-function buildReportsToFormula_() {
-  return '=IFERROR(LET(' +
-    'tf,$B$2,' +
-    'customTo,$E$5,' +
-    'today,TODAY(),' +
-    'IFS(' +
-      'tf="Today",today,' +
-      'tf="This Week",$E$2+6,' +
-      'tf="Last 7 Days",today,' +
-      'tf="This Month",EOMONTH(today,0),' +
-      'tf="Last Month",EOMONTH(DATE(YEAR(today),MONTH(today)-1,1),0),' +
-      'tf="This Period",IFERROR(INDEX(PayPeriods_End,MATCH(1,(PayPeriods_Start<=today)*(PayPeriods_End>=today),0)),today),' +
-      'tf="Last Period",IFERROR(INDEX(PayPeriods_End,MATCH(1,(PayPeriods_Start<=today)*(PayPeriods_End>=today),0)-1),today),' +
-      'tf="YTD",today,' +
-      'tf="Last Year",DATE(YEAR(today)-1,12,31),' +
-      'tf="All Time",today,' +
-      'tf="Custom",IF(ISBLANK(customTo),today,customTo),' +
-      'TRUE,today' +
-    ')' +
-  '),TODAY())';
-}
-
-// ================================================================
 // INSTRUCTIONS TAB BUILDER
 // ================================================================
 
@@ -3830,7 +3355,6 @@ function buildInstructionsTab_(sheet) {
     ['Budget           — Budgeted vs Spent per period (with Rolled Over column from v11.19)', 10, false, null, null],
     ['Transactions     — All categorized + uncategorized transactions (single ledger)', 10, false, null, null],
     ['Saving           — One-time goals (e.g. "Europe trip $5000 by Oct")', 10, false, null, null],
-    ['Reports          — Spending by category for any time frame + drill-down (v11.23)', 10, false, null, null],
     ['Logs             — API activity log (debugging)', 10, false, null, null],
     ['ClientMetrics    — PWA call timings (perf debugging, auto-created on first flush)', 10, false, null, null],
     ['Instructions     — This tab (with version info at top)', 10, false, null, null],
@@ -4210,33 +3734,6 @@ function buildFixedExpensesFormula_(periodCellRef) {
     '),0)';
 }
 
-/**
- * v11.23 (Phase 32 — Reports tab): Variant of buildFixedExpensesFormula_
- * that takes raw From/To cell references instead of a PayPeriods_Label
- * cell. Used by the Reports tab where the date range is arbitrary
- * (could be This Month, YTD, Custom, etc.) — not necessarily a pay
- * period. Same SUMPRODUCT-over-12-months logic; just sources s and e
- * directly from the passed cells.
- *
- * v11.24: same blank-dd guard as buildFixedExpensesFormula_ (see comment
- * there). Without this guard, the Reports tab "Fixed Expenses (scheduled)"
- * row showed $0.00 even for periods that included a day-1.
- */
-function buildFixedExpensesFormulaByRange_(fromCellRef, toCellRef) {
-  var monthChecks = [];
-  for (var m = 1; m <= 13; m++) {
-    monthChecks.push('((DATE(' + BUDGET_YEAR + ',' + m + ',dd)>=s)*(DATE(' + BUDGET_YEAR + ',' + m + ',dd)<=e))');
-  }
-  return '=IFERROR(LET(' +
-    's,' + fromCellRef + ',' +
-    'e,' + toCellRef + ',' +
-    'amt,FixedExpenses_Amount,' +
-    'ddRaw,FixedExpenses_DueDay,' +
-    'dd,IF(ddRaw="",1,IFERROR(ddRaw*1,1)),' +
-    'valid,(amt<>"")*(ddRaw<>""),' +
-    'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
-    '),0)';
-}
 
 function rebuildBudget_(mode) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();

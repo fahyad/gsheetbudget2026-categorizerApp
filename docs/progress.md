@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.24 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.24 (Phase 32 bug-fix pass) fixes two bugs found in user testing: Fixed Expenses formula handles blank `FixedExpenses_DueDay` cells (bug also existed in Budget tab — silent unless period contained a day-1); Uncategorized row added to Reports to surface txns with empty Category. v11.23 (Phase 32) adds the **Reports** tab: spending breakdown by category for any time frame (Today / This Week / Last 7 Days / This Month / Last Month / This Period / Last Period / YTD / Last Year / All Time / Custom) with drill-down to per-category transaction list. v11.22 (Phase 31) refreshed the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.25 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.25 (Phase 33) removes the Reports tab and its plumbing (~500 LOC); user adopted native Sheets slicers (Category + Period) on Transactions tab as a simpler replacement. The v11.24 blank-dd guard in `buildFixedExpensesFormula_` is preserved since it benefits the Budget tab independently. v11.24 (Phase 32 bug-fix pass) fixed Fixed Expenses formula + added Uncategorized row to Reports. v11.23 (Phase 32) added the short-lived **Reports** tab: spending breakdown by category for any time frame (Today / This Week / Last 7 Days / This Month / Last Month / This Period / Last Period / YTD / Last Year / All Time / Custom) with drill-down to per-category transaction list. v11.22 (Phase 31) refreshed the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1940,3 +1940,44 @@ Budget tab's Fixed Expenses dashboard cell (B4) now also computes correctly for 
 
 ### Rollback
 Redeploy v11.23 (or earlier). Bug reverts but no data damage.
+
+---
+
+## Session: 2026-05-18 — Reports tab removed; slicers adopted (Apps Script v11.25)
+
+### Setup
+User: "I added slicers to the transactions tab (for period and category) and it seems to provide much of the information that the reports section did. I may remove the reports page and use the slicers instead. Why do some merchants have the same # still (row 97 and 98)? I want to stick with the slicer function. I deleted the reports tab. Can you update the app script and the .md files to reflect these changes."
+
+User had been live for ~24 hours with the Reports tab from v11.23/v11.24. Then discovered native Sheets slicers (the green chip dropdowns on the Transactions tab) covered the same use case more simply. Decided to remove Reports and asked for the Apps Script to be cleaned up so future `Update Script` runs wouldn't recreate the tab.
+
+Also: question about why two rows (97 and 98 — both SHOPPERS DRUG MART #0387 on May 9) have the same store number. Answer: the `#0387` is the store identifier in Scotiabank's merchant string. The same physical Shoppers location issues the same store number for every transaction; rows 97 and 98 are TWO distinct purchases at the SAME store on the same day (3 minutes apart, different amounts $16.79 and $10.96). Not a duplicate.
+
+### What shipped (v11.25, single deploy)
+Removed ~500 LOC of Reports plumbing:
+
+- `buildReportsTab_(reports, ss)` (tab setup) — deleted
+- `applyReportsStructure_(reports, ss)` (~400 LOC of formulas + formatting + CF) — deleted
+- `buildReportsFromFormula_()` / `buildReportsToFormula_()` (date-range formula generators) — deleted
+- `buildFixedExpensesFormulaByRange_(fromCellRef, toCellRef)` (only used by Reports — dead code) — deleted
+- `buildWorkbook`: `'Reports'` removed from `tabNames` array; `buildReportsTab_` call site removed; alert text 7→6 tabs
+- `updateWorkbook`: entire Reports rebuild block removed (was at lines ~2627-2633)
+- `buildInstructionsTab_`: "Reports — Spending by category for any time frame + drill-down (v11.23)" line removed from TABS section
+
+### What was kept
+- `buildFixedExpensesFormula_` with the v11.24 blank-`FixedExpenses_DueDay` guard — used by Budget tab dashboard (B4). The guard was a real bug fix independent of Reports; reverting it would re-introduce silent $0 for periods that contain a day-1.
+- Two historical-context comments in `buildWorkbook` and the `buildFixedExpensesFormula_` docstring referencing Reports — left as breadcrumbs so future Claude sessions understand why the helper exists in its current shape.
+
+### Status — awaiting deploy + Update Script
+1. `./apps-script/deploy.sh "v11.25 — remove reports tab; slicers adopted"`
+2. Sheet → `Budget Tools → 3. Update Script (safe)` to re-run the build path (no Reports tab will be created)
+3. Verify: Reports tab does NOT reappear after Update Script
+
+### Rollback
+- Redeploy v11.24 + Update Script → Reports tab gets recreated.
+- Slicers stay on Transactions tab regardless of which version is deployed (they're sheet-level, not Apps Script-managed).
+
+### Insight: build, ship, learn, kill
+Reports tab existed for ~24 hours and was deleted because a native Sheets feature covered the same use case more simply. Three takeaways:
+1. **Shipping the simplest viable version got us the feedback loop.** Without v11.23 deployed, the slicer pivot wouldn't have happened — the user only realized slicers worked when they had something tangible to compare against.
+2. **Removing code is a feature.** ~500 LOC of formulas + formatting + heat-map CF + sparkline plumbing went away. The remaining system is smaller and easier to reason about than before Phase 32 started.
+3. **Keep the bug fixes; lose the experiment.** v11.24's blank-dd guard in `buildFixedExpensesFormula_` was discovered while building Reports but is independent of it. Preserved.
