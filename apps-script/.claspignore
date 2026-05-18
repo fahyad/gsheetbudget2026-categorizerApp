@@ -1,0 +1,6 @@
+# .claspignore — files to exclude from clasp push/pull
+# Only Code.js (→ Code.gs on Apps Script) and the manifest go up.
+
+**/**
+!Code.js
+!appsscript.json

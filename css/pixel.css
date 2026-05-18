@@ -1,0 +1,1181 @@
+/*
+ * pixel.css — opt-in "Pixel UI" theme overrides (PWA v0.18.0).
+ *
+ * Activated by setting `data-theme="pixel"` on <html>. The early
+ * <head> script in index.html reads localStorage `budget_theme` (or the
+ * `?theme=pixel` URL param) BEFORE this stylesheet parses, so there's
+ * no flash-of-mono on first paint.
+ *
+ * Phase A — theme infrastructure (no rules; here so the file exists)
+ * Phase B — color palette + JetBrains Mono everywhere
+ * Phase C — stepped progress bars + single-accent dashboard card stripe
+ *
+ * Phase D–G additions land here too as we add them.
+ *
+ * Design source: Claude Design "PWA V2" handoff bundle 2026-04-30
+ * (pixel-UI-redesign theme), adapted per user decisions:
+ *   - Toggle, not hard switch
+ *   - Skip DSEG7 (use JetBrains Mono for hero numbers)
+ *   - Single accent stripe (not per-main-category tint)
+ *   - Keep current semantic: green = positive available, amber = zero,
+ *     red = over (mockup's "amber as sole accent" rejected — the
+ *     color-coded balances are too useful to lose)
+ *   - Multi-select category rail deferred to a later phase
+ *
+ * No JS-side change for any rule below — DOM and behavior are unchanged.
+ * Rolling back the theme is a one-attribute toggle.
+ */
+
+/* ===================== TOKENS — pixel theme overrides ===================== */
+
+:root[data-theme="pixel"] {
+  /* Surfaces — flip to near-black with a slightly lifted period bar */
+  --bg:           #0A0A0A;
+  --bg-period:    #141414;
+  --bg-selected:  #1C1C1C;
+  --bg-active-tab:#1C1C1C;
+
+  /* Ink — warm parchment for high contrast on dark bg without harsh white */
+  --ink:          #F0E9D6;
+  --muted:        #8C8678;
+  --muted-2:      #5A554A;
+  --rule:         #2A2722;
+  --rule-2:       #1F1D19;
+
+  /* Status colors — kept semantic (per user choice 4):
+       green  = positive available  (AA-contrast green for dark bg)
+       amber  = zero / pending       (mockup color, also our accent)
+       red    = overspent / error    (mockup color, slightly muted) */
+  --green:        #5BC850;
+  --amber:        #E8A33D;
+  --red:          #E25555;
+}
+
+/* ===================== TYPOGRAPHY — JetBrains Mono everywhere ===================== */
+
+:root[data-theme="pixel"] body {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+
+/* All UI text inherits via body. A few elements pin Inter explicitly in
+   style.css — re-declare them to JetBrains Mono so nothing escapes. */
+:root[data-theme="pixel"] #tab-bar .tab,
+:root[data-theme="pixel"] .period-eyebrow,
+:root[data-theme="pixel"] .period-label,
+:root[data-theme="pixel"] .pill-btn,
+:root[data-theme="pixel"] .subtab,
+:root[data-theme="pixel"] .txn-merchant,
+:root[data-theme="pixel"] .txn-date,
+:root[data-theme="pixel"] .txn-amount,
+:root[data-theme="pixel"] .empty-state,
+:root[data-theme="pixel"] .cat-group-header .group-name,
+:root[data-theme="pixel"] .cat-group-header .group-count,
+:root[data-theme="pixel"] .cat-sub-name,
+:root[data-theme="pixel"] .cat-sub-avail,
+:root[data-theme="pixel"] .cat-sub-spent,
+:root[data-theme="pixel"] .summary-cell .label,
+:root[data-theme="pixel"] .summary-cell .value,
+:root[data-theme="pixel"] .goal-name,
+:root[data-theme="pixel"] .goal-amount,
+:root[data-theme="pixel"] .goal-meta,
+:root[data-theme="pixel"] #config-form,
+:root[data-theme="pixel"] #config-form input,
+:root[data-theme="pixel"] #config-form button,
+:root[data-theme="pixel"] #version-info,
+:root[data-theme="pixel"] .version-row,
+:root[data-theme="pixel"] #cancel-pick,
+:root[data-theme="pixel"] #selected-merchant,
+:root[data-theme="pixel"] .cat-btn,
+:root[data-theme="pixel"] .add-cat-trigger,
+:root[data-theme="pixel"] .modal-content h3,
+:root[data-theme="pixel"] .modal-content label,
+:root[data-theme="pixel"] .modal-content button,
+:root[data-theme="pixel"] #undo-bar,
+:root[data-theme="pixel"] #undo-btn,
+:root[data-theme="pixel"] #error-toast {
+  font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+/* Numbers always tabular so columns line up */
+:root[data-theme="pixel"] .txn-amount,
+:root[data-theme="pixel"] .summary-cell .value,
+:root[data-theme="pixel"] .cat-sub-avail,
+:root[data-theme="pixel"] .cat-sub-spent,
+:root[data-theme="pixel"] .goal-amount,
+:root[data-theme="pixel"] .version-row span:last-child {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hero numbers (dashboard summary strip + goal amounts) — slightly larger
+   + medium weight so they read as "the number" without DSEG7 LCD font.
+   Per user choice 2: skipped DSEG7 (CDN dep + extra font load). */
+:root[data-theme="pixel"] .summary-cell .value {
+  font-weight: 500;
+  letter-spacing: 0;
+}
+:root[data-theme="pixel"] .summary-cell.ready .value {
+  font-weight: 700;
+}
+
+/* Tab labels: tighter terminal-style letterspacing */
+:root[data-theme="pixel"] #tab-bar .tab {
+  letter-spacing: 0.18em;
+  font-weight: 600;
+}
+:root[data-theme="pixel"] #tab-bar .tab.active {
+  font-weight: 700;
+}
+
+/* Sub-tab + pills inherit the terminal cap-spacing */
+:root[data-theme="pixel"] .subtab {
+  letter-spacing: 0.18em;
+}
+:root[data-theme="pixel"] .pill-btn {
+  letter-spacing: 0.16em;
+  font-weight: 600;
+}
+
+/* ===================== STATUS BAR / SAFE-AREA TINT ===================== */
+
+/* The period bar already pads into env(safe-area-inset-top) — it inherits
+   --bg-period which is dark in pixel theme, so the iOS status-bar gap goes
+   dark automatically. The Setup view (no period bar) needs the same:
+   keep its top padding so the notch area is just dark body bg. */
+
+/* ===================== PHASE C — STEPPED PROGRESS BARS ===================== */
+
+/* Dashboard category bars: replace the solid fill with a 4px-on / 2px-off
+   repeating gradient. The .zero and .over color variants share the same
+   pattern. Solid bg color preserved for the chip-active "armed" state.
+   Assumes the existing dashboard markup uses .cat-bar-fill (matches the
+   v0.15 design system). */
+:root[data-theme="pixel"] .cat-bar-fill {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--ink) 0,
+      var(--ink) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+:root[data-theme="pixel"] .cat-bar-fill.zero {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--amber) 0,
+      var(--amber) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+:root[data-theme="pixel"] .cat-bar-fill.over {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--red) 0,
+      var(--red) 4px,
+      transparent 4px,
+      transparent 6px
+    );
+}
+
+/* Goal cards — pixel-block fill: thicker bar + outlined border, repeating
+   green chunks. Matches the mockup's .goal-bar-fill aesthetic. */
+:root[data-theme="pixel"] .goal-bar {
+  height: 8px;
+  background: transparent;
+  border: 1px solid var(--rule);
+  position: relative;
+}
+:root[data-theme="pixel"] .goal-bar-fill {
+  height: 100%;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--green) 0,
+      var(--green) 6px,
+      transparent 6px,
+      transparent 8px
+    );
+}
+
+/* ===================== PHASE C — SINGLE-ACCENT DASHBOARD CARDS ===================== */
+
+/* Per user choice 3: single accent stripe (not per-main tint). Each
+   .cat-group on the dashboard becomes a tinted card with a 3px amber
+   accent on the left edge. Behaviorally unchanged. */
+:root[data-theme="pixel"] .cat-group {
+  background: var(--bg-period);
+  border: 1px solid var(--rule);
+  position: relative;
+  overflow: hidden;
+}
+
+:root[data-theme="pixel"] .cat-group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber);
+}
+
+/* Goal cards get the same accent — visually unifies "things you're
+   tracking" sections under one motif. */
+:root[data-theme="pixel"] .goal-card {
+  background: var(--bg-period);
+  border: 1px solid var(--rule);
+  position: relative;
+  overflow: hidden;
+  margin: 12px 14px 0;
+}
+:root[data-theme="pixel"] .goal-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--amber);
+}
+
+/* ===================== PERIOD BAR — TERMINAL POLISH ===================== */
+
+/* Sticky shadow under the period bar so it lifts off the dark scrolled
+   content beneath it. Already partially in style.css; here we make the
+   shadow more pronounced for the dark palette. */
+:root[data-theme="pixel"] .period-bar {
+  border-bottom: 1px solid var(--rule);
+  /* v0.19.5: sticky promoted to the host wrapper (#period-bar-host)
+     because .period-bar's containing block was shrink-to-fit — sticky
+     could only act within ~60 px before scrolling past the host. The
+     host rule below sticks across the whole dashboard scroll range. */
+  z-index: 8;
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.55);
+}
+
+/* v0.19.5: #period-bar-host stays pinned to the viewport top across
+   the entire dashboard / categorize scroll. Both views render their
+   period bar into a #period-bar-host wrapper, so this single rule
+   covers both. z-index: 9 sits above the summary strip's 7 so the
+   host wins the overlap when both are stuck. */
+:root[data-theme="pixel"] #period-bar-host {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+}
+
+/* The "↻ Parse" / "Sync N" pill inherits ink/border color from variables.
+   Add the terminal outlined look (1px ink border, transparent bg). */
+:root[data-theme="pixel"] .pill-btn {
+  border: 1px solid var(--ink);
+  background: transparent;
+  color: var(--ink);
+  padding: 6px 10px;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .pill-btn:active {
+  background: var(--bg-selected);
+}
+:root[data-theme="pixel"] .pill-btn.primary {
+  background: var(--green);
+  border-color: var(--green);
+  color: #0A0A0A;
+}
+:root[data-theme="pixel"] .pill-btn.primary:active {
+  background: #4AAE40;
+}
+:root[data-theme="pixel"] .pill-btn:disabled {
+  opacity: 0.4;
+}
+
+/* ===================== TXN LIST — TERMINAL TOUCH ===================== */
+
+/* Merchant + amount get uppercase + tighter spacing per the mockup */
+:root[data-theme="pixel"] .txn-merchant {
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+:root[data-theme="pixel"] .txn-date {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+:root[data-theme="pixel"] .txn-amount {
+  letter-spacing: 0.02em;
+}
+
+/* ===================== EMPTY STATES ===================== */
+
+:root[data-theme="pixel"] .empty-state,
+:root[data-theme="pixel"] #period-empty-state,
+:root[data-theme="pixel"] #auto-empty-state {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .empty-state .glyph {
+  color: var(--muted-2);
+}
+
+/* ===================== UNDO BAR + TOAST ===================== */
+
+:root[data-theme="pixel"] #undo-bar {
+  background: var(--ink);
+  color: var(--bg);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #undo-btn {
+  color: var(--bg);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] #error-toast {
+  background: var(--red);
+  color: #0A0A0A;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #error-toast.success {
+  background: var(--green);
+  color: #0A0A0A;
+}
+
+/* ===================== CATEGORY PICKER + ADD-CAT MODAL ===================== */
+
+:root[data-theme="pixel"] #category-picker {
+  border-top: 1px solid var(--green);
+}
+:root[data-theme="pixel"] .cat-group-label,
+:root[data-theme="pixel"] #selected-merchant-eyebrow {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #selected-merchant {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-btn {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 0;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-btn:active {
+  background: var(--bg-selected);
+  border-color: var(--green);
+}
+:root[data-theme="pixel"] .add-cat-trigger {
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+  color: var(--muted);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .modal-content {
+  background: var(--bg);
+  border-top: 1px solid var(--green);
+}
+:root[data-theme="pixel"] .modal-content h3 {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .modal-content label {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .modal-content select,
+:root[data-theme="pixel"] .modal-content input[type="text"] {
+  background: var(--bg-selected);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  border-radius: 0;
+}
+:root[data-theme="pixel"] #cancel-add-cat {
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #save-add-cat {
+  background: var(--green);
+  color: #0A0A0A;
+  border: none;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* ===================== SETUP TAB — DARK FORMS ===================== */
+
+:root[data-theme="pixel"] #config-form input {
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+}
+:root[data-theme="pixel"] #config-form input:focus {
+  border-bottom-color: var(--green);
+}
+:root[data-theme="pixel"] #config-form button {
+  background: var(--green);
+  color: #0A0A0A;
+  border: none;
+  border-radius: 0;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #config-form label {
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] #version-info h3 {
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .version-row {
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--rule);
+}
+:root[data-theme="pixel"] #update-status-display.update-needed {
+  color: var(--red);
+  font-weight: 700;
+}
+:root[data-theme="pixel"] #update-status-display.up-to-date {
+  color: var(--green);
+  font-weight: 600;
+}
+
+/* ===================== PHASE C+ — DASHBOARD POLISH (v0.18.2) ===================== */
+/* Refinements on top of Phase C's accent-stripe + stepped-bars work.
+   Confirmed gaps after living with v0.18.0 on phone:
+     - Phase C set the stepped gradient on .cat-bar-fill but kept its
+       height at 1px (style.css default), so the pattern was invisible.
+     - .cat-group-header had bg-selected from style.css, which painted
+       OVER the new amber accent stripe at the left edge.
+     - Sub-category borders inside a group used the same solid 1px rule
+       as group separators — too noisy. Mockup uses dotted within-group.
+     - Summary strip sat above the fold with no sticky behavior, so the
+       Ready-to-assign value scrolled away when reading the cards.
+     - Toggle glyph (+/−) inherited ink color, blending in. Mockup uses
+       green so the tap-target reads as interactive.
+   All changes are pixel-scoped — mono theme stays untouched. */
+
+/* Cat-bar: needs height for the stepped 4px-on/2px-off pattern to be
+   visible at all. Style.css defaults to 1px which made Phase C silently
+   invisible. */
+:root[data-theme="pixel"] .cat-bar {
+  height: 4px;
+  background: transparent;
+}
+:root[data-theme="pixel"] .cat-bar-fill {
+  height: 4px;
+  /* The gradient itself comes from Phase C's existing rule. */
+}
+
+/* Sticky summary strip: pin beneath the period bar when scrolling. The
+   top offset is the period bar's pad-top (env safe-area + 10) plus its
+   inline content height (~38). Tested on notched and non-notched
+   viewports; the calc keeps it flush. */
+:root[data-theme="pixel"] .summary-strip {
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 48px);
+  z-index: 7;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.45);
+  /* v0.19.1: tighter padding/gap to give each cell more horizontal room
+     so values like "−$1,948.00" fit on one line without wrapping. */
+  padding: 14px 14px 16px;
+  gap: 6px;
+}
+
+/* Summary values (terminal hero numbers — JetBrains Mono fills in for
+   DSEG7 since user opted out of the LCD font).
+   v0.19.1: dropped from 18px → 14px and added white-space:nowrap. The
+   prior 18px caused "−$1,948.00" to wrap onto two lines on iPhone-sized
+   columns: the minus character reserved a line by itself, the dollar
+   amount wrapped to a second line. JetBrains Mono at 14px keeps four
+   currency cells comfortably on one row. Ready-cell stays slightly
+   larger (16px instead of 14px) since it's the headline number. */
+:root[data-theme="pixel"] .summary-cell {
+  min-width: 0;
+  overflow: hidden;
+}
+:root[data-theme="pixel"] .summary-cell .label {
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:root[data-theme="pixel"] .summary-cell .value {
+  font-size: 14px;
+  letter-spacing: 0;
+  margin-top: 6px;
+  line-height: 1;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+:root[data-theme="pixel"] .summary-cell.ready .value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--green);
+}
+:root[data-theme="pixel"] .summary-cell.ready .value.negative {
+  color: var(--red);
+}
+
+/* Cat-group-header: drop the bg-selected background (which covers the
+   accent stripe) and indent past the 3px stripe so the toggle-glyph
+   doesn't sit ON the accent line. */
+:root[data-theme="pixel"] .cat-group-header {
+  background: transparent;
+  padding: 14px 18px 12px 22px;
+}
+
+/* Toggle glyph in green so the +/- reads as an interactive control,
+   not part of the body text. */
+:root[data-theme="pixel"] .cat-group-header .toggle-glyph {
+  color: var(--green);
+  font-weight: 700;
+}
+
+/* Cat-group-header type: tighter terminal letterspacing */
+:root[data-theme="pixel"] .cat-group-header .group-name {
+  letter-spacing: 0.22em;
+  font-size: 12px;
+  font-weight: 700;
+}
+:root[data-theme="pixel"] .cat-group-header .group-count {
+  letter-spacing: 0.18em;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* Sub-category rows: transparent bg (so the tinted card bg shows
+   through), dotted border-bottom for in-group separation, last-child
+   loses its border to avoid a double-line at the bottom of a group. */
+:root[data-theme="pixel"] .cat-sub {
+  background: transparent;
+  border-bottom: 1px dotted var(--rule);
+  padding: 12px 18px 12px 42px;
+}
+:root[data-theme="pixel"] .cat-sub:last-child {
+  border-bottom: none;
+}
+
+/* Sub-cat type adjustments — smaller but more letter-spaced */
+:root[data-theme="pixel"] .cat-sub-name {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-sub-avail {
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+:root[data-theme="pixel"] .cat-sub-spent {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
+/* Goals section eyebrow header — make the "SAVING GOALS" label feel
+   like a section divider, not a stray paragraph. */
+:root[data-theme="pixel"] .eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 24px 20px 10px;
+}
+
+/* Goal card type — uppercase + tabular nums on the amount; meta row
+   gets letter-spacing to feel like UI chrome. */
+:root[data-theme="pixel"] .goal-name {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 13px;
+  font-weight: 600;
+}
+:root[data-theme="pixel"] .goal-amount {
+  font-size: 12px;
+  font-weight: 500;
+}
+:root[data-theme="pixel"] .goal-meta {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 8px;
+}
+
+/* Goal expand-on-tap detail rows (already implemented in dashboard.js
+   since v0.15 — just needed the type polish for pixel theme). */
+:root[data-theme="pixel"] .goal-detail-row {
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 10px;
+  padding: 4px 0;
+  color: var(--muted);
+}
+:root[data-theme="pixel"] .goal-detail-row span:last-child {
+  color: var(--ink);
+}
+:root[data-theme="pixel"] .goal-notes span:last-child {
+  font-style: normal;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+
+/* ===================== FIXED ACCORDION (v0.19.4) ===================== */
+/* Pixel-theme overrides for the summary-cell-toggle button + the
+   .fixed-panel below the summary strip. Behavior comes from
+   js/views/dashboard.js + structural CSS in css/style.css; rules below
+   only adjust appearance for pixel theme. */
+
+/* Button visual: amber chevron when expanded (matches the period bar's
+   open-state caret pattern from Phase D). Border-bottom on the cell
+   when expanded to bridge it visually with the panel below. */
+:root[data-theme="pixel"] .summary-cell-toggle .summary-chevron {
+  color: var(--muted-2);
+}
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] .summary-chevron {
+  color: var(--amber);
+}
+:root[data-theme="pixel"] .summary-cell-toggle:active {
+  background: var(--bg-selected);
+}
+
+/* Panel container — sticks to the page like its summary-cell trigger.
+   General principle: anything toggleable from a sticky element should
+   remain reachable while scrolling.
+   Stacking ladder (top → bottom):
+     #period-bar-host      z-index 9, top: 0
+     .summary-strip        z-index 7, top: env-inset + 48
+     .fixed-panel (open)   z-index 6, top: env-inset + 108  ← here
+   The 108 is the period bar height (~48 incl. safe-area pad) + summary
+   strip height (~60). If you ever change strip padding, retune this. */
+:root[data-theme="pixel"] .fixed-panel {
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+  position: sticky;
+  top: calc(env(safe-area-inset-top, 0px) + 108px);
+  z-index: 6;
+  /* Soft shadow under so it reads as a layer hovering above the
+     scrolled content beneath, matching the strip's treatment. */
+  box-shadow: 0 1px 0 var(--rule), 0 6px 12px -6px rgba(0, 0, 0, 0.45);
+}
+/* When collapsed (`hidden` attr), the [hidden] base rule sets
+   display: none — but explicit `position: static` here is cheap
+   defense in case any future override fights with it. */
+:root[data-theme="pixel"] .fixed-panel[hidden] {
+  position: static;
+}
+
+/* v0.19.6: highlight the FIXED summary cell when its panel is open.
+   Visual: amber label + chevron + slightly tinted bg, matching the
+   period bar's "armed" treatment when the calendar dropdown is open. */
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] {
+  background: var(--bg-period);
+}
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] .label {
+  color: var(--amber);
+}
+:root[data-theme="pixel"] .summary-cell-toggle[aria-expanded="true"] .summary-chevron {
+  color: var(--amber);
+}
+
+:root[data-theme="pixel"] .fixed-panel-head {
+  padding: 12px 18px 10px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg-period);
+}
+
+:root[data-theme="pixel"] .fixed-panel-title {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+:root[data-theme="pixel"] .fixed-panel-total {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+:root[data-theme="pixel"] .fixed-panel-total.negative {
+  color: var(--red);
+}
+
+:root[data-theme="pixel"] .fixed-panel-empty {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+  padding: 20px 18px;
+  text-align: center;
+}
+
+:root[data-theme="pixel"] .fixed-panel-warn {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  color: var(--red);
+  background: rgba(226, 85, 85, 0.08);
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* Row layout — date eyebrow on left, name middle (truncates), amount
+   right. Dotted between-row border for the within-list separation
+   (consistent with cat-sub dotted borders in Phase C+). */
+:root[data-theme="pixel"] .fixed-row {
+  grid-template-columns: 70px 1fr auto;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px dotted var(--rule);
+  background: transparent;
+}
+:root[data-theme="pixel"] .fixed-row:last-child {
+  border-bottom: none;
+}
+
+:root[data-theme="pixel"] .fixed-row-date {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-theme="pixel"] .fixed-row-name {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+:root[data-theme="pixel"] .fixed-row-amount {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+:root[data-theme="pixel"] .fixed-row-amount.negative {
+  color: var(--red);
+}
+
+/* ===================== PHASE D — PERIOD BAR + CALENDAR POLISH (v0.18.1) ===================== */
+
+/* Today chip ("[27]" amber-bracket day-of-month for current period, or
+   "PAST" label otherwise). Lives in the period-toggle between the
+   period-label and the caret. Default = hidden in both themes (so mono
+   stays untouched even though the DOM is always present); pixel theme
+   re-shows it. */
+
+.period-today-chip {
+  display: none;
+}
+
+:root[data-theme="pixel"] .period-today-chip {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  margin-left: 6px;
+}
+:root[data-theme="pixel"] .period-today-chip.is-current {
+  color: var(--amber);
+}
+:root[data-theme="pixel"] .period-today-chip .today-bracket {
+  color: var(--amber);
+  margin: 0 1px;
+  font-weight: 700;
+}
+
+/* In pixel theme the today chip carries the "where am I" semantic, so
+   the eyebrow ("CURRENT PERIOD" / "PERIOD") becomes redundant. Hide it
+   so the period-toggle reads as a clean inline strip. */
+:root[data-theme="pixel"] .period-eyebrow {
+  display: none;
+}
+
+/* Tighten the period-toggle layout so dates + chip + caret sit on one
+   line (mono uses the stacked eyebrow+label so it stays display:flex
+   from style.css). */
+:root[data-theme="pixel"] .period-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+:root[data-theme="pixel"] .period-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-top: 0;
+}
+
+:root[data-theme="pixel"] .period-caret {
+  margin-top: 0;
+  font-size: 9px;
+}
+:root[data-theme="pixel"] .period-bar.open .period-caret {
+  color: var(--amber);
+}
+
+/* ──── Calendar dropdown — terminal restyle ──── */
+
+/* Our renderCalendar shows ONLY the period range (not a full month), so
+   every visible cell IS in-period and gets the amber treatment. Today
+   gets the outlined cursor-box around its numeral. has-txn cells stay
+   amber and gain an amber dot beneath the day. */
+
+:root[data-theme="pixel"] .calendar-grid {
+  border: 1px dashed var(--rule);
+  padding: 10px 12px 8px;
+  background: rgba(0, 0, 0, 0.18);
+  margin: 14px auto 0;
+  max-width: 280px;
+  /* Keep the existing display:grid / 7-col / 4px gap from style.css */
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+:root[data-theme="pixel"] .calendar-cell {
+  border: none;
+  background: transparent;
+  color: var(--amber);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+/* has-txn keeps amber (no color flip); the dot below indicates txn
+   presence. In mono theme has-txn fills the cell with rule-2 grey —
+   the pixel approach is more spartan. */
+:root[data-theme="pixel"] .calendar-cell.has-txn {
+  background: transparent;
+  color: var(--amber);
+}
+
+/* Today: outlined cursor box around the day number (NOT the cell).
+   Mono renders today as a filled black cell with white number; pixel
+   renders it as a transparent cell with an amber 1px box around the
+   numeral so the period-band amber stays visible. */
+:root[data-theme="pixel"] .calendar-cell.today {
+  background: transparent;
+  border: none;
+  color: var(--amber);
+  font-weight: 700;
+}
+:root[data-theme="pixel"] .calendar-cell.today > div:not(.cell-dot) {
+  border: 1px solid var(--amber);
+  padding: 1px 4px;
+  line-height: 1;
+}
+
+/* Dot under has-txn days: amber to match the period band */
+:root[data-theme="pixel"] .calendar-cell .cell-dot {
+  background: var(--amber);
+}
+:root[data-theme="pixel"] .calendar-cell.today .cell-dot {
+  background: var(--amber);
+}
+
+/* ===================== PHASE G — CATEGORY RAIL (v0.19.0) =====================
+   Pixel-theme overrides for the multi-select rail. Mono styles in
+   style.css set the structure; here we restyle for the dark terminal
+   look — JetBrains Mono everywhere, amber accents on armed/checked,
+   green on commit + active chip, stepped chip-bar pattern matching the
+   Phase C dashboard cards. */
+
+/* Status row — terminal letter-spacing + monospace numbers */
+:root[data-theme="pixel"] #rail-status {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+:root[data-theme="pixel"] .rail-status-hint {
+  color: var(--muted-2);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .rail-status-count {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--green);
+}
+
+:root[data-theme="pixel"] #cat-rail.armed .rail-status-count {
+  color: var(--green);
+}
+
+:root[data-theme="pixel"] .rail-status-arrow {
+  color: var(--muted);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+:root[data-theme="pixel"] .rail-status-active {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--green);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+:root[data-theme="pixel"] .rail-status-sum {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* Cancel + Commit — terminal outlined buttons, green commit on armed */
+:root[data-theme="pixel"] #rail-cancel-btn,
+:root[data-theme="pixel"] #rail-commit-btn {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+}
+
+:root[data-theme="pixel"] #rail-cancel-btn { color: var(--muted); }
+:root[data-theme="pixel"] #rail-cancel-btn:active { background: var(--bg-selected); }
+
+:root[data-theme="pixel"] #rail-commit-btn {
+  background: var(--green);
+  border-color: var(--green);
+  color: #0A0A0A;
+}
+:root[data-theme="pixel"] #rail-commit-btn:active {
+  background: #4AAE40;
+}
+:root[data-theme="pixel"] #rail-commit-btn:disabled {
+  background: transparent;
+  border-color: var(--rule);
+  color: var(--muted-2);
+  cursor: default;
+}
+
+/* Group labels — vertical-text, terminal letterspacing */
+:root[data-theme="pixel"] .rail-group-label {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--muted-2);
+}
+
+/* Chip — terminal outline, stepped chip-bar pattern in Phase C style */
+:root[data-theme="pixel"] .rail-chip {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  border: 1px solid var(--rule);
+  background: transparent;
+}
+:root[data-theme="pixel"] .rail-chip:active { background: var(--bg-selected); }
+:root[data-theme="pixel"] .rail-chip.active {
+  background: var(--green);
+  border-color: var(--green);
+}
+:root[data-theme="pixel"] .rail-chip.active .chip-name,
+:root[data-theme="pixel"] .rail-chip.active .chip-amount { color: #0A0A0A; }
+
+:root[data-theme="pixel"] .chip-name {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+
+/* Stepped chip-bar pattern — 3px-on / 2px-off, matching the Phase C
+   dashboard bars but proportionally smaller. */
+:root[data-theme="pixel"] .chip-bar {
+  height: 3px;
+  background: transparent;
+  border-top: 1px dotted var(--rule-2);
+}
+:root[data-theme="pixel"] .chip-bar-fill {
+  height: 3px;
+  margin-top: -1px;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--ink) 0,
+      var(--ink) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+:root[data-theme="pixel"] .chip-bar-fill.zero {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--amber) 0,
+      var(--amber) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+:root[data-theme="pixel"] .chip-bar-fill.over {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      var(--red) 0,
+      var(--red) 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+/* When chip is active, the bar pattern reads on the green bg as
+   ink-on-green dashes. */
+:root[data-theme="pixel"] .rail-chip.active .chip-bar { border-top-color: rgba(10, 10, 10, 0.25); }
+:root[data-theme="pixel"] .rail-chip.active .chip-bar-fill {
+  background:
+    repeating-linear-gradient(
+      90deg,
+      #0A0A0A 0,
+      #0A0A0A 3px,
+      transparent 3px,
+      transparent 5px
+    );
+}
+
+:root[data-theme="pixel"] .chip-amount {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--green);
+}
+:root[data-theme="pixel"] .chip-amount.zero { color: var(--amber); }
+:root[data-theme="pixel"] .chip-amount.over { color: var(--red); }
+
+/* + Add chip — dashed outline, muted */
+:root[data-theme="pixel"] .rail-add {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px dashed var(--muted-2);
+  background: transparent;
+}
+
+/* Txn-item armed/checked — green accents in pixel theme */
+:root[data-theme="pixel"] .txn-item.armed:active {
+  background: rgba(91, 200, 80, 0.14);
+}
+:root[data-theme="pixel"] .txn-item.checked {
+  background: rgba(91, 200, 80, 0.10);
+}
+:root[data-theme="pixel"] .txn-item.checked::before {
+  background: var(--green);
+}
+
+/* ===================== THEME TOGGLE (Setup tab) ===================== */
+
+/* These rules apply in BOTH themes — the toggle UI lives in setup.js
+   regardless of which theme is active. Scoped to the toggle's own
+   container so it doesn't collide with anything else. */
+
+#theme-toggle {
+  margin-top: 32px;
+}
+#theme-toggle h3 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+#theme-toggle .theme-buttons {
+  display: flex;
+  gap: 8px;
+}
+#theme-toggle .theme-btn {
+  flex: 1;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  border-radius: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+#theme-toggle .theme-btn.active {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+  font-weight: 700;
+}
+
+:root[data-theme="pixel"] #theme-toggle h3 {
+  letter-spacing: 0.22em;
+}
+:root[data-theme="pixel"] #theme-toggle .theme-btn {
+  letter-spacing: 0.16em;
+}

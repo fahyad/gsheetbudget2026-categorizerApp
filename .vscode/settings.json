@@ -1,0 +1,48 @@
+{
+  // Project-level VS Code workspace settings.
+  //
+  // Conservative + project-conventions only — NO personal preferences
+  // (font, theme, keybindings stay in your user settings). Goal: anyone
+  // (or future-you on a new machine) opening this repo gets the same
+  // editor behavior the code was written against.
+
+  // Indentation — matches existing JS / CSS / JSON in this repo.
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "editor.detectIndentation": false,
+
+  // No auto-formatter. This project deliberately has no Prettier / ESLint
+  // (see .vscode/extensions.json "unwantedRecommendations" and the
+  // "no build step" decision in Phase 22).
+  "editor.formatOnSave": false,
+
+  // File hygiene — matches what update-budget-docs/lint.sh + deploy.sh
+  // expect. Unix line endings + trailing newline keeps git diffs clean.
+  "files.eol": "\n",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  // Markdown — these files are long (findings.md > 1800 lines). Soft-wrap
+  // makes editing bearable; suppress autocompletion-in-prose so VS Code
+  // doesn't try to "help" mid-paragraph.
+  "[markdown]": {
+    "editor.wordWrap": "on",
+    "editor.quickSuggestions": {
+      "comments": "off",
+      "strings": "off",
+      "other": "off"
+    }
+  },
+
+  // Search — skip git internals + clasp project metadata. The default
+  // exclusion of node_modules is irrelevant here (we have none, by design).
+  "search.exclude": {
+    "**/.git": true,
+    "apps-script/.clasp.json": true
+  },
+
+  // Terminal — ensure aliases from ~/.zshrc resolve (e.g. `deploy "vNN"`).
+  // VS Code defaults to your login shell on macOS, but explicit is better
+  // than implicit and survives migration to other machines.
+  "terminal.integrated.defaultProfile.osx": "zsh"
+}

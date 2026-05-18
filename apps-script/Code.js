@@ -1,0 +1,4093 @@
+/**
+ * 2026 Personal Budget — Google Apps Script (v7)
+ * ================================================
+ *
+ * HOW TO INSTALL:
+ *   1. Open your "2026 Personal Budget" Google Sheet
+ *   2. Go to Extensions → Apps Script
+ *   3. Delete any existing code in Code.gs
+ *   4. Paste this entire file
+ *   5. Click Save (Ctrl+S)
+ *   6. Close the Apps Script editor tab
+ *   7. Refresh the Google Sheet — a "Budget Tools" menu will appear
+ *
+ * HOW TO USE:
+ *   1. Budget Tools → Build Workbook   (FIRST TIME ONLY — creates everything)
+ *   2. Budget Tools → Initialize Budget (generates all Budget rows)
+ *   3. Budget Tools → Update Script     (SAFE — refreshes formulas after code updates)
+ *   4. Budget Tools → Parse Emails      (scans Gmail for Scotiabank infoalerts)
+ *   5. Budget Tools → Set API Key       (sets key for mobile categorizer app)
+ *   6. To add categories: add to Setup cols D:E, then run "Add Category"
+ *   7. To add fixed expenses: edit Fixed Monthly Expenses directly (auto-updates)
+ *
+ * WEB APP API (for mobile categorizer PWA):
+ *   Deploy: Apps Script → Deploy → New deployment → Web app
+ *     Execute as: Me | Who has access: Anyone
+ *   Endpoints:
+ *     GET  ?action=parseAndFetch&apiKey=KEY      → parse emails + return pending
+ *     GET  ?action=categories&apiKey=KEY          → return category list
+ *     POST {action:"categorize",apiKey,timestamp,category} → categorize a transaction
+ *
+ * See the Instructions tab in the sheet for full details.
+ */
+
+// ================================================================
+// VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
+// ================================================================
+var APP_SCRIPT_VERSION = 'v11.25';
+var APP_SCRIPT_LAST_EDITED = '2026-05-18 12:22 MDT';
+
+// B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
+// month-by-month checks. PayPeriods data (lines ~1559-1566) is also
+// year-specific but kept hardcoded — annual rollover requires updating
+// BOTH this constant AND the PayPeriods array.
+var BUDGET_YEAR = 2026;
+var LATEST_VERSION_URL = 'https://raw.githubusercontent.com/fahyad/gsheetbudget2026-categorizerApp/main/apps-script/VERSION.txt';
+
+// ================================================================
+// MENU
+// ================================================================
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Budget Tools')
+    .addItem('1. Build Workbook (first time)', 'buildWorkbook')
+    .addItem('2. Initialize Budget', 'initializeBudget')
+    .addItem('3. Update Script (safe)', 'updateWorkbook')
+    .addSeparator()
+    .addItem('Add Category', 'addCategory')
+    .addItem('Archive Goal...', 'archiveGoalMenu')
+    .addItem('Unarchive Goal...', 'unarchiveGoalMenu')
+    .addItem('Parse Emails', 'processInfoAlerts')
+    .addItem('Setup Email Trigger (hourly auto-parse)', 'installEmailTrigger')
+    .addItem('Remove Email Trigger', 'uninstallEmailTrigger')
+    .addItem('Set API Key', 'setApiKey')
+    .addSeparator()
+    .addItem('View Activity Log', 'showLogsTab')
+    .addItem('Refresh Version Info', 'refreshVersionInfo')
+    .addItem('Dedupe + Normalize Transactions (rescue)', 'dedupeAndNormalizeTransactionsRescue')
+    .addToUi();
+
+  // Auto-refresh version info on open. Fire-and-forget — don't block menu.
+  try { refreshVersionInfo(); } catch (e) { /* fail silently */ }
+}
+
+// ================================================================
+// WEB APP API
+// These functions handle HTTP requests from the mobile PWA.
+// Deploy as: Execute as me → Anyone
+// ================================================================
+
+/**
+ * Routes an action to its handler. Pure dispatch — errors bubble to the
+ * entry point's wrapper for logging.
+ */
+function routeAction_(action, params) {
+  if (action === 'parseAndFetch')    return handleParseAndFetch_(params);
+  if (action === 'categories')       return handleCategories_();
+  if (action === 'bootstrap')        return handleBootstrap_(params);
+  if (action === 'categorize')       return handleCategorize_(params);
+  if (action === 'uncategorize')     return handleUncategorize_(params);
+  if (action === 'addCategory')      return handleAddCategory_(params);
+  if (action === 'batchCategorize')  return handleBatchCategorize_(params);
+  if (action === 'dumpSheet')        return handleDumpSheet_(params);
+  if (action === 'version')          return handleVersion_(params);
+  if (action === 'logClientMetrics') return handleLogClientMetrics_(params);
+  if (action === 'archiveGoal')      return handleArchiveGoal_(params);
+  if (action === 'unarchiveGoal')    return handleUnarchiveGoal_(params);
+  return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
+}
+
+/**
+ * Handles GET requests from the PWA. Wraps every request with timing + logging.
+ */
+function doGet(e) {
+  var start = Date.now();
+  var params = (e && e.parameter) || {};
+  var action = params.action || 'unknown';
+
+  try {
+    if (!validateApiKey_(params.apiKey)) {
+      logActivity_(action, Date.now() - start, 'auth_fail', 'method: GET', 'Invalid API key');
+      return jsonResponse_({ success: false, error: 'Invalid API key' });
+    }
+
+    var response = routeAction_(action, params);
+    var duration = Date.now() - start;
+    var parsed = { success: true };
+    try { parsed = JSON.parse(response.getContent()); } catch (parseErr) { /* leave as default */ }
+
+    // v11.13: echo the server's self-reported exec time so the client can
+    // compute networkMs = clientTotalMs - serverMs in its diagnostics log.
+    parsed._elapsedMs = duration;
+    response = jsonResponse_(parsed);
+
+    logActivity_(
+      action,
+      duration,
+      parsed.success ? 'success' : 'fail',
+      summarizeResult_(action, parsed),
+      parsed.success ? '' : (parsed.error || '')
+    );
+    return response;
+  } catch (err) {
+    var duration = Date.now() - start;
+    logActivity_(action, duration, 'crash', 'method: GET', err.toString() + '\n' + (err.stack || ''));
+    return jsonResponse_({ success: false, error: err.toString(), _elapsedMs: duration });
+  }
+}
+
+/**
+ * Handles POST requests from the PWA. Kept for backward compat (PWA uses GET).
+ * Also wrapped with timing + logging.
+ */
+function doPost(e) {
+  var start = Date.now();
+  var body = {};
+  var action = 'unknown';
+
+  try {
+    body = JSON.parse(e.postData.contents);
+    action = body.action || 'unknown';
+
+    if (!validateApiKey_(body.apiKey)) {
+      logActivity_(action, Date.now() - start, 'auth_fail', 'method: POST', 'Invalid API key');
+      return jsonResponse_({ success: false, error: 'Invalid API key' });
+    }
+
+    var response = routeAction_(action, body);
+    var duration = Date.now() - start;
+    var parsed = { success: true };
+    try { parsed = JSON.parse(response.getContent()); } catch (parseErr) { /* leave as default */ }
+
+    parsed._elapsedMs = duration;
+    response = jsonResponse_(parsed);
+
+    logActivity_(
+      action,
+      duration,
+      parsed.success ? 'success' : 'fail',
+      summarizeResult_(action, parsed) + ' (POST)',
+      parsed.success ? '' : (parsed.error || '')
+    );
+    return response;
+  } catch (err) {
+    var duration = Date.now() - start;
+    logActivity_(action, duration, 'crash', 'method: POST', err.toString() + '\n' + (err.stack || ''));
+    return jsonResponse_({ success: false, error: err.toString(), _elapsedMs: duration });
+  }
+}
+
+/**
+ * parseAndFetch — returns uncategorized transactions from the Transactions
+ * tab (where Category is empty AND Timestamp is set).
+ *
+ * v11.0 single-ledger: introduced the read against Transactions.
+ * v11.17 Phase 2 of time-driven email parsing: the inline parse step is
+ *   now opt-in via ?withParse=1. The hourly `processInfoAlertsTrigger`
+ *   handles email parsing in the background, so PWA mount-time refresh
+ *   pays just the read cost (~200 ms) instead of also waiting on a
+ *   Gmail scan (~1-3 s).
+ *
+ * Backward compat: callers passing no `withParse` get a read-only response
+ * (parsed: 0). Old PWAs work fine because they never read `data.parsed`.
+ * Force-parse path: the Parse pill + empty-state Refresh button pass
+ * withParse=1 explicitly.
+ */
+function handleParseAndFetch_(params) {
+  // Run email parser only when the caller explicitly opts in. The hourly
+  // trigger (installEmailTrigger / processInfoAlertsTrigger) keeps the
+  // sheet fresh in the background; this inline path is only used when the
+  // user taps Parse / Refresh and is willing to wait for the Gmail scan.
+  var parseResult = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
+  var wantParse = params.withParse === '1' || params.withParse === 'true' || params.withParse === true;
+  if (wantParse) {
+    parseResult = processInfoAlerts_();
+  }
+
+  // Read uncategorized transactions from Transactions
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn || txn.getLastRow() < 2) {
+    return jsonResponse_({ success: true, parsed: parseResult.parsed, transactions: [] });
+  }
+
+  // Build set of known timestamps for dedup (legacy PWA support)
+  var knownSet = {};
+  if (params.knownTimestamps) {
+    var known = params.knownTimestamps.split(',');
+    for (var k = 0; k < known.length; k++) {
+      knownSet[known[k].trim()] = true;
+    }
+  }
+
+  // Read cols A-D + H (Date, Merchant, Amount, Category, Timestamp)
+  // Could read 8 cols, but we only need A-D and H
+  var lastRow = txn.getLastRow();
+  var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
+  var transactions = [];
+  for (var i = 0; i < data.length; i++) {
+    var date = data[i][0];           // A
+    var merchant = data[i][1];       // B
+    var amount = data[i][2];         // C
+    var category = data[i][3];       // D
+    var rawTs = data[i][7];          // H
+
+    // Skip rows that are categorized OR have no Timestamp (manual entries)
+    if (category && category !== '') continue;
+    if (!rawTs) continue;
+    if (!merchant) continue;  // safety: skip rows where merchant somehow missing
+
+    var timestamp = (rawTs instanceof Date)
+      ? Utilities.formatDate(rawTs, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+      : rawTs.toString();
+
+    if (knownSet[timestamp]) continue;
+
+    transactions.push({
+      timestamp: timestamp,
+      date: formatDate_(date),
+      merchant: merchant,
+      amount: amount
+    });
+  }
+
+  return jsonResponse_({
+    success: true,
+    parsed: parseResult.parsed,
+    parseErrors: parseResult.errors,
+    transactions: transactions
+  });
+}
+
+/**
+ * categories: returns the category list from Setup tab.
+ */
+function handleCategories_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var setup = ss.getSheetByName('Setup');
+  if (!setup) {
+    return jsonResponse_({ success: false, error: 'Setup tab not found' });
+  }
+
+  // v11.14: read D:F instead of D:E. Col F = Archived? checkbox. Archived
+  // categories are excluded from the PWA dropdown but stay in Setup and
+  // Budget tabs so historical data + rebuilds keep working.
+  var catRaw = setup.getRange('D2:F100').getValues();
+  var categories = [];
+  for (var c = 0; c < catRaw.length; c++) {
+    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income'
+        && catRaw[c][2] !== true) {
+      categories.push({ main: catRaw[c][0], sub: catRaw[c][1] });
+    }
+  }
+
+  return jsonResponse_({ success: true, categories: categories });
+}
+
+/**
+ * bootstrap (v11.20): single-call combo of `categories` + `parseAndFetch`.
+ *
+ * Why: cold-mount in the PWA awaits two sequential network calls. Each call
+ * pays a ~2.5 s 302-redirect+TLS tax (script.google.com → script.googleuser
+ * content.com). Combining the two server-side payloads into one round-trip
+ * cuts that cost ~50 % per cold mount (Phase 22 measurement: 7.3 s → ~4.8 s
+ * projected). Both underlying handlers are read-only when withParse is
+ * false, share no locks, and read different tabs (Setup vs. Transactions),
+ * so combining them is purely additive on the server.
+ *
+ * Backward compat: this is a NEW action — old PWAs never call it. New PWAs
+ * call it first; on any failure (including "Unknown action: bootstrap"
+ * from old Apps Script during a deploy gap) the PWA falls back to the
+ * original parallel `fetchCategories` + `parseAndFetch` pattern.
+ *
+ * Honors `withParse` — passes through to handleParseAndFetch_. Per-section
+ * error fields (`categoriesError`, `transactionsError`) let the client
+ * recover from partial failures without falling back to the dual-fetch
+ * path unless necessary.
+ */
+function handleBootstrap_(params) {
+  var bootstrapStart = Date.now();
+
+  var catResponse = handleCategories_();
+  var txnResponse = handleParseAndFetch_(params);
+
+  var cat = null, txn = null, parsed = 0, parseErrors = 0;
+  var catErr = null, txnErr = null;
+
+  try {
+    var parsedCat = JSON.parse(catResponse.getContent());
+    if (parsedCat.success) {
+      cat = parsedCat.categories;
+    } else {
+      catErr = parsedCat.error || 'Unknown categories error';
+    }
+  } catch (e) {
+    catErr = 'categories JSON parse: ' + e.toString();
+  }
+
+  try {
+    var parsedTxn = JSON.parse(txnResponse.getContent());
+    if (parsedTxn.success) {
+      txn = parsedTxn.transactions;
+      parsed = parsedTxn.parsed || 0;
+      parseErrors = parsedTxn.parseErrors || 0;
+    } else {
+      txnErr = parsedTxn.error || 'Unknown parseAndFetch error';
+    }
+  } catch (e) {
+    txnErr = 'parseAndFetch JSON parse: ' + e.toString();
+  }
+
+  return jsonResponse_({
+    success: true,
+    categories: cat || [],
+    categoriesError: catErr,
+    transactions: txn || [],
+    transactionsError: txnErr,
+    parsed: parsed,
+    parseErrors: parseErrors,
+    _bootstrapMs: Date.now() - bootstrapStart
+  });
+}
+
+/**
+ * categorize (v11.0 single-ledger): updates the Category cell of an existing
+ * Transactions row matched by Timestamp.
+ * Expects: { timestamp, category }
+ */
+function handleCategorize_(body) {
+  var timestamp = body.timestamp;
+  var category = body.category;
+
+  if (!timestamp || !category) {
+    return jsonResponse_({ success: false, error: 'Missing timestamp or category' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var txn = ss.getSheetByName('Transactions');
+    var setup = ss.getSheetByName('Setup');
+
+    if (!txn || !setup) {
+      return jsonResponse_({ success: false, error: 'Required tab not found' });
+    }
+
+    // Validate category against Setup
+    var validCats = setup.getRange('E2:E100').getValues();
+    var isValid = false;
+    for (var c = 0; c < validCats.length; c++) {
+      if (validCats[c][0] === category) { isValid = true; break; }
+    }
+    if (!isValid) {
+      return jsonResponse_({ success: false, error: 'Invalid category: ' + category });
+    }
+
+    // Find Transactions row by Timestamp where Category is currently empty
+    var lastRow = txn.getLastRow();
+    if (lastRow < 2) {
+      return jsonResponse_({ success: false, error: 'No transactions found' });
+    }
+
+    // Read Category (col D) and Timestamp (col H) for all rows
+    var range = txn.getRange(2, 4, lastRow - 1, 5).getValues();  // D..H
+    var foundRow = -1;
+    var txnMerchant, txnAmount, txnDate;
+
+    for (var i = 0; i < range.length; i++) {
+      var existingCat = range[i][0];     // col D
+      var ts = range[i][4];               // col H
+      var rowTs = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
+
+      if (rowTs === timestamp && (!existingCat || existingCat === '')) {
+        foundRow = i + 2;
+        // Read merchant + date for response
+        var rowFull = txn.getRange(foundRow, 1, 1, 3).getValues()[0];
+        txnDate = rowFull[0];
+        txnMerchant = rowFull[1];
+        txnAmount = rowFull[2];
+        break;
+      }
+    }
+
+    if (foundRow === -1) {
+      return jsonResponse_({ success: false, error: 'Transaction not found or already categorized' });
+    }
+
+    // Update Category cell
+    txn.getRange(foundRow, 4).setValue(category);
+    SpreadsheetApp.flush();
+
+    // Verify
+    var actual = txn.getRange(foundRow, 4).getValue();
+    if (String(actual) !== String(category)) {
+      logActivity_('categorize_verify', 0, 'write_verify_fail',
+        'Expected category "' + category + '" at row ' + foundRow + ', got "' + actual + '"', '');
+      return jsonResponse_({
+        success: false,
+        error: 'Categorize verification failed. Check Logs tab.'
+      });
+    }
+
+    var period = txn.getRange(foundRow, 7).getDisplayValue();
+
+    return jsonResponse_({
+      success: true,
+      transaction: {
+        timestamp: timestamp,
+        category: category,
+        merchant: txnMerchant,
+        amount: txnAmount,
+        period: period
+      }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * uncategorize (v11.0 single-ledger): clears the Category cell of an existing
+ * Transactions row matched by Timestamp.
+ * Expects: { timestamp } (merchant/amount/category fields ignored — kept for
+ * backward compat with PWA's API contract)
+ */
+function handleUncategorize_(body) {
+  var timestamp = body.timestamp;
+
+  if (!timestamp) {
+    return jsonResponse_({ success: false, error: 'Missing timestamp' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var txn = ss.getSheetByName('Transactions');
+
+    if (!txn) {
+      return jsonResponse_({ success: false, error: 'Transactions tab not found' });
+    }
+
+    var lastRow = txn.getLastRow();
+    // A8: empty sheet means the row genuinely doesn't exist — that's a
+    // failure, not a success. Previously this returned success: true and
+    // the PWA would silently delete the item from its local syncQueue.
+    if (lastRow < 2) {
+      return jsonResponse_({
+        success: false,
+        error: 'No transactions exist; nothing to uncategorize for ' + timestamp
+      });
+    }
+
+    // Find row by Timestamp (search from bottom — likely most recent)
+    var range = txn.getRange(2, 8, lastRow - 1, 1).getValues();  // col H = Timestamp
+    var foundRow = -1;
+    for (var i = range.length - 1; i >= 0; i--) {
+      var ts = range[i][0];
+      var rowTs = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
+      if (rowTs === timestamp) {
+        foundRow = i + 2;
+        break;
+      }
+    }
+
+    // A8: if no matching row was found, fail loudly. The PWA was previously
+    // treating no-match as success, removing the item from syncQueue and
+    // hiding the failure from the user.
+    if (foundRow < 0) {
+      return jsonResponse_({
+        success: false,
+        error: 'Row not found for timestamp: ' + timestamp
+      });
+    }
+
+    txn.getRange(foundRow, 4).setValue('');  // Clear Category
+
+    return jsonResponse_({
+      success: true,
+      transaction: { timestamp: timestamp }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * addCategory: adds a new category to the Setup tab and rebuilds Budget rows.
+ * Expects: { mainCategory, subCategory }
+ */
+function handleAddCategory_(body) {
+  var mainCategory = (body.mainCategory || '').trim();
+  var subCategory = (body.subCategory || '').trim();
+
+  if (!mainCategory || !subCategory) {
+    return jsonResponse_({ success: false, error: 'Main category and sub category are required' });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    return handleAddCategoryInner_(mainCategory, subCategory);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function handleAddCategoryInner_(mainCategory, subCategory) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var setup = ss.getSheetByName('Setup');
+
+  if (!setup) {
+    return jsonResponse_({ success: false, error: 'Setup tab not found' });
+  }
+
+  // Check for duplicate sub category
+  var existingSubs = setup.getRange('E2:E100').getValues();
+  for (var i = 0; i < existingSubs.length; i++) {
+    if (existingSubs[i][0].toString().toLowerCase() === subCategory.toLowerCase()) {
+      return jsonResponse_({ success: false, error: 'Category "' + subCategory + '" already exists' });
+    }
+  }
+
+  // A5: find first empty row in D:E. Previous logic would let nextRow advance
+  // to 101 if all 99 slots were full, then silently write outside the named
+  // range (CategoryMain = D2:D100). New behavior: detect "no empty slot" and
+  // return a clean capacity error.
+  var catData = setup.getRange('D2:D100').getValues();
+  var nextRow = -1;
+  for (var j = 0; j < catData.length; j++) {
+    var v = catData[j][0];
+    if (v === '' || v === null || v === undefined) {
+      nextRow = j + 2;
+      break;
+    }
+  }
+
+  if (nextRow === -1) {
+    return jsonResponse_({
+      success: false,
+      error: 'Categories tab full (D2:D100 has 99 entries). Cannot add more without expanding the named range.'
+    });
+  }
+
+  // Write the new category
+  setup.getRange(nextRow, 4, 1, 2).setValues([[mainCategory, subCategory]]);
+
+  // Rebuild Budget rows to include the new category
+  var result = rebuildBudgetInternal_('add', ss);
+
+  if (result.error) {
+    return jsonResponse_({ success: false, error: result.error });
+  }
+
+  return jsonResponse_({
+    success: true,
+    category: { main: mainCategory, sub: subCategory },
+    budgetRowsAdded: result.newCount
+  });
+}
+
+/**
+ * batchCategorize (v11.0 single-ledger): updates the Category cell of existing
+ * Transactions rows matched by Timestamp. No copy/move — the Pending tab is gone.
+ *
+ * Expects: { items: JSON string of [{ts, cat}, ...] }
+ *
+ * Guarantees:
+ * - Serialized via LockService (no concurrent runs)
+ * - Category validated against Setup E:E before writes
+ * - Per-row verification after update — rollback (clear Category) if any verify fails
+ */
+function handleBatchCategorize_(params) {
+  if (!params.items) {
+    return jsonResponse_({ success: false, error: 'Missing items parameter' });
+  }
+
+  var items;
+  try {
+    items = JSON.parse(params.items);
+  } catch (e) {
+    return jsonResponse_({ success: false, error: 'Invalid items JSON' });
+  }
+
+  if (!items.length) {
+    return jsonResponse_({ success: true, results: [], summary: { total: 0, succeeded: 0, failed: 0 } });
+  }
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var txn = ss.getSheetByName('Transactions');
+    var setup = ss.getSheetByName('Setup');
+
+    if (!txn || !setup) {
+      return jsonResponse_({ success: false, error: 'Required tab not found (Transactions/Setup)' });
+    }
+
+    // Load valid categories once for validation
+    var validCategories = {};
+    var catData = setup.getRange('E2:E100').getValues();
+    for (var c = 0; c < catData.length; c++) {
+      if (catData[c][0]) validCategories[catData[c][0]] = true;
+    }
+
+    // Read all Transactions Timestamps + Category once. We scan to find rows
+    // matching each item's timestamp where Category is currently empty.
+    var txnLastRow = txn.getLastRow();
+    var txnData = (txnLastRow >= 2)
+      ? txn.getRange(2, 4, txnLastRow - 1, 5).getValues()  // cols D..H = Category, MainCat, Tx#, Period, Timestamp
+      : [];
+
+    // Normalize Timestamps to strings for comparison
+    for (var p = 0; p < txnData.length; p++) {
+      var ts = txnData[p][4];  // col H = index 4 in our slice (D=0, E=1, F=2, G=3, H=4)
+      txnData[p][5] = (ts instanceof Date)
+        ? Utilities.formatDate(ts, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : (ts ? ts.toString() : '');
+    }
+
+    var results = [];
+    var updates = [];  // {row, category} — rows where we'll write the Category
+
+    for (var i = 0; i < items.length; i++) {
+      var timestamp = items[i].ts;
+      var category = items[i].cat;
+
+      if (!timestamp || !category) {
+        results.push({ timestamp: timestamp || '', success: false, error: 'Missing timestamp or category' });
+        continue;
+      }
+
+      if (!validCategories[category]) {
+        results.push({ timestamp: timestamp, success: false, error: 'Invalid category: ' + category });
+        continue;
+      }
+
+      // Find matching Transactions row by Timestamp where Category is empty
+      var foundIdx = -1;
+      for (var j = 0; j < txnData.length; j++) {
+        var existingCat = txnData[j][0];  // col D
+        var rowTs = txnData[j][5];         // normalized timestamp
+        if (rowTs === timestamp && (!existingCat || existingCat === '')) {
+          foundIdx = j;
+          break;
+        }
+      }
+
+      if (foundIdx === -1) {
+        results.push({ timestamp: timestamp, success: false, error: 'Not found or already categorized' });
+        continue;
+      }
+
+      // Mark in local data to prevent double-matching within this batch
+      txnData[foundIdx][0] = category;
+
+      var sheetRow = foundIdx + 2;
+      updates.push({ row: sheetRow, category: category, timestamp: timestamp });
+      results.push({ timestamp: timestamp, success: true });
+    }
+
+    // Apply updates to col D of each row, then verify.
+    // Writes are individual (rows are non-contiguous in the typical batch).
+    // Verify is batched into ONE read covering min..max row — was previously
+    // N getValue calls, which on a 30-item batch was ~30x more sheet I/O than
+    // necessary. (A2)
+    if (updates.length > 0) {
+      for (var u = 0; u < updates.length; u++) {
+        txn.getRange(updates[u].row, 4).setValue(updates[u].category);
+      }
+      SpreadsheetApp.flush();
+
+      // A2: compute min/max row, do one bulk read of col D over that range.
+      var minRow = updates[0].row;
+      var maxRow = updates[0].row;
+      for (var b = 1; b < updates.length; b++) {
+        if (updates[b].row < minRow) minRow = updates[b].row;
+        if (updates[b].row > maxRow) maxRow = updates[b].row;
+      }
+      var verifySpan = txn.getRange(minRow, 4, maxRow - minRow + 1, 1).getValues();
+
+      var rollback = [];
+      for (var v = 0; v < updates.length; v++) {
+        var actual = verifySpan[updates[v].row - minRow][0];
+        if (String(actual) !== String(updates[v].category)) {
+          rollback.push(updates[v]);
+        }
+      }
+
+      if (rollback.length > 0) {
+        // Roll back ALL updates from this batch (atomicity).
+        // Individual writes here too — rare path, optimization not worth it.
+        for (var r = 0; r < updates.length; r++) {
+          txn.getRange(updates[r].row, 4).setValue('');
+        }
+        logActivity_('batchCategorize_verify', 0, 'write_verify_fail',
+          rollback.length + '/' + updates.length + ' verifications failed — rolled back batch', '');
+        return jsonResponse_({
+          success: false,
+          error: 'Verification failed for ' + rollback.length + ' rows — entire batch rolled back. Check Logs tab.'
+        });
+      }
+    }
+
+    return jsonResponse_({
+      success: true,
+      results: results,
+      summary: {
+        total: items.length,
+        succeeded: updates.length,
+        failed: items.length - updates.length
+      }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * dumpSheet: read-only inspection of any tab/range in the spreadsheet.
+ * Used by Claude to inspect sheet state without OAuth/Sheets-API access.
+ * Gated by API key (same as other endpoints). Caps response at 10000 cells.
+ *
+ * Params:
+ *   tab            - sheet name (e.g. "Budget"). Required unless metadata=true.
+ *   range          - A1 notation (e.g. "A1:F50"). Optional. Defaults to whole used range.
+ *   includeFormulas - "true" to return formulas; otherwise returns evaluated values.
+ *   metadata       - "true" to return list of all tabs + dimensions (no tab/range needed).
+ */
+function handleDumpSheet_(params) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // Metadata mode: list all tabs + dimensions
+  if (params.metadata === 'true' || params.metadata === '1') {
+    var sheetList = ss.getSheets().map(function(s) {
+      var color = null;
+      try {
+        var co = s.getTabColorObject();
+        if (co) color = co.asRgbColor().asHexString();
+      } catch (e) { /* tab has no color or unsupported color type */ }
+      return {
+        name: s.getName(),
+        rows: s.getLastRow(),
+        cols: s.getLastColumn(),
+        maxRows: s.getMaxRows(),
+        maxCols: s.getMaxColumns(),
+        hidden: s.isSheetHidden(),
+        tabColor: color
+      };
+    });
+    return jsonResponse_({
+      success: true,
+      spreadsheetName: ss.getName(),
+      sheets: sheetList
+    });
+  }
+
+  if (!params.tab) {
+    return jsonResponse_({ success: false, error: 'Missing tab parameter (or use metadata=true)' });
+  }
+
+  var sheet = ss.getSheetByName(params.tab);
+  if (!sheet) {
+    return jsonResponse_({ success: false, error: 'Tab not found: ' + params.tab });
+  }
+
+  // Resolve range
+  var range;
+  try {
+    if (params.range) {
+      range = sheet.getRange(params.range);
+    } else {
+      // Default: data range (only cells with content)
+      var lastRow = Math.max(sheet.getLastRow(), 1);
+      var lastCol = Math.max(sheet.getLastColumn(), 1);
+      range = sheet.getRange(1, 1, lastRow, lastCol);
+    }
+  } catch (e) {
+    return jsonResponse_({ success: false, error: 'Invalid range: ' + e.toString() });
+  }
+
+  var numRows = range.getNumRows();
+  var numCols = range.getNumColumns();
+  var totalCells = numRows * numCols;
+  if (totalCells > 10000) {
+    return jsonResponse_({
+      success: false,
+      error: 'Range too large (' + totalCells + ' cells, max 10000). Narrow with ?range=A1:Z100'
+    });
+  }
+
+  var data;
+  if (params.includeFormulas === 'true' || params.includeFormulas === '1') {
+    // Mix: formulas where present, values otherwise
+    var formulas = range.getFormulas();
+    var values = range.getValues();
+    data = formulas.map(function(row, r) {
+      return row.map(function(f, c) {
+        return f ? f : values[r][c];
+      });
+    });
+  } else {
+    // displayValues = formatted strings (dates as "Apr 14, 2026", currency as "$50.00")
+    data = range.getDisplayValues();
+  }
+
+  return jsonResponse_({
+    success: true,
+    tab: params.tab,
+    range: range.getA1Notation(),
+    rows: numRows,
+    cols: numCols,
+    values: data
+  });
+}
+
+// ================================================================
+// VERSION INFO
+// ================================================================
+
+/**
+ * Fetches the latest version info from VERSION.txt on GitHub. Cached for 1 hour
+ * in Script Properties to avoid hammering GitHub on every onOpen.
+ *
+ * Returns: { latestVersion, latestLastEdited, fetchedAt, error? }
+ */
+function getLatestVersionInfo_() {
+  var props = PropertiesService.getScriptProperties();
+  var cachedRaw = props.getProperty('LATEST_VERSION_CACHE');
+  var now = new Date().getTime();
+
+  if (cachedRaw) {
+    try {
+      var cached = JSON.parse(cachedRaw);
+      // Cache TTL: 1 hour
+      if (cached.fetchedAtMs && (now - cached.fetchedAtMs < 3600000)) {
+        return cached;
+      }
+    } catch (e) { /* corrupt cache — fall through to refresh */ }
+  }
+
+  var info;
+  try {
+    var resp = UrlFetchApp.fetch(LATEST_VERSION_URL, { muteHttpExceptions: true });
+    if (resp.getResponseCode() !== 200) {
+      throw new Error('HTTP ' + resp.getResponseCode());
+    }
+    var lines = resp.getContentText().trim().split('\n');
+    info = {
+      latestVersion: (lines[0] || '').trim(),
+      latestLastEdited: (lines[1] || '').trim(),
+      fetchedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm zzz'),
+      fetchedAtMs: now
+    };
+  } catch (err) {
+    // Network failure: fall back to cached value (may be > 1 hr old) or empty
+    if (cachedRaw) {
+      try {
+        info = JSON.parse(cachedRaw);
+        info.error = 'fetch failed: ' + err.toString() + ' (using cached)';
+        return info;
+      } catch (e) { /* fall through */ }
+    }
+    info = {
+      latestVersion: '?',
+      latestLastEdited: '?',
+      fetchedAt: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm zzz'),
+      fetchedAtMs: now,
+      error: 'fetch failed: ' + err.toString()
+    };
+    // Don't cache failures — try again next time
+    return info;
+  }
+
+  props.setProperty('LATEST_VERSION_CACHE', JSON.stringify(info));
+  return info;
+}
+
+/**
+ * Writes the version block to rows 1-6 of the Instructions tab.
+ * Layout:
+ *   Row 1: APPS SCRIPT VERSION (header bar)
+ *   Row 2: Version: vX.Y
+ *   Row 3: Last edited: ...
+ *   Row 4: Update needed: Yes/No (with color)
+ *   Row 5: Last checked: ...
+ *   Row 6: blank spacer
+ */
+function writeVersionBlock_(sheet) {
+  var latest = getLatestVersionInfo_();
+  var updateNeeded = latest.latestVersion && latest.latestVersion !== '?' &&
+                     latest.latestVersion !== APP_SCRIPT_VERSION;
+
+  var updateText;
+  if (latest.error) {
+    updateText = 'Update needed: ? (could not check — ' + latest.error + ')';
+  } else if (updateNeeded) {
+    updateText = 'Update needed: YES — latest is ' + latest.latestVersion +
+                 ' (this sheet has ' + APP_SCRIPT_VERSION + ')';
+  } else {
+    updateText = 'Update needed: No (latest is ' + latest.latestVersion + ')';
+  }
+
+  var rows = [
+    ['APPS SCRIPT VERSION'],
+    ['Version: ' + APP_SCRIPT_VERSION],
+    ['Last edited: ' + APP_SCRIPT_LAST_EDITED],
+    [updateText],
+    ['Last checked: ' + (latest.fetchedAt || '?')],
+    ['']
+  ];
+
+  sheet.getRange(1, 1, 6, 1).setValues(rows);
+
+  // Formatting
+  // Row 1: header bar
+  sheet.getRange(1, 1).setFontSize(14).setFontWeight('bold')
+    .setBackground('#1a237e').setFontColor('#ffffff').setHorizontalAlignment('center');
+  // Rows 2-3: regular
+  sheet.getRange(2, 1, 2, 1).setFontSize(11).setFontWeight('normal')
+    .setBackground(null).setFontColor('#333333');
+  // Row 4: colored by update status
+  var updateBg = updateNeeded ? '#ffcdd2' : '#c8e6c9';
+  var updateFg = updateNeeded ? '#b71c1c' : '#1b5e20';
+  if (latest.error) { updateBg = '#fff9c4'; updateFg = '#827717'; }
+  sheet.getRange(4, 1).setFontSize(11).setFontWeight('bold')
+    .setBackground(updateBg).setFontColor(updateFg);
+  // Row 5: last checked (small italic)
+  sheet.getRange(5, 1).setFontSize(9).setFontStyle('italic')
+    .setBackground(null).setFontColor('#666666');
+  // Row 6: clear formatting
+  sheet.getRange(6, 1).setBackground(null).setFontColor('#000000')
+    .setFontWeight('normal').setFontStyle('normal').setFontSize(11);
+}
+
+/**
+ * One-time setup: run this from the Apps Script editor to grant the
+ * UrlFetchApp permission. We deliberately call UrlFetchApp.fetch with NO
+ * try/catch so that if permission is missing, Google shows the auth dialog.
+ * Once you grant the permission, refreshVersionInfo + the version endpoint
+ * will work properly.
+ *
+ * After running, check Execution log → should show "OK — fetched VERSION.txt".
+ */
+function requestPermissions() {
+  // This call will trigger the auth dialog if scope is not granted.
+  var resp = UrlFetchApp.fetch(LATEST_VERSION_URL);
+  var content = resp.getContentText();
+  Logger.log('OK — fetched VERSION.txt (' + content.length + ' bytes):\n' + content);
+  // Clear the cache so subsequent fetches re-pull the real value
+  PropertiesService.getScriptProperties().deleteProperty('LATEST_VERSION_CACHE');
+  return content;
+}
+
+/**
+ * Menu function: refreshes the version block on the Instructions tab.
+ * Forces a fresh GitHub fetch (clears the 1-hour cache first).
+ */
+function refreshVersionInfo() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('Instructions');
+  if (!sheet) return; // no instructions tab — fail silently
+  // Force fresh fetch
+  PropertiesService.getScriptProperties().deleteProperty('LATEST_VERSION_CACHE');
+  writeVersionBlock_(sheet);
+}
+
+/**
+ * version: API endpoint that returns version info for the PWA to display.
+ */
+function handleVersion_(params) {
+  var latest = getLatestVersionInfo_();
+  var updateNeeded = latest.latestVersion && latest.latestVersion !== '?' &&
+                     latest.latestVersion !== APP_SCRIPT_VERSION;
+
+  return jsonResponse_({
+    success: true,
+    appsScript: {
+      version: APP_SCRIPT_VERSION,
+      lastEdited: APP_SCRIPT_LAST_EDITED,
+      latestVersion: latest.latestVersion,
+      latestLastEdited: latest.latestLastEdited,
+      updateNeeded: !!updateNeeded,
+      lastChecked: latest.fetchedAt,
+      error: latest.error || null
+    }
+  });
+}
+
+// ================================================================
+// ACTIVITY LOG
+// ================================================================
+
+/**
+ * Returns the Logs tab, creating it if it doesn't exist.
+ * Columns: Timestamp | Action | Duration (ms) | Status | Details | Error
+ */
+function getOrCreateLogsSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('Logs');
+  if (!sheet) {
+    sheet = ss.insertSheet('Logs');
+    sheet.setTabColor('#9e9e9e');
+    sheet.getRange(1, 1, 1, 6)
+      .setValues([['Timestamp', 'Action', 'Duration (ms)', 'Status', 'Details', 'Error']])
+      .setFontWeight('bold')
+      .setBackground('#eeeeee');
+    sheet.setColumnWidth(1, 160);  // Timestamp
+    sheet.setColumnWidth(2, 140);  // Action
+    sheet.setColumnWidth(3, 100);  // Duration
+    sheet.setColumnWidth(4, 100);  // Status
+    sheet.setColumnWidth(5, 350);  // Details
+    sheet.setColumnWidth(6, 400);  // Error
+    sheet.setFrozenRows(1);
+    sheet.getRange('A:A').setNumberFormat('yyyy-mm-dd HH:mm:ss');
+  }
+  return sheet;
+}
+
+// ================================================================
+// CLIENT METRICS (v11.13)
+// Batch sink for per-request perf/context records from the PWA. Kept in
+// its own tab so ops "Logs" stays lightweight. Rows are append-only.
+// ================================================================
+
+var CLIENT_METRICS_HEADER = [
+  'ReceivedAt','SessionId','MountN','AppVersion','Connection','Action',
+  'ClientStartMs','ClientTotalMs','ServerMs','NetworkMs',
+  'InFlightAtStart','MsSincePrev','Duplicate','Cached','Ok','ErrorMsg','Bytes','Note'
+];
+
+function getOrCreateClientMetricsSheet_() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('ClientMetrics');
+  if (!sheet) {
+    sheet = ss.insertSheet('ClientMetrics');
+    sheet.appendRow(CLIENT_METRICS_HEADER);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, CLIENT_METRICS_HEADER.length)
+      .setFontWeight('bold').setBackground('#E8EAF6');
+    sheet.getRange('A:A').setNumberFormat('yyyy-mm-dd HH:mm:ss');
+    sheet.setTabColor('#7986CB');
+  }
+  return sheet;
+}
+
+/**
+ * handleLogClientMetrics_ — accepts a batch of client-side metric records
+ * and appends them to the ClientMetrics tab. Called via sendBeacon on
+ * visibility-hidden; must be cheap and non-blocking.
+ *
+ * Input shape (params):
+ *   { session: string, records: [{ sessionId, mountN, appVersion,
+ *       connection, action, clientStartMs, clientTotalMs, serverMs,
+ *       networkMs, inFlightAtStart, msSincePrev, duplicateDetected,
+ *       cached, ok, errorMsg, bytes, note }, ...] }
+ */
+function handleLogClientMetrics_(params) {
+  var records = (params && params.records) || [];
+  if (!Array.isArray(records) || records.length === 0) {
+    return jsonResponse_({ success: true, count: 0 });
+  }
+
+  // Hard cap on batch size — defensive against buggy clients. 500 rows is
+  // plenty (client buffer is 50).
+  if (records.length > 500) records = records.slice(0, 500);
+
+  var sheet = getOrCreateClientMetricsSheet_();
+  var now = new Date();
+  var rows = [];
+  for (var i = 0; i < records.length; i++) {
+    var r = records[i] || {};
+    rows.push([
+      now,
+      r.sessionId || '',
+      (typeof r.mountN === 'number') ? r.mountN : '',
+      r.appVersion || '',
+      r.connection || '',
+      r.action || '',
+      (typeof r.clientStartMs === 'number') ? r.clientStartMs : '',
+      (typeof r.clientTotalMs === 'number') ? r.clientTotalMs : '',
+      (typeof r.serverMs === 'number') ? r.serverMs : '',
+      (typeof r.networkMs === 'number') ? r.networkMs : '',
+      (typeof r.inFlightAtStart === 'number') ? r.inFlightAtStart : '',
+      (typeof r.msSincePrev === 'number') ? r.msSincePrev : '',
+      r.duplicateDetected ? 'Y' : '',
+      r.cached ? 'Y' : '',
+      (r.ok === false) ? 'N' : 'Y',
+      r.errorMsg ? String(r.errorMsg).slice(0, 500) : '',
+      (typeof r.bytes === 'number') ? r.bytes : '',
+      r.note ? String(r.note).slice(0, 200) : ''
+    ]);
+  }
+
+  // One setValues call — much cheaper than N appendRow calls. Append at
+  // the bottom so the tab stays chronological (oldest → newest).
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length)
+    .setValues(rows);
+
+  return jsonResponse_({ success: true, count: rows.length });
+}
+
+// ================================================================
+// GOAL ARCHIVE (v11.14)
+// ================================================================
+//
+// archiveGoal: marks a Saving tab row as Achieved or Cancelled, and (when
+// safe) archives the linked sub-category in Setup so it disappears from
+// the PWA categorize dropdown.
+//
+// "When safe" = no OTHER active Saving row links to the same sub-category.
+// E.g., if both "Banff Trip" and "Europe Trip" link to "Travel" and only
+// Banff is being archived, leave Setup's "Travel" archived flag = FALSE
+// because Europe still needs it active.
+//
+// v11.18: split the body into archiveGoalInternal_ (lockless, returns plain
+// object) so the menu wrapper archiveGoalMenu can call it under the same
+// lock as the Budget rebuild. Web handler still takes the lock + serializes
+// to JSON. Also added duplicate-name detection — if two Saving rows share
+// a name, fail explicitly so the user disambiguates instead of silently
+// picking the first match.
+//
+// Body shape: { goalName: string, status: 'Achieved' | 'Cancelled' }
+function handleArchiveGoal_(body) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+  try {
+    return jsonResponse_(archiveGoalInternal_(
+      body && body.goalName,
+      body && body.status
+    ));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Internal — does the work, no lock, no JSON wrap. Caller must hold the
+ * script lock. Returns a plain object: { success, goal, categoryArchived }
+ * on success; { success:false, error } on failure.
+ */
+function archiveGoalInternal_(goalNameRaw, statusRaw, ssOpt) {
+  var goalName = (goalNameRaw == null ? '' : String(goalNameRaw)).trim();
+  var status = (statusRaw == null ? 'Achieved' : String(statusRaw)).trim();
+
+  if (!goalName) return { success: false, error: 'goalName is required' };
+  if (status !== 'Achieved' && status !== 'Cancelled') {
+    return { success: false, error: 'status must be Achieved or Cancelled' };
+  }
+
+  var ss = ssOpt || SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  var setup = ss.getSheetByName('Setup');
+  if (!saving || !setup) {
+    return { success: false, error: 'Saving or Setup tab not found' };
+  }
+
+  // Read all goal rows once: A=name, B=linkedCategory, J=status (col 10).
+  // Rows 6..SAVING_MAX_GOAL_ROW (105) — that's 100 rows of 10 cols.
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  // Duplicate-name detection (v11.18): scan ALL rows; bail if more than one
+  // matches. Previously this took the first match silently, which would
+  // archive the wrong row if names happened to clash.
+  var matchIdxs = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (name === goalName) matchIdxs.push(r);
+  }
+  if (matchIdxs.length === 0) {
+    return { success: false, error: 'Goal not found: ' + goalName };
+  }
+  if (matchIdxs.length > 1) {
+    var rowNums = matchIdxs.map(function(idx) { return idx + 6; }).join(', ');
+    return { success: false, error: 'Goal name "' + goalName + '" appears in multiple rows (' + rowNums + '). Rename one before archiving.' };
+  }
+
+  var foundIdx = matchIdxs[0];
+  var linkedCategory = String(goalRows[foundIdx][1] || '').trim();
+  var prevStatus = String(goalRows[foundIdx][9] || '').trim();
+
+  // Write status to col J of the matched row.
+  saving.getRange(foundIdx + 6, 10).setValue(status);
+
+  // Decide whether to archive the linked sub-category in Setup col F.
+  // Skip if linkedCategory is empty, or if any OTHER active goal links to it.
+  var categoryArchived = false;
+  if (linkedCategory) {
+    var hasOtherActive = false;
+    for (var r2 = 0; r2 < goalRows.length; r2++) {
+      if (r2 === foundIdx) continue;
+      var otherName = String(goalRows[r2][0] || '').trim();
+      if (!otherName) continue;
+      var otherLinked = String(goalRows[r2][1] || '').trim();
+      var otherStatus = String(goalRows[r2][9] || '').trim();
+      var otherIsActive = (otherStatus === '' || otherStatus === 'Active');
+      if (otherLinked === linkedCategory && otherIsActive) {
+        hasOtherActive = true;
+        break;
+      }
+    }
+
+    if (!hasOtherActive) {
+      var setupRows = setup.getRange('D2:F100').getValues();
+      for (var s = 0; s < setupRows.length; s++) {
+        var sub = String(setupRows[s][1] || '').trim();
+        if (sub === linkedCategory) {
+          setup.getRange(s + 2, 6).setValue(true);
+          categoryArchived = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    success: true,
+    goal: { name: goalName, linkedCategory: linkedCategory, status: status, prevStatus: prevStatus },
+    categoryArchived: categoryArchived
+  };
+}
+
+// unarchiveGoal: reverse archiveGoal. Sets Saving row status to Active and
+// clears the linked sub-category's Setup col F. Permissive — clears the
+// flag regardless of other goals.
+//
+// v11.18: same split pattern as archiveGoal — internal + thin handler.
+//
+// Body shape: { goalName: string }
+function handleUnarchiveGoal_(body) {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    return jsonResponse_({ success: false, error: 'Another operation in progress, try again' });
+  }
+  try {
+    return jsonResponse_(unarchiveGoalInternal_(body && body.goalName));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function unarchiveGoalInternal_(goalNameRaw, ssOpt) {
+  var goalName = (goalNameRaw == null ? '' : String(goalNameRaw)).trim();
+  if (!goalName) return { success: false, error: 'goalName is required' };
+
+  var ss = ssOpt || SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  var setup = ss.getSheetByName('Setup');
+  if (!saving || !setup) {
+    return { success: false, error: 'Saving or Setup tab not found' };
+  }
+
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  var matchIdxs = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (name === goalName) matchIdxs.push(r);
+  }
+  if (matchIdxs.length === 0) {
+    return { success: false, error: 'Goal not found: ' + goalName };
+  }
+  if (matchIdxs.length > 1) {
+    var rowNums = matchIdxs.map(function(idx) { return idx + 6; }).join(', ');
+    return { success: false, error: 'Goal name "' + goalName + '" appears in multiple rows (' + rowNums + '). Rename one before unarchiving.' };
+  }
+
+  var foundIdx = matchIdxs[0];
+  var linkedCategory = String(goalRows[foundIdx][1] || '').trim();
+  var prevStatus = String(goalRows[foundIdx][9] || '').trim();
+
+  saving.getRange(foundIdx + 6, 10).setValue('Active');
+
+  var categoryUnarchived = false;
+  if (linkedCategory) {
+    var setupRows = setup.getRange('D2:F100').getValues();
+    for (var s = 0; s < setupRows.length; s++) {
+      var sub = String(setupRows[s][1] || '').trim();
+      if (sub === linkedCategory) {
+        setup.getRange(s + 2, 6).setValue(false);
+        categoryUnarchived = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    success: true,
+    goal: { name: goalName, linkedCategory: linkedCategory, status: 'Active', prevStatus: prevStatus },
+    categoryUnarchived: categoryUnarchived
+  };
+}
+
+// ================================================================
+// GOAL ARCHIVE — MENU WRAPPERS (v11.18)
+// ================================================================
+//
+// Sheet-side flow for archiving a savings goal. Wraps archiveGoalInternal_
+// + a forced Budget rebuild so the user gets a single "this goal is done"
+// action. The PWA contract (handleArchiveGoal_/handleUnarchiveGoal_) is
+// unchanged and still callable from any future PWA UI.
+//
+// Why also rebuild Budget here:
+//   rebuildBudgetInternal_ (v11.18) filters Setup col F so archived
+//   sub-categories drop out of the Budget tab. Without an explicit
+//   rebuild from the menu, the user wouldn't see the change until the
+//   next Update Script / addCategory call. Forcing the rebuild here
+//   makes archive feel atomic.
+//
+// Lock strategy:
+//   The menu function takes the script lock once and holds it across
+//   archiveGoalInternal_ + rebuildBudgetInternal_ — so the hourly email
+//   trigger and PWA writes can't interleave a half-rebuilt Budget tab.
+
+function archiveGoalMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var goalName = promptForGoalName_(ui, 'archive');
+  if (!goalName) return;
+
+  // Look up linked category for the confirmation message (read-only, no lock needed).
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) { ui.alert('Saving tab not found.'); return; }
+  var nameAndCat = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 2).getValues();
+  var linkedCategory = '';
+  for (var r = 0; r < nameAndCat.length; r++) {
+    if (String(nameAndCat[r][0] || '').trim() === goalName) {
+      linkedCategory = String(nameAndCat[r][1] || '').trim();
+      break;
+    }
+  }
+
+  var catRef = linkedCategory || '(no linked category)';
+  var confirmText = 'Archive "' + goalName + '"?\n\n' +
+    'This will:\n' +
+    '  • Set Saving status to Achieved\n' +
+    '  • Hide "' + catRef + '" from the PWA categorize dropdown\n' +
+    '    (only if no other active goals depend on this sub-category)\n' +
+    '  • Remove "' + catRef + '" rows from the Budget tab on rebuild\n' +
+    '  • LOSE any Budgeted values for that category in past periods\n' +
+    '    (Spent values stay computed from Transactions and remain reachable)\n\n' +
+    'Continue?';
+
+  var confirm = ui.alert('Archive Goal', confirmText, ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    ui.alert('Another operation in progress, try again.');
+    return;
+  }
+  try {
+    var result = archiveGoalInternal_(goalName, 'Achieved', ss);
+    if (!result.success) {
+      ui.alert('Archive failed: ' + result.error);
+      return;
+    }
+
+    // Force a Budget rebuild so archived sub-categories disappear
+    // immediately. 'rebuild' mode (vs 'add') wipes + rebuilds.
+    try {
+      rebuildBudgetInternal_('rebuild', ss);
+    } catch (rebuildErr) {
+      logActivity_('archiveGoalMenu', 0, 'rebuild_failed',
+        'goal:' + goalName, rebuildErr.toString() + '\n' + (rebuildErr.stack || ''));
+      ui.alert('Goal archived but Budget rebuild failed:\n' + rebuildErr.toString() +
+        '\n\nRun Budget Tools → Update Script to retry the rebuild.');
+      return;
+    }
+
+    var msg = 'Goal "' + result.goal.name + '" archived.';
+    if (result.categoryArchived) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory +
+        '" archived in Setup; will not appear in PWA dropdown.';
+    } else if (result.goal.linkedCategory) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory +
+        '" kept active because other goals still depend on it.';
+    }
+    msg += '\n\nBudget tab rebuilt — archived categories no longer appear.';
+
+    logActivity_('archiveGoalMenu', 0, 'success',
+      'goal:' + goalName + ' categoryArchived:' + result.categoryArchived, '');
+    ui.alert(msg);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function unarchiveGoalMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var goalName = promptForGoalName_(ui, 'unarchive');
+  if (!goalName) return;
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) { ui.alert('Saving tab not found.'); return; }
+  var nameAndCat = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 2).getValues();
+  var linkedCategory = '';
+  for (var r = 0; r < nameAndCat.length; r++) {
+    if (String(nameAndCat[r][0] || '').trim() === goalName) {
+      linkedCategory = String(nameAndCat[r][1] || '').trim();
+      break;
+    }
+  }
+
+  var catRef = linkedCategory || '(no linked category)';
+  var confirmText = 'Unarchive "' + goalName + '"?\n\n' +
+    'This will:\n' +
+    '  • Set Saving status back to Active\n' +
+    '  • Unhide "' + catRef + '" in the PWA categorize dropdown\n' +
+    '  • Re-add "' + catRef + '" rows to the Budget tab on rebuild\n' +
+    '    (Budgeted values start at 0 — past values were lost on the original archive)\n\n' +
+    'Continue?';
+
+  var confirm = ui.alert('Unarchive Goal', confirmText, ui.ButtonSet.YES_NO);
+  if (confirm !== ui.Button.YES) return;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    ui.alert('Another operation in progress, try again.');
+    return;
+  }
+  try {
+    var result = unarchiveGoalInternal_(goalName, ss);
+    if (!result.success) {
+      ui.alert('Unarchive failed: ' + result.error);
+      return;
+    }
+
+    try {
+      rebuildBudgetInternal_('rebuild', ss);
+    } catch (rebuildErr) {
+      logActivity_('unarchiveGoalMenu', 0, 'rebuild_failed',
+        'goal:' + goalName, rebuildErr.toString() + '\n' + (rebuildErr.stack || ''));
+      ui.alert('Goal unarchived but Budget rebuild failed:\n' + rebuildErr.toString() +
+        '\n\nRun Budget Tools → Update Script to retry the rebuild.');
+      return;
+    }
+
+    var msg = 'Goal "' + result.goal.name + '" unarchived (Active).';
+    if (result.categoryUnarchived) {
+      msg += '\n\nLinked sub-category "' + result.goal.linkedCategory + '" unhidden in Setup.';
+    }
+    msg += '\n\nBudget tab rebuilt — category rows restored (Budgeted starts at 0).';
+
+    logActivity_('unarchiveGoalMenu', 0, 'success',
+      'goal:' + goalName + ' categoryUnarchived:' + result.categoryUnarchived, '');
+    ui.alert(msg);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/**
+ * Prompts the user for a goal name. Pre-fills from the active Saving tab
+ * selection when applicable. Shows a list of candidate goals filtered by
+ * verb ('archive' = Active goals only; 'unarchive' = Achieved/Cancelled).
+ *
+ * Returns the trimmed goal name string, or null if the user cancelled.
+ */
+function promptForGoalName_(ui, verb) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) {
+    ui.alert('Saving tab not found.');
+    return null;
+  }
+
+  var goalRows = saving.getRange(6, 1, SAVING_MAX_GOAL_ROW - 5, 10).getValues();
+
+  var candidates = [];
+  for (var r = 0; r < goalRows.length; r++) {
+    var name = String(goalRows[r][0] || '').trim();
+    if (!name) continue;
+    var st = String(goalRows[r][9] || '').trim();
+    var isActive = (st === '' || st === 'Active');
+    if (verb === 'archive' && isActive) candidates.push(name);
+    if (verb === 'unarchive' && !isActive) candidates.push(name);
+  }
+
+  if (candidates.length === 0) {
+    ui.alert(
+      verb === 'archive'
+        ? 'No active goals to archive. (Saving tab has no rows with status Active or blank.)'
+        : 'No archived goals to unarchive. (Saving tab has no rows with status Achieved or Cancelled.)'
+    );
+    return null;
+  }
+
+  // Pre-fill from active Saving-tab selection when applicable.
+  var prefill = '';
+  var activeSheet = ss.getActiveSheet();
+  if (activeSheet && activeSheet.getName() === 'Saving') {
+    var activeCell = activeSheet.getActiveCell();
+    if (activeCell && activeCell.getRow() >= 6) {
+      var nameAtRow = String(saving.getRange(activeCell.getRow(), 1).getValue() || '').trim();
+      if (nameAtRow && candidates.indexOf(nameAtRow) !== -1) {
+        prefill = nameAtRow;
+      }
+    }
+  }
+
+  // Build the prompt body. Cap the list at 10 names to keep the modal small.
+  var listShown = candidates.slice(0, 10).join('\n  • ');
+  var more = candidates.length > 10 ? '\n  • … and ' + (candidates.length - 10) + ' more' : '';
+  var listText = '\n  • ' + listShown + more;
+
+  var promptText =
+    (verb === 'archive' ? 'Goals available to archive:' : 'Goals available to unarchive:') +
+    listText + '\n\nType the exact goal name' +
+    (prefill ? '\n(or leave blank to use pre-filled selection: "' + prefill + '")' : '') + ':';
+
+  var response = ui.prompt(
+    verb === 'archive' ? 'Archive Goal' : 'Unarchive Goal',
+    promptText,
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (response.getSelectedButton() !== ui.Button.OK) return null;
+
+  var typed = response.getResponseText().trim();
+  if (!typed && prefill) typed = prefill;
+  if (!typed) return null;
+  return typed;
+}
+
+/**
+ * Inserts an activity log entry at row 2 (newest first). Also mirrors to
+ * console.log/warn/error for Cloud Logging visibility (Apps Script → Executions).
+ */
+function logActivity_(action, duration, status, details, error) {
+  try {
+    var sheet = getOrCreateLogsSheet_();
+    // Insert at row 2 so newest entries are always at the top
+    sheet.insertRowBefore(2);
+    sheet.getRange(2, 1, 1, 6).setValues([[
+      new Date(),
+      action || '',
+      duration || 0,
+      status || '',
+      details || '',
+      error || ''
+    ]]);
+
+    // Auto-rotate if Logs tab exceeds 5000 rows
+    if (sheet.getLastRow() > 5001) {
+      rotateLogsIfNeeded_(sheet);
+    }
+  } catch (logErr) {
+    // Never let logging failure crash the handler
+    console.error('logActivity_ failed:', logErr);
+  }
+
+  // Mirror to Cloud Logging
+  var msg = '[' + action + '] ' + duration + 'ms ' + status +
+    (details ? ' - ' + details : '') + (error ? ' - ERR: ' + error : '');
+  if (status === 'crash' || status === 'error' || status === 'write_verify_fail') {
+    console.error(msg);
+  } else if (status === 'fail' || status === 'auth_fail') {
+    console.warn(msg);
+  } else {
+    console.log(msg);
+  }
+}
+
+/**
+ * Archives the Logs tab to Logs_Archive_<date> and clears it (keeps header).
+ */
+function rotateLogsIfNeeded_(sheet) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var archiveName = 'Logs_Archive_' + Utilities.formatDate(
+      new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+    var archive = sheet.copyTo(ss).setName(archiveName);
+    // Clear rows 2+ in the live Logs sheet
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      sheet.getRange(2, 1, lastRow - 1, 6).clearContent();
+    }
+    console.log('Logs rotated to ' + archiveName);
+  } catch (rotErr) {
+    console.error('rotateLogsIfNeeded_ failed:', rotErr);
+  }
+}
+
+/**
+ * Builds a one-line human-readable summary of an API response for the log's
+ * Details column.
+ */
+function summarizeResult_(action, parsed) {
+  if (!parsed || typeof parsed !== 'object') return '';
+  try {
+    if (action === 'parseAndFetch') {
+      return 'parsed ' + (parsed.parsed || 0) +
+        ', returned ' + ((parsed.transactions && parsed.transactions.length) || 0) + ' pending';
+    }
+    if (action === 'categories') {
+      return 'returned ' + ((parsed.categories && parsed.categories.length) || 0) + ' categories';
+    }
+    if (action === 'dumpSheet') {
+      if (parsed.sheets) {
+        return 'metadata: ' + parsed.sheets.length + ' tabs';
+      }
+      return (parsed.tab || '') + ' ' + (parsed.range || '') +
+        ' (' + (parsed.rows || 0) + 'x' + (parsed.cols || 0) + ')';
+    }
+    if (action === 'version') {
+      if (!parsed.appsScript) return '';
+      var v = parsed.appsScript;
+      return v.version + ' (latest: ' + v.latestVersion + ', update: ' +
+        (v.updateNeeded ? 'YES' : 'no') + ')';
+    }
+    if (action === 'batchCategorize') {
+      var s = parsed.summary || {};
+      var base = (s.succeeded || 0) + '/' + (s.total || 0) + ' succeeded';
+      if (s.failed > 0 && parsed.results) {
+        var failedTs = [];
+        for (var i = 0; i < parsed.results.length; i++) {
+          if (!parsed.results[i].success) {
+            failedTs.push(parsed.results[i].timestamp + ':' + (parsed.results[i].error || ''));
+          }
+        }
+        base += ' | failed: ' + failedTs.join('; ');
+      }
+      return base;
+    }
+    if (action === 'categorize') {
+      if (parsed.transaction) {
+        return parsed.transaction.merchant + ' → ' + parsed.transaction.category;
+      }
+      return '';
+    }
+    if (action === 'uncategorize') {
+      if (parsed.transaction) {
+        return 'restored ' + parsed.transaction.merchant;
+      }
+      return '';
+    }
+    if (action === 'addCategory') {
+      if (parsed.category) {
+        return parsed.category.main + ' > ' + parsed.category.sub +
+          ', +' + (parsed.budgetRowsAdded || 0) + ' budget rows';
+      }
+      return '';
+    }
+    if (action === 'archiveGoal') {
+      if (parsed.goal) {
+        return parsed.goal.name + ' → ' + parsed.goal.status +
+          (parsed.categoryArchived ? ' (cat archived: ' + parsed.goal.linkedCategory + ')' : '');
+      }
+      return '';
+    }
+    if (action === 'unarchiveGoal') {
+      if (parsed.goal) {
+        return parsed.goal.name + ' → Active' +
+          (parsed.categoryUnarchived ? ' (cat unarchived: ' + parsed.goal.linkedCategory + ')' : '');
+      }
+      return '';
+    }
+  } catch (e) {
+    return '';
+  }
+  return '';
+}
+
+/**
+ * Menu function: opens the Logs tab (creates if missing).
+ */
+function showLogsTab() {
+  var sheet = getOrCreateLogsSheet_();
+  sheet.activate();
+}
+
+// ================================================================
+// V11.0 MIGRATION — Pending tab → Transactions tab (one-time)
+// ================================================================
+
+/**
+ * Migrates all data from the Pending tab into the Transactions tab using the
+ * v11.0 single-ledger model. Then deletes the Pending tab.
+ *
+ * Logic:
+ *   - "pending" rows in Pending → write to Transactions with empty Category + Timestamp
+ *   - "categorized" rows in Pending → search Transactions for matching row by
+ *     Date+Merchant+Amount; if found (e.g. orphan rows at 1001-1008), update
+ *     in place with Timestamp + Category. If not found, write new row.
+ *   - After migration, scan Transactions rows 1001+ for any leftover orphans
+ *     and move them to first empty rows in 2-1000.
+ *   - Backup Pending data to a Pending_Archive tab, then delete Pending.
+ *
+ * Safe to run multiple times — second run will find no Pending tab and do nothing.
+ */
+/**
+ * Consolidates Transactions data by compacting all non-empty rows into the
+ * top of the sheet (starting at row 2). Useful as a "rescue" if data ends
+ * up scattered (e.g., from a migration bug, or the orphan-row class of bug).
+ *
+ * Preserves: formulas in cols E (Main Cat) and G (Period) — those auto-fill
+ * from cols D and A respectively.
+ *
+ * Read/Write columns A (Date), B (Merchant), C (Amount), D (Category),
+ * F (Tx#), and H (Timestamp) — skips E and G.
+ *
+ * ⚠️ DESTRUCTIVE RESCUE FUNCTION — DO NOT RUN WITHOUT A BACKUP.
+ * This rewrites every data row in-place. The "Rescue" suffix is to deter
+ * accidental triggering: NOT exposed via the Budget Tools menu. Run only
+ * from the Apps Script editor → function dropdown when explicitly fixing
+ * orphan rows.
+ *
+ * One-shot fix originally written for the v10 → v11 orphan-row cleanup
+ * (rows at 1001-1008 outside named ranges). Kept around in case the same
+ * class of bug ever recurs.
+ */
+function consolidateTransactionsRescue() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn) { ui.alert('Transactions tab not found'); return; }
+
+  var lastRow = txn.getLastRow();
+  if (lastRow < 2) { ui.alert('Nothing to consolidate'); return; }
+
+  // Read all data cols for rows 2..lastRow (we'll use B = Merchant as "non-empty" marker)
+  var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
+
+  // Filter rows where Merchant has data (skips truly empty rows that just have formulas)
+  var nonEmpty = [];
+  for (var i = 0; i < data.length; i++) {
+    if (data[i][1] && String(data[i][1]).trim() !== '') {
+      nonEmpty.push(data[i]);
+    }
+  }
+
+  if (nonEmpty.length === 0) {
+    ui.alert('No data rows found.');
+    return;
+  }
+
+  var confirm = ui.alert(
+    'Consolidate Transactions',
+    'Found ' + nonEmpty.length + ' rows with data.\n' +
+    'This will move them all to rows 2-' + (1 + nonEmpty.length) + '.\n' +
+    '(Cols E, G are formulas — they\'ll auto-recompute.)\n\n' +
+    'Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  // Clear data cols (A:D, F, H) — leave E and G alone (formulas)
+  if (lastRow > 1) {
+    var rowCount = lastRow - 1;
+    txn.getRange(2, 1, rowCount, 4).clearContent();    // A:D
+    txn.getRange(2, 6, rowCount, 1).clearContent();    // F
+    txn.getRange(2, 8, rowCount, 1).clearContent();    // H
+  }
+  SpreadsheetApp.flush();
+
+  // Write data back starting at row 2 (cols A:D, F, H separately)
+  var rowsAD = nonEmpty.map(function(r) { return [r[0], r[1], r[2], r[3]]; });
+  var rowsF  = nonEmpty.map(function(r) { return [r[5]]; });
+  var rowsH  = nonEmpty.map(function(r) { return [r[7]]; });
+  txn.getRange(2, 1, nonEmpty.length, 4).setValues(rowsAD);
+  txn.getRange(2, 6, nonEmpty.length, 1).setValues(rowsF);
+  txn.getRange(2, 8, nonEmpty.length, 1).setValues(rowsH);
+  SpreadsheetApp.flush();
+
+  logActivity_('consolidateTransactionsRescue', 0, 'success',
+    'Consolidated ' + nonEmpty.length + ' rows', '');
+
+  ui.alert('Consolidation complete.\n\n' + nonEmpty.length + ' rows now at rows 2-' + (1 + nonEmpty.length) + '.');
+}
+
+/**
+ * v11.21 (Phase 30): One-shot rescue for duplicate parser-written rows +
+ * stranded "Unassigned" period rows. Run AFTER deploying v11.21 Apps Script.
+ *
+ * What it does (in order, single transaction):
+ *   1. Reads all Transactions rows (cols A-H).
+ *   2. Groups data rows by Timestamp string (col H).
+ *      - Skips rows with empty Timestamp (manual entries — left untouched).
+ *   3. For each group with >1 row: keep ONE row, drop the rest.
+ *      - "Keep" priority: any row with a non-empty Category beats blanks.
+ *      - Among multiple categorized rows (rare — user fixed two dupes),
+ *        keep the first; warn in alert.
+ *      - Among all-blank groups, keep the first.
+ *   4. Normalizes Date column (col A) on every kept row to midnight
+ *      (truncates time portion). This unsticks the "Unassigned" Period
+ *      bug for rows on the last day of any pay period — the Period
+ *      formula then matches correctly.
+ *   5. Clears the data cols (A:D, F, H) for all rows in the previous
+ *      data range, then writes the kept+normalized rows back starting
+ *      at row 2. Cols E and G stay alone — they're formulas that
+ *      recompute after the write.
+ *   6. Single SpreadsheetApp.flush() at the end + activity log + alert.
+ *
+ * Safety: pure read-then-write inside a LockService-protected block. PWA
+ * batchCategorize cannot interleave (same lock). Failure mid-run leaves
+ * the sheet either fully old (if Step 5 hasn't started) or fully new
+ * (if Step 5 completed before throw). No partial state where some
+ * duplicates are gone but others remain.
+ *
+ * Not idempotent in a destructive sense — re-running drops nothing (no
+ * dupes left) but does re-normalize Dates (no-op since they're already
+ * midnight). Safe to run multiple times.
+ */
+function dedupeAndNormalizeTransactionsRescue() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var txn = ss.getSheetByName('Transactions');
+  if (!txn) { ui.alert('Transactions tab not found'); return; }
+
+  var lastRow = txn.getLastRow();
+  if (lastRow < 2) { ui.alert('Nothing to dedupe'); return; }
+
+  // LockService — block any PWA writer during the read-then-write.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    ui.alert('Could not acquire lock (another write in progress). Try again in a minute.');
+    return;
+  }
+
+  try {
+    // Step 1: read everything.
+    var data = txn.getRange(2, 1, lastRow - 1, 8).getValues();
+
+    // Step 2: filter to non-empty rows (Merchant col B has data).
+    var nonEmpty = [];
+    for (var i = 0; i < data.length; i++) {
+      if (data[i][1] && String(data[i][1]).trim() !== '') {
+        nonEmpty.push(data[i]);
+      }
+    }
+
+    if (nonEmpty.length === 0) {
+      ui.alert('No data rows found.');
+      return;
+    }
+
+    // Step 3: group by Timestamp string. Rows with empty Timestamp pass
+    // through individually (manual entries — different identity rule).
+    var groups = {};
+    var manualRows = [];
+    for (var j = 0; j < nonEmpty.length; j++) {
+      var row = nonEmpty[j];
+      var tsRaw = row[7];
+      if (tsRaw === '' || tsRaw === null || tsRaw === undefined) {
+        manualRows.push(row);
+        continue;
+      }
+      // Normalize Timestamp to a string for grouping (Date or string both work).
+      var tsKey = (tsRaw instanceof Date)
+        ? Utilities.formatDate(tsRaw, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+        : String(tsRaw);
+      if (!groups[tsKey]) groups[tsKey] = [];
+      groups[tsKey].push(row);
+    }
+
+    // Step 4: pick the best row per group.
+    var kept = [];
+    var droppedCount = 0;
+    var multiCategorizedWarnings = [];
+    Object.keys(groups).forEach(function (tsKey) {
+      var rows = groups[tsKey];
+      if (rows.length === 1) {
+        kept.push(rows[0]);
+        return;
+      }
+      // Prefer rows with non-empty Category (col D = index 3).
+      var categorized = rows.filter(function (r) { return r[3] && String(r[3]).trim() !== ''; });
+      var winner;
+      if (categorized.length === 0) {
+        winner = rows[0]; // all blank — keep first
+      } else if (categorized.length === 1) {
+        winner = categorized[0];
+      } else {
+        // Multi-categorized: keep first, but flag for user review.
+        winner = categorized[0];
+        multiCategorizedWarnings.push(
+          'ts=' + tsKey + ' merchant=' + winner[1] +
+          ' kept=' + winner[3] + ' (dropped ' + (categorized.length - 1) + ' other categorized variant(s))'
+        );
+      }
+      kept.push(winner);
+      droppedCount += rows.length - 1;
+    });
+
+    // Step 4b: normalize Date column to midnight on every kept row.
+    var normalizedCount = 0;
+    for (var k = 0; k < kept.length; k++) {
+      var d = kept[k][0];
+      if (d instanceof Date) {
+        var hadTime = d.getHours() !== 0 || d.getMinutes() !== 0 || d.getSeconds() !== 0;
+        if (hadTime) {
+          kept[k][0] = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+          normalizedCount++;
+        }
+      }
+      // Strings (rare for Date col, but possible if user typed) — leave alone.
+    }
+
+    // Append manual rows (Timestamp blank) at the end, untouched.
+    for (var mr = 0; mr < manualRows.length; mr++) {
+      kept.push(manualRows[mr]);
+    }
+
+    // Confirm before destructive write.
+    var summary = 'Found ' + (nonEmpty.length + manualRows.length - droppedCount + droppedCount) +
+      ' rows with data:\n' +
+      '  - ' + (kept.length - manualRows.length) + ' unique parsed rows (after dedupe)\n' +
+      '  - ' + manualRows.length + ' manual rows (Timestamp blank)\n' +
+      '  - ' + droppedCount + ' duplicate rows to be DROPPED\n' +
+      '  - ' + normalizedCount + ' Date cells to be normalized to midnight\n\n' +
+      (multiCategorizedWarnings.length > 0
+        ? '⚠️ ' + multiCategorizedWarnings.length +
+          ' group(s) had multiple categorized variants — keeping first; review log after run.\n\n'
+        : '') +
+      'After this, ' + kept.length + ' rows will live at rows 2-' + (1 + kept.length) + '.\n' +
+      '(Cols E, G are formulas — they auto-recompute.)\n\n' +
+      'This is destructive. Continue?';
+
+    var confirm = ui.alert('Dedupe + Normalize Transactions (rescue)', summary, ui.ButtonSet.YES_NO);
+    if (confirm !== ui.Button.YES) {
+      ui.alert('Cancelled. No changes made.');
+      return;
+    }
+
+    // Step 5: clear data cols (A:D, F, H) — leave E, G formulas alone.
+    var clearRows = lastRow - 1;
+    txn.getRange(2, 1, clearRows, 4).clearContent();  // A:D
+    txn.getRange(2, 6, clearRows, 1).clearContent();  // F (Transaction #)
+    txn.getRange(2, 8, clearRows, 1).clearContent();  // H (Timestamp)
+    SpreadsheetApp.flush();
+
+    // Step 5b: write kept rows back, starting row 2.
+    var rowsAD = kept.map(function (r) { return [r[0], r[1], r[2], r[3]]; });
+    var rowsF  = kept.map(function (r) { return [r[5]]; });
+    var rowsH  = kept.map(function (r) { return [r[7]]; });
+    txn.getRange(2, 1, kept.length, 4).setValues(rowsAD);
+    txn.getRange(2, 6, kept.length, 1).setValues(rowsF);
+    txn.getRange(2, 8, kept.length, 1).setValues(rowsH);
+    SpreadsheetApp.flush();
+
+    logActivity_('dedupeAndNormalizeTransactionsRescue', 0, 'success',
+      'kept ' + kept.length + ' rows, dropped ' + droppedCount + ' dupes, normalized ' + normalizedCount + ' dates' +
+      (multiCategorizedWarnings.length > 0
+        ? '; ' + multiCategorizedWarnings.length + ' multi-categorized warnings'
+        : ''),
+      multiCategorizedWarnings.join(' | '));
+
+    ui.alert(
+      'Cleanup complete.\n\n' +
+      'Kept: ' + kept.length + ' rows (now at rows 2-' + (1 + kept.length) + ')\n' +
+      'Dropped: ' + droppedCount + ' duplicate rows\n' +
+      'Normalized: ' + normalizedCount + ' Date cells (truncated time → midnight)\n\n' +
+      (multiCategorizedWarnings.length > 0
+        ? '⚠️ ' + multiCategorizedWarnings.length + ' multi-categorized warnings — see Logs tab.\n\n'
+        : '') +
+      'Verify Budget tab Spent + Available totals look right.'
+    );
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function migratePendingToTransactions() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var pending = ss.getSheetByName('Pending');
+  var txn = ss.getSheetByName('Transactions');
+
+  if (!txn) {
+    ui.alert('Error: Transactions tab not found. Run Build Workbook first.');
+    return;
+  }
+
+  if (!pending) {
+    ui.alert('No Pending tab found — migration already complete (or nothing to migrate).');
+    return;
+  }
+
+  // Confirm with user
+  var confirm = ui.alert(
+    'Migrate Pending → Transactions',
+    'This will:\n' +
+    '  1. Move all Pending rows into Transactions\n' +
+    '  2. Move orphan rows from row 1001+ back into the visible range\n' +
+    '  3. Backup Pending to a Pending_Archive_<timestamp> tab\n' +
+    '  4. DELETE the Pending tab\n\n' +
+    'This is a one-way operation. Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  // Ensure Transactions has H column header (Timestamp)
+  if (txn.getRange('H1').getValue() !== 'Timestamp') {
+    txn.getRange('H1').setValue('Timestamp')
+      .setFontWeight('bold').setBackground('#d9ead3');
+    txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  }
+
+  var stats = { pendingMigrated: 0, categorizedMerged: 0, categorizedNew: 0,
+                orphansMoved: 0, errors: 0 };
+
+  // --- Step 1: Read all Pending data ---
+  var pendingLastRow = pending.getLastRow();
+  if (pendingLastRow < 2) {
+    ui.alert('Pending tab has no data — nothing to migrate. Will still delete the tab.');
+  }
+
+  var pendingData = (pendingLastRow >= 2)
+    ? pending.getRange(2, 1, pendingLastRow - 1, 7).getValues()
+    : [];
+
+  // --- Step 2: Read all Transactions data for matching ---
+  var txnLastRow = txn.getLastRow();
+  // Read cols A:D for matching (Date, Merchant, Amount, Category)
+  var txnData = (txnLastRow >= 2)
+    ? txn.getRange(2, 1, txnLastRow - 1, 4).getValues()
+    : [];
+
+  // --- Step 3: Process each Pending row ---
+  // Collect updates separately for: in-place merge, new pending rows, new categorized rows
+  var inPlaceUpdates = [];   // { sheetRow, timestamp, category }
+  var newPendingRows = [];   // [date, merchant, amount, '', '', '', '', timestamp]
+  var newCategorizedRows = []; // same shape with category set
+
+  for (var i = 0; i < pendingData.length; i++) {
+    var pTimestamp = pendingData[i][0];
+    var pDate = pendingData[i][1];
+    var pMerchant = pendingData[i][2];
+    var pAmount = pendingData[i][3];
+    var pStatus = pendingData[i][5];
+    var pCategory = pendingData[i][6];
+
+    if (!pMerchant || !pDate) continue; // skip blank rows
+
+    var tsStr = (pTimestamp instanceof Date)
+      ? Utilities.formatDate(pTimestamp, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss')
+      : (pTimestamp ? pTimestamp.toString() : '');
+
+    if (pStatus === 'pending' || pStatus === '') {
+      // Uncategorized — append to Transactions with empty Category
+      newPendingRows.push({
+        date: pDate, merchant: pMerchant, amount: pAmount,
+        category: '', timestamp: tsStr
+      });
+      stats.pendingMigrated++;
+    } else if (pStatus === 'categorized') {
+      // Search Transactions for matching row by Date+Merchant+Amount
+      var matchedRow = -1;
+      for (var j = 0; j < txnData.length; j++) {
+        var tDate = txnData[j][0];
+        var tMerchant = txnData[j][1];
+        var tAmount = txnData[j][2];
+        if (!tMerchant) continue;
+        // Match dates by string conversion (avoids tz issues)
+        var dateMatch = (tDate instanceof Date && pDate instanceof Date)
+          ? (Utilities.formatDate(tDate, Session.getScriptTimeZone(), 'yyyy-MM-dd') ===
+             Utilities.formatDate(pDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'))
+          : (String(tDate) === String(pDate));
+        if (dateMatch && String(tMerchant) === String(pMerchant) &&
+            Number(tAmount) === Number(pAmount)) {
+          matchedRow = j + 2;  // sheet row
+          break;
+        }
+      }
+
+      if (matchedRow > 0) {
+        // Update in place: set Timestamp at H, ensure Category at D
+        inPlaceUpdates.push({ sheetRow: matchedRow, timestamp: tsStr, category: pCategory });
+        stats.categorizedMerged++;
+      } else {
+        // Categorized in Pending but not found in Transactions — append as new
+        newCategorizedRows.push({
+          date: pDate, merchant: pMerchant, amount: pAmount,
+          category: pCategory, timestamp: tsStr
+        });
+        stats.categorizedNew++;
+      }
+    }
+  }
+
+  // --- Step 4: Apply in-place updates ---
+  for (var u = 0; u < inPlaceUpdates.length; u++) {
+    var upd = inPlaceUpdates[u];
+    txn.getRange(upd.sheetRow, 4).setValue(upd.category);
+    txn.getRange(upd.sheetRow, 8).setValue(upd.timestamp);
+  }
+
+  // --- Step 5: Append new rows (cols A:D + H, skip E/F/G to preserve formulas) ---
+  function appendNewRows(rows) {
+    if (!rows.length) return;
+    var startRow = findNextEmptyRow_(txn);
+    var rowsAD = rows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
+    var rowsH = rows.map(function(r) { return [r.timestamp]; });
+    txn.getRange(startRow, 1, rows.length, 4).setValues(rowsAD);
+    txn.getRange(startRow, 8, rows.length, 1).setValues(rowsH);
+  }
+  appendNewRows(newPendingRows);
+  appendNewRows(newCategorizedRows);
+  SpreadsheetApp.flush();
+
+  // --- Step 6: Clean up orphan rows at 1001+ ---
+  // Re-read Transactions to find any rows past 1000 with data
+  var newLastRow = txn.getLastRow();
+  if (newLastRow > 1000) {
+    var orphanRange = txn.getRange(1001, 1, newLastRow - 1000, 8).getValues();
+    var orphansToMove = [];
+    var orphanSheetRows = [];
+    for (var o = 0; o < orphanRange.length; o++) {
+      var oMerchant = orphanRange[o][1];
+      if (oMerchant && oMerchant !== '') {
+        orphansToMove.push({
+          date: orphanRange[o][0],
+          merchant: orphanRange[o][1],
+          amount: orphanRange[o][2],
+          category: orphanRange[o][3],
+          timestamp: orphanRange[o][7] || ''
+        });
+        orphanSheetRows.push(1001 + o);
+      }
+    }
+    if (orphansToMove.length > 0) {
+      // Append to first empty rows in 2-1000
+      appendNewRows(orphansToMove);
+      // Clear the orphan rows (cols A-H, leave formulas in E and G to recompute as empty)
+      for (var or = 0; or < orphanSheetRows.length; or++) {
+        var sr = orphanSheetRows[or];
+        txn.getRange(sr, 1, 1, 4).clearContent();  // A:D (Date, Merchant, Amount, Category)
+        txn.getRange(sr, 8).clearContent();         // H (Timestamp)
+        // F (Tx#) is rarely set; leave it
+      }
+      stats.orphansMoved = orphansToMove.length;
+    }
+  }
+  SpreadsheetApp.flush();
+
+  // --- Step 7: Archive Pending tab ---
+  var archiveName = 'Pending_Archive_' + Utilities.formatDate(
+    new Date(), Session.getScriptTimeZone(), 'yyyyMMdd_HHmmss');
+  var archive = pending.copyTo(ss).setName(archiveName);
+
+  // --- Step 8: Delete Pending tab ---
+  ss.deleteSheet(pending);
+
+  // --- Step 9: Refresh named ranges (Transactions_Timestamp etc.) ---
+  var setup = ss.getSheetByName('Setup');
+  var fixed = ss.getSheetByName('Fixed Monthly Expenses');
+  var budget = ss.getSheetByName('Budget');
+  if (setup && fixed && budget) {
+    setNamedRanges_(ss, setup, fixed, budget, txn);
+  }
+
+  // --- Step 10: Log + summary alert ---
+  var summary = 'Migration complete:\n' +
+    '  • Pending → Transactions: ' + stats.pendingMigrated + ' uncategorized rows\n' +
+    '  • Categorized merged with existing Transactions rows: ' + stats.categorizedMerged + '\n' +
+    '  • Categorized appended as new rows: ' + stats.categorizedNew + '\n' +
+    '  • Orphan rows (row 1001+) moved into visible range: ' + stats.orphansMoved + '\n\n' +
+    'Pending tab archived as: ' + archiveName + '\n' +
+    'Pending tab deleted.';
+  logActivity_('migratePendingToTransactions', 0, 'success', JSON.stringify(stats), '');
+  ui.alert(summary);
+}
+
+// ================================================================
+// API HELPERS
+// ================================================================
+
+/**
+ * Validates the API key against the stored Script Property.
+ */
+function validateApiKey_(key) {
+  if (!key) return false;
+  var storedKey = PropertiesService.getScriptProperties().getProperty('API_KEY');
+  return storedKey && key === storedKey;
+}
+
+/**
+ * Returns a JSON response for the web app.
+ */
+function jsonResponse_(data) {
+  return ContentService
+    .createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Formats a date value to "yyyy-MM-dd" string.
+ */
+function formatDate_(dateVal) {
+  if (!dateVal) return '';
+  var d = new Date(dateVal);
+  var y = d.getFullYear();
+  var mo = ('0' + (d.getMonth() + 1)).slice(-2);
+  var day = ('0' + d.getDate()).slice(-2);
+  return y + '-' + mo + '-' + day;
+}
+
+/**
+ * Trims whitespace from all Setup category cells (D2:E100). Returns count of
+ * cells changed. Catches edge cases where Sheets-direct edits or pre-trim API
+ * writes leave whitespace that breaks INDEX/MATCH lookups.
+ */
+function cleanupSetupWhitespace_(ss) {
+  var setup = ss.getSheetByName('Setup');
+  if (!setup) return 0;
+  var range = setup.getRange('D2:E100');
+  var values = range.getValues();
+  var changed = 0;
+  for (var r = 0; r < values.length; r++) {
+    for (var c = 0; c < 2; c++) {
+      var v = values[r][c];
+      if (typeof v === 'string') {
+        var trimmed = v.trim();
+        if (trimmed !== v) {
+          values[r][c] = trimmed;
+          changed++;
+        }
+      }
+    }
+  }
+  if (changed > 0) range.setValues(values);
+  return changed;
+}
+
+/**
+ * Finds the first empty row in a sheet (by checking column A).
+ */
+function findNextEmptyRow_(sheet, maxRow) {
+  // CRITICAL: cannot use getLastRow() alone — it counts formula-filled cells
+  // (even those returning "") as content. The Transactions tab has formulas
+  // pre-filled in rows 2-1000 (cols E, G), so getLastRow() returns 1000 even
+  // when empty. We scan column A (always real data, never a formula column).
+  //
+  // B1: throw if the next available row would land past the named-range
+  // ceiling. Previously it would silently return 1001+, which produced
+  // orphan rows invisible to all formulas using Transactions_* named ranges.
+  // Default ceiling matches our existing named ranges (row 1000).
+  if (typeof maxRow === 'undefined') maxRow = 1000;
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 2;
+  var colA = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (var i = colA.length - 1; i >= 0; i--) {
+    var v = colA[i][0];
+    if (v !== '' && v !== null && v !== undefined) {
+      var nextRow = i + 3; // i is 0-indexed within rows 2..N, so data row = i+2, next = i+3
+      if (nextRow > maxRow + 1) {
+        throw new Error(
+          'findNextEmptyRow_: sheet "' + sheet.getName() + '" has data past row ' + maxRow +
+          '; refusing to write at row ' + nextRow + ' (named ranges only cover rows 2-' + maxRow +
+          '). Compact existing rows or extend the named ranges before retrying.'
+        );
+      }
+      return nextRow;
+    }
+  }
+  return 2; // No data, start at row 2
+}
+
+/**
+ * Menu function: prompts user for API key and saves to Script Properties.
+ */
+function setApiKey() {
+  var ui = SpreadsheetApp.getUi();
+  var result = ui.prompt(
+    'Set API Key',
+    'Enter a secret API key for the mobile categorizer app.\n' +
+    'This key must match the one configured in the PWA.\n\n' +
+    'Use a random string (e.g., from a password generator):',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (result.getSelectedButton() === ui.Button.OK) {
+    var key = result.getResponseText().trim();
+    if (key.length < 8) {
+      ui.alert('API key must be at least 8 characters long.');
+      return;
+    }
+    PropertiesService.getScriptProperties().setProperty('API_KEY', key);
+    ui.alert('API key saved!\n\nUse this same key when setting up the mobile categorizer app.');
+  }
+}
+
+// ================================================================
+// BUILD WORKBOOK
+// Creates all tabs, populates Setup + Fixed Monthly Expenses,
+// sets up formulas, named ranges, data validation, and formatting.
+// ⚠️ FIRST-TIME ONLY — clears all existing data.
+// ================================================================
+
+function buildWorkbook() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+
+  // Warn if any data tabs already have data
+  var existingBudget = ss.getSheetByName('Budget');
+  var existingTxn = ss.getSheetByName('Transactions');
+  var hasData = (existingBudget && existingBudget.getLastRow() > 1) ||
+                (existingTxn && existingTxn.getLastRow() > 1);
+  if (hasData) {
+    var resp = ui.alert(
+      '⚠️ Warning — This will ERASE ALL DATA',
+      'Budget and/or Transactions tabs have existing data.\n' +
+      'Build Workbook will clear EVERYTHING and start fresh.\n\n' +
+      'If you just updated the script code, use "Update Script" instead.\n\n' +
+      'Continue with full rebuild?',
+      ui.ButtonSet.YES_NO
+    );
+    if (resp !== ui.Button.YES) return;
+  }
+
+  // --- Create / get tabs ---
+  // (Pending tab removed in v11.0 — single-ledger architecture; Transactions
+  // is now the source of truth, with empty Category = "needs categorization".)
+  // (Reports tab existed v11.23-v11.24 / Phase 32, removed v11.25 / Phase 33 —
+  // user adopted native Sheets slicers on Transactions tab as a simpler
+  // alternative for the common "show me Category X / Period Y" filtering.)
+  var tabNames = ['Instructions', 'Setup', 'Fixed Monthly Expenses', 'Budget', 'Transactions', 'Saving'];
+  var sheets = {};
+  for (var t = 0; t < tabNames.length; t++) {
+    var name = tabNames[t];
+    sheets[name] = ss.getSheetByName(name) || ss.insertSheet(name);
+  }
+
+  // Remove default Sheet1
+  var s1 = ss.getSheetByName('Sheet1');
+  if (s1 && ss.getSheets().length > 1) ss.deleteSheet(s1);
+
+  // Move Instructions to first position
+  sheets['Instructions'].activate();
+  ss.moveActiveSheet(1);
+
+  var HDR_BG = '#d9ead3';
+
+  // ============================================================
+  // INSTRUCTIONS TAB
+  // ============================================================
+  buildInstructionsTab_(sheets['Instructions']);
+
+  // ============================================================
+  // SETUP TAB
+  // ============================================================
+  var setup = sheets['Setup'];
+  setup.clear();
+
+  var payDateArrays = [
+    [2026,0,7],  [2026,0,21], [2026,1,4],  [2026,1,18],
+    [2026,2,4],  [2026,2,18], [2026,3,1],  [2026,3,15],
+    [2026,3,29], [2026,4,13], [2026,4,27], [2026,5,10],
+    [2026,5,24], [2026,6,8],  [2026,6,22], [2026,7,5],
+    [2026,7,19], [2026,8,2],  [2026,8,16], [2026,8,29],
+    [2026,9,14], [2026,9,28], [2026,10,10],[2026,10,25],
+    [2026,11,9], [2026,11,23]
+  ];
+  var payDates = [];
+  for (var p = 0; p < payDateArrays.length; p++) {
+    payDates.push(new Date(payDateArrays[p][0], payDateArrays[p][1], payDateArrays[p][2]));
+  }
+
+  // v11.14: extended to A1:F1 — col F holds the Archived? checkbox per
+  // sub-category. Archived rows are filtered from PWA dropdown but kept
+  // in Setup so historical Budget rebuilds preserve their data.
+  setup.getRange('A1:F1')
+    .setValues([['Period Start', 'Period End', 'Period Label', 'Main Category', 'Sub Category', 'Archived?']])
+    .setFontWeight('bold').setBackground(HDR_BG);
+
+  // Apply checkbox validation to col F for the full sub-category range.
+  var archivedRule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .setAllowInvalid(false)
+    .build();
+  setup.getRange('F2:F100').setDataValidation(archivedRule);
+
+  var periodValues = [];
+  for (var i = 0; i < 26; i++) {
+    var start = (i === 0) ? new Date(2025, 11, 25) : payDates[i];
+    var end;
+    if (i < 25) {
+      end = new Date(payDates[i + 1].getTime());
+      end.setDate(end.getDate() - 1);
+    } else {
+      end = new Date(2027, 0, 5);
+    }
+    periodValues.push([start, end]);
+  }
+  setup.getRange(2, 1, 26, 2).setValues(periodValues).setNumberFormat('MMM d, yyyy');
+
+  var labelFormulas = [];
+  for (var r = 2; r <= 27; r++) {
+    labelFormulas.push([
+      '=TEXT(A' + r + ',"MMM D")&" - "&IF(MONTH(A' + r + ')=MONTH(B' + r + '),TEXT(B' + r + ',"D"),TEXT(B' + r + ',"MMM D"))'
+    ]);
+  }
+  setup.getRange(2, 3, 26, 1).setFormulas(labelFormulas);
+
+  var categories = [
+    ['Income',      'Paycheck'],
+    ['Living',      'Groceries'],
+    ['Living',      'Gas'],
+    ['Living',      'Parking'],
+    ['Nice Things', 'House things'],
+    ['Nice Things', 'Saajidah spending'],
+    ['Nice Things', 'Fahyad spending'],
+    ['Nice Things', 'Small trip']
+  ];
+  setup.getRange(2, 4, categories.length, 2).setValues(categories);
+  setup.hideColumns(1, 2);
+
+  // ============================================================
+  // FIXED MONTHLY EXPENSES TAB
+  // ============================================================
+  var fixed = sheets['Fixed Monthly Expenses'];
+  fixed.clear();
+
+  fixed.getRange('A1:C1')
+    .setValues([['Name', 'Monthly Amount', 'Due Day']])
+    .setFontWeight('bold').setBackground(HDR_BG);
+
+  var expenses = [
+    ['Rent',          1550, 1],
+    ['Epcor',           60, 1],
+    ['Phones',          88, 1],
+    ['Student Loans',  250, 1]
+  ];
+  fixed.getRange(2, 1, expenses.length, 3).setValues(expenses);
+  fixed.getRange(2, 2, expenses.length, 1).setNumberFormat('$#,##0.00');
+
+  // ============================================================
+  // BUDGET TAB
+  // ============================================================
+  // Header at row 7 (rows 1-6 are reserved for the dashboard, populated by
+  // buildBudgetDashboard_ which is called from rebuildBudgetInternal_).
+  var budget = sheets['Budget'];
+  budget.clear();
+
+  budget.getRange('A7:F7')
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Available']])
+    .setFontWeight('bold').setBackground(HDR_BG);
+
+  // ============================================================
+  // TRANSACTIONS TAB
+  // ============================================================
+  var txn = sheets['Transactions'];
+  txn.clear();
+
+  // 8 columns now — added Timestamp at H in v11.0 for PWA dedup matching.
+  // Empty Category (col D) = "needs categorization" (replaces old Pending tab).
+  txn.getRange('A1:H1')
+    .setValues([['Date', 'Merchant', 'Amount', 'Category', 'Main Category', 'Transaction #', 'Period', 'Timestamp']])
+    .setFontWeight('bold').setBackground(HDR_BG);
+
+  txn.getRange('A2:A1000').setNumberFormat('MMM d, yyyy');
+  txn.getRange('C2:C1000').setNumberFormat('$#,##0.00');
+  txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  setTransactionFormulas_(txn);
+
+  // A7: setAllowInvalid(false) — strict. Same policy as updateWorkbook now.
+  // Empty cells are allowed regardless of this flag (data validation never
+  // rejects empty), so the previous "allow empty" comment was misleading.
+  var catRule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(setup.getRange('E2:E100'), true)
+    .setAllowInvalid(false)
+    .build();
+  txn.getRange('D2:D1000').setDataValidation(catRule);
+
+  // (Pending tab removed in v11.0 — single-ledger architecture)
+
+  // ============================================================
+  // NAMED RANGES (16 total — added Transactions_Timestamp in v11.0)
+  // ============================================================
+  setNamedRanges_(ss, setup, fixed, budget, txn);
+
+  // Auto-resize all tabs
+  var allSheets = [setup, fixed, budget, txn];
+  for (var s = 0; s < allSheets.length; s++) {
+    var cols = allSheets[s].getLastColumn();
+    if (cols > 0) allSheets[s].autoResizeColumns(1, cols);
+  }
+
+  // Build Saving tab (one-time goal tracker)
+  buildSavingTab_(sheets['Saving'], ss);
+
+  ui.alert(
+    'Workbook built!\n\n' +
+    '6 tabs created: Instructions, Setup, Fixed Monthly Expenses, Budget, Transactions, Saving\n' +
+    'Logs tab will be created on first API call.\n' +
+    '4 fixed expenses defined (add more anytime — no script needed)\n' +
+    '16 named ranges defined\n\n' +
+    'Next step: Run "Budget Tools → 2. Initialize Budget"'
+  );
+}
+
+// ================================================================
+// UPDATE WORKBOOK (safe — no data loss)
+// ================================================================
+
+function updateWorkbook() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+
+  var setup = ss.getSheetByName('Setup');
+  var fixed = ss.getSheetByName('Fixed Monthly Expenses');
+  var budget = ss.getSheetByName('Budget');
+  var txn = ss.getSheetByName('Transactions');
+
+  if (!setup || !budget || !txn) {
+    ui.alert('Error: Required tabs not found. Run "Build Workbook" first.');
+    return;
+  }
+
+  // --- Trim whitespace in Setup categories (catches Sheets-direct edits) ---
+  var trimmedCount = cleanupSetupWhitespace_(ss);
+  if (trimmedCount > 0) {
+    console.log('cleanupSetupWhitespace_: trimmed ' + trimmedCount + ' Setup category cell(s)');
+  }
+
+  // --- v11.14: ensure Setup col F (Archived?) header + checkbox validation ---
+  // Idempotent — running on a sheet that already has it just re-applies the
+  // same value/validation. Existing checkbox state is preserved (we only
+  // touch the header cell + validation rule, not the data cells).
+  if (setup.getRange('F1').getValue() !== 'Archived?') {
+    setup.getRange('F1').setValue('Archived?').setFontWeight('bold').setBackground(HDR_BG);
+  }
+  var archivedCheckboxRule = SpreadsheetApp.newDataValidation()
+    .requireCheckbox()
+    .setAllowInvalid(false)
+    .build();
+  setup.getRange('F2:F100').setDataValidation(archivedCheckboxRule);
+
+  // (v11.0: Pending tab is no longer created or maintained. Use
+  // "Migrate from Pending (one-time)" menu item to migrate existing data.)
+
+  // --- Add Timestamp column (H) to Transactions if missing (v11.0 migration) ---
+  var txnH1 = txn.getRange('H1').getValue();
+  if (txnH1 !== 'Timestamp') {
+    txn.getRange('H1').setValue('Timestamp')
+      .setFontWeight('bold').setBackground('#d9ead3');
+    txn.getRange('H2:H1000').setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  }
+
+  // --- Update Instructions tab ---
+  var instructions = ss.getSheetByName('Instructions') || ss.insertSheet('Instructions');
+  buildInstructionsTab_(instructions);
+  instructions.activate();
+  ss.moveActiveSheet(1);
+
+  // --- Update Transactions formulas (cols E and G) ---
+  setTransactionFormulas_(txn);
+
+  // --- Update data validation ---
+  var catRule = SpreadsheetApp.newDataValidation()
+    .requireValueInRange(setup.getRange('E2:E100'), true)
+    .setAllowInvalid(false)
+    .build();
+  txn.getRange('D2:D1000').setDataValidation(catRule);
+
+  // --- Update named ranges ---
+  if (!fixed) fixed = ss.getSheetByName('Fixed Monthly Expenses');
+  setNamedRanges_(ss, setup, fixed, budget, txn);
+
+  // --- Saving tab (v11.8): create if missing, refresh structure if exists ---
+  // ⚠️ MUST come AFTER setNamedRanges_. The Saving tab's formulas reference
+  // PayPeriods_*, Budget_*, etc. setNamedRanges_ deletes-and-recreates those
+  // names; Sheets converts any formula referencing a being-deleted named range
+  // to #REF! and DOES NOT heal it when the same name is recreated. Bug found
+  // in v11.8 first deploy; fix landed in v11.9.
+  var saving = ss.getSheetByName('Saving');
+  if (!saving) {
+    saving = ss.insertSheet('Saving');
+    buildSavingTab_(saving, ss);
+  } else {
+    refreshSavingTab_(saving, ss);
+  }
+
+  // --- Update Budget category formulas ---
+  // v11.12: replaced the in-place per-row refresh loop with a full rebuild
+  // via rebuildBudgetInternal_. The in-place loop was silently failing —
+  // the Budget dashboard formulas would be refreshed (working named-range
+  // refs) but the per-row formulas (rows 8+) would stay as `#REF!` even
+  // after their setFormula calls. Unknown root cause (suspected Apps Script
+  // state-commit quirk between setNamedRanges_ and per-row setFormula), but
+  // rebuildBudgetInternal_ has the same-session code path that addCategory
+  // uses — which does work — so we use that path here too.
+  //
+  // rebuildBudgetInternal_ preserves user-entered Budgeted amounts via
+  // existingBudgetedMap. In 'refresh' mode (no new categories), it does
+  // a full Budget rebuild without touching the Saving tab or other tabs.
+  SpreadsheetApp.flush(); // ensure setNamedRanges_ state is committed
+  var rebuildResult = rebuildBudgetInternal_('refresh', ss);
+  if (rebuildResult && rebuildResult.error) {
+    console.error('updateWorkbook: Budget rebuild failed:', rebuildResult.error);
+  }
+
+  ui.alert(
+    'Script updated!\n\n' +
+    'Formulas, named ranges, and data validation have been refreshed.\n' +
+    'Transactions tab Timestamp column verified/added.\n' +
+    'Budget rebuilt (dashboard + all category rows; preserved Budgeted amounts).\n' +
+    'Saving tab created/refreshed.\n' +
+    'Instructions tab has been updated.\n\n' +
+    'NOTE: If your Budget tab still shows old _income rows, run\n' +
+    '"Initialize Budget" to fully migrate to the new layout.'
+  );
+}
+
+// ================================================================
+// PARSE EMAILS
+// Menu wrapper (with UI alerts) and internal function (returns data).
+// ================================================================
+
+/**
+ * Menu version — shows UI alerts. Calls internal function.
+ */
+function processInfoAlerts() {
+  var ui = SpreadsheetApp.getUi();
+  var result = processInfoAlerts_();
+
+  var report = result.parsed + ' transaction(s) parsed from ' + result.threads + ' email(s).';
+  if (result.errors > 0) {
+    report += '\n\n⚠️ Could not parse ' + result.errors + ' email(s):\n' + result.errorDetails.join('\n');
+  }
+  if (result.parsed === 0 && result.threads === 0) {
+    report = 'No new infoalert emails found.\n\nAll Scotiabank alerts have already been processed.';
+  }
+  report += '\n\nCheck the Transactions tab — newly-parsed rows have an empty Category column (PWA will pick them up).';
+  ui.alert(report);
+}
+
+/**
+ * Internal version — no UI calls. Returns result object.
+ * Safe to call from doGet() web app context.
+ */
+function processInfoAlerts_() {
+  // v11.3 (S4): Wrap body in LockService so this trigger can't race with
+  // user-initiated writes (handleBatchCategorize_, handleCategorize_, etc.).
+  // Without this, two writers can both call findNextEmptyRow_ and pick the
+  // same row, silently clobbering one another.
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) {
+    // Another writer holds the lock. Skip this run; emails are still
+    // unlabeled, so the next trigger will pick them up. Logged so we can
+    // detect contention if it ever becomes frequent.
+    logActivity_('processInfoAlerts', 0, 'lock_timeout',
+      'lock unavailable after 20s; skipping run, emails retry on next trigger', '');
+    return { parsed: 0, threads: 0, errors: 0, errorDetails: [], skipped: true };
+  }
+
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var txn = ss.getSheetByName('Transactions');
+
+    var result = { parsed: 0, threads: 0, errors: 0, errorDetails: [] };
+
+    if (!txn) return result;
+
+    // --- Step 1: Search for unprocessed infoalert emails ---
+    var query = 'from:infoalerts@scotiabank.com subject:"Authorization on your" -label:Budget-Processed';
+    var threads = GmailApp.search(query);
+    result.threads = threads.length;
+
+    if (threads.length === 0) return result;
+
+    // --- Step 2: Batch fetch all messages ---
+    var allMessages = GmailApp.getMessagesForThreads(threads);
+
+    // --- Step 3: Parse each message in memory ---
+    var regex = /for \$([\d,]+\.\d{2}) at (.+?) on account .+? at\s+(\d{1,2}:\d{2}\s*[ap]m)/i;
+    var newRows = [];
+
+    // v11.3 (S3): Track timestamps assigned in this batch so we can guarantee
+    // uniqueness even if two emails share the exact same merchant+amount+second.
+    var batchKeys = {};
+
+    for (var t = 0; t < allMessages.length; t++) {
+      for (var m = 0; m < allMessages[t].length; m++) {
+        var msg = allMessages[t][m];
+        var body = msg.getBody()
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/&#39;/g, "'")
+          .replace(/&#34;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/\s+/g, ' ');
+        var subject = msg.getSubject();
+        var emailDate = msg.getDate();
+
+        var match = regex.exec(body);
+        if (match) {
+          var amountStr = match[1].replace(/,/g, '');
+          var amount = -parseFloat(amountStr);
+          var merchant = match[2].trim();
+          var timeStr = match[3].trim();
+          var baseTimestamp = buildTimestamp_(emailDate, timeStr);
+
+          // v11.3 (S3): Append a 4-char hash of merchant+amount, plus a
+          // collision counter, so two charges in the same second are always
+          // distinguishable. Old rows without a suffix still match correctly
+          // (string equality) — backward compatible.
+          var timestamp = baseTimestamp + uniqueSuffix_(baseTimestamp, merchant, amount, batchKeys);
+
+          // v11.0 single-ledger: data-only fields. Cols E (Main Cat) and G (Period)
+          // are pre-existing formulas that auto-fill from D and A respectively —
+          // writing them here would clobber the formulas. We write A,B,C,D + H only.
+          //
+          // v11.21 (Phase 30 — Bug 2 fix): normalize Date column to midnight
+          // (no time portion). Period formula compares Date against PayPeriods
+          // End at midnight. If Date had a time portion (e.g. 12:50:00), the
+          // last-day-of-period comparison `Setup!B(midnight) >= A(12:50)`
+          // returned FALSE → "Unassigned" → silent loss from Budget totals.
+          // Timestamp column (H) still preserves the full time for ordering.
+          var dateOnly = new Date(
+            emailDate.getFullYear(),
+            emailDate.getMonth(),
+            emailDate.getDate()
+          );
+          newRows.push({
+            date: dateOnly, merchant: merchant, amount: amount,
+            category: '', timestamp: timestamp
+          });
+        } else {
+          result.errors++;
+          result.errorDetails.push(subject + ' (' + emailDate.toDateString() + ')');
+        }
+      }
+    }
+
+    // --- Step 3.5: Write-time dedup (v11.21 — Phase 30, Bug 1 fix) ---
+    // Cross-batch dedup: if a Timestamp string already exists in the sheet,
+    // skip writing it. Catches the "Gmail thread re-iteration" failure mode
+    // where the parser re-processes already-labeled messages because a new
+    // message arrived in the same thread (Gmail's negative-label search has
+    // eventual-consistency lag). Without this, identical hashes (per-batch
+    // collision counter resets across runs) caused 15+ groups of duplicate
+    // rows in the user's sheet.
+    //
+    // LockService (line ~2494) guarantees no concurrent writer between this
+    // read and the write below — safe to use a simple read-then-write.
+    if (newRows.length > 0) {
+      var existingTimestamps = {};
+      var lastRowForDedup = txn.getLastRow();
+      if (lastRowForDedup >= 2) {
+        var existingH = txn.getRange(2, 8, lastRowForDedup - 1, 1).getValues();
+        for (var ei = 0; ei < existingH.length; ei++) {
+          var ets = existingH[ei][0];
+          if (ets !== '' && ets !== null && ets !== undefined) {
+            // Normalize to string — sheet may store as Date or string.
+            existingTimestamps[String(ets)] = true;
+          }
+        }
+      }
+      var beforeDedup = newRows.length;
+      newRows = newRows.filter(function (r) {
+        return !existingTimestamps[r.timestamp];
+      });
+      var skipped = beforeDedup - newRows.length;
+      if (skipped > 0) {
+        // Log loudly so we can tell if/how often the Gmail-thread re-iteration
+        // is happening even after deploy. If this number stays at 0, the
+        // upstream cause stopped on its own; if it stays high, we know the
+        // dedup is actively rescuing us.
+        logActivity_('processInfoAlerts', 0, 'dedup_skip',
+          'skipped ' + skipped + ' duplicate rows (already in sheet)', '');
+      }
+    }
+
+    // --- Step 4: Batch write to Transactions tab ---
+    // Write cols A:D and col H separately to avoid clobbering formulas in E and G.
+    if (newRows.length > 0) {
+      var startRow = findNextEmptyRow_(txn);
+      var rowsAD = newRows.map(function(r) { return [r.date, r.merchant, r.amount, r.category]; });
+      var rowsH = newRows.map(function(r) { return [r.timestamp]; });
+      txn.getRange(startRow, 1, newRows.length, 4).setValues(rowsAD);
+      txn.getRange(startRow, 8, newRows.length, 1).setValues(rowsH);
+      SpreadsheetApp.flush();
+    }
+    result.parsed = newRows.length;
+
+    // --- Step 5: Batch label emails as processed ---
+    var label = GmailApp.getUserLabelByName('Budget/Processed');
+    if (!label) {
+      label = GmailApp.createLabel('Budget/Processed');
+    }
+    label.addToThreads(threads);
+
+    return result;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ================================================================
+// SHARED HELPERS
+// ================================================================
+
+/**
+ * Builds a timestamp string from an email date and a parsed time string.
+ */
+function buildTimestamp_(emailDate, timeStr) {
+  var timeParts = timeStr.match(/(\d{1,2}):(\d{2})\s*([ap]m)/i);
+  if (timeParts) {
+    var hours = parseInt(timeParts[1], 10);
+    var minutes = parseInt(timeParts[2], 10);
+    var ampm = timeParts[3].toLowerCase();
+
+    if (ampm === 'pm' && hours !== 12) hours += 12;
+    if (ampm === 'am' && hours === 12) hours = 0;
+
+    var y = emailDate.getFullYear();
+    var mo = ('0' + (emailDate.getMonth() + 1)).slice(-2);
+    var d = ('0' + emailDate.getDate()).slice(-2);
+    var h = ('0' + hours).slice(-2);
+    var mi = ('0' + minutes).slice(-2);
+
+    return y + '-' + mo + '-' + d + ' ' + h + ':' + mi + ':00';
+  }
+  return Utilities.formatDate(emailDate, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+}
+
+/**
+ * v11.3 (S3): Returns a hex hash of an input string. Non-cryptographic —
+ * used only for distinguishing transactions with the same timestamp.
+ *
+ * v11.21 (Phase 30 — Bug 3 mitigation): widened from 2 → 4 bytes (4 → 8
+ * hex chars). 16-bit hash had a birthday collision at ~256 distinct
+ * (merchant, amount) pairs. 32-bit hash bumps that to ~65k — essentially
+ * zero collision risk at personal-budget scale, which removes the only
+ * false-drop risk in the v11.21 write-time dedup added to
+ * processInfoAlerts_. Backward compatible: old 4-char-hash timestamps in
+ * the sheet still match by exact string equality.
+ */
+function shortHash_(input) {
+  var bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, input);
+  var hex = '';
+  for (var i = 0; i < 4; i++) {
+    var b = bytes[i] & 0xff;
+    hex += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return hex;
+}
+
+/**
+ * v11.3 (S3): Returns a unique suffix to append to a timestamp so that
+ * two charges arriving in the same second don't collide in PWA storage
+ * or batchCategorize matching.
+ *
+ * Format: '#<hex>' for the first occurrence, '#<hex>-<n>' if the same
+ * (timestamp, merchant, amount) triple repeats inside the same batch.
+ *
+ * batchKeys: object the caller passes in once per processInfoAlerts_ run;
+ * we mutate it to track collisions.
+ */
+function uniqueSuffix_(timestamp, merchant, amount, batchKeys) {
+  var hex = shortHash_(merchant + '|' + amount);
+  var key = timestamp + '#' + hex;
+  if (!batchKeys[key]) {
+    batchKeys[key] = 1;
+    return '#' + hex;
+  }
+  batchKeys[key]++;
+  return '#' + hex + '-' + batchKeys[key];
+}
+
+/**
+ * Sets formulas for Transactions columns E (Main Category) and G (Period).
+ *
+ * v11.21 (Phase 30 — Bug 2 fix): Period formula wraps the Date cell in
+ * INT(...) to truncate any time portion before comparing against
+ * PayPeriods Start/End. Without this, transactions arriving on the LAST
+ * day of any period (e.g. "May 12 12:50:00") would fail the
+ * `Setup!B(midnight) >= A(12:50)` comparison and fall through to
+ * "Unassigned" — silently lost from Budget totals. INT() makes the
+ * formula robust regardless of whether the Date column has a time
+ * portion (defense in depth alongside the parser's new midnight
+ * normalization). Setup A/B values are already midnight Dates, so no
+ * INT() needed on the Setup side.
+ */
+function setTransactionFormulas_(txn) {
+  var txnFormulasE = [];
+  var txnFormulasG = [];
+  for (var tr = 2; tr <= 1000; tr++) {
+    txnFormulasE.push([
+      '=IF(D' + tr + '="","",IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(D' + tr + ',Setup!$E$2:$E$100,0)),""))'
+    ]);
+    txnFormulasG.push([
+      '=IF(A' + tr + '="","",IFERROR(FILTER(Setup!$C$2:$C$27,Setup!$A$2:$A$27<=INT(A' + tr + '),Setup!$B$2:$B$27>=INT(A' + tr + ')),"Unassigned"))'
+    ]);
+  }
+  txn.getRange(2, 5, 999, 1).setFormulas(txnFormulasE);
+  txn.getRange(2, 7, 999, 1).setFormulas(txnFormulasG);
+}
+
+/**
+ * Sets all 15 named ranges. Safe to call repeatedly.
+ */
+function setNamedRanges_(ss, setup, fixed, budget, txn) {
+  // B3: only remove ranges we own — previously this wiped EVERY named range
+  // including any user-defined ones. Owned-prefix list mirrors the names
+  // we re-create below. Match by exact name OR known prefix (e.g.
+  // "PayPeriods_Label" matches the "PayPeriods" entry).
+  var ownedPrefixes = [
+    'PayPeriods', 'CategoryList', 'CategoryMain',
+    'FixedExpenses_', 'Budget_', 'Transactions_'
+  ];
+  var existing = ss.getNamedRanges();
+  for (var n = 0; n < existing.length; n++) {
+    var nm = existing[n].getName();
+    var owned = false;
+    for (var p = 0; p < ownedPrefixes.length; p++) {
+      if (nm === ownedPrefixes[p] || nm.indexOf(ownedPrefixes[p]) === 0) {
+        owned = true;
+        break;
+      }
+    }
+    if (owned) existing[n].remove();
+  }
+
+  ss.setNamedRange('PayPeriods',       setup.getRange('A2:C27'));
+  ss.setNamedRange('PayPeriods_Label', setup.getRange('C2:C27'));
+  ss.setNamedRange('PayPeriods_Start', setup.getRange('A2:A27'));
+  ss.setNamedRange('PayPeriods_End',   setup.getRange('B2:B27'));
+  ss.setNamedRange('CategoryList',     setup.getRange('E2:E100'));
+  ss.setNamedRange('CategoryMain',     setup.getRange('D2:D100'));
+
+  ss.setNamedRange('FixedExpenses_Amount', fixed.getRange('B2:B50'));
+  ss.setNamedRange('FixedExpenses_DueDay', fixed.getRange('C2:C50'));
+
+  // Budget_* ranges start at row 8 — rows 1-6 are dashboard, row 7 is header.
+  // v11.19 (Phase 27): added Budget_RolledOver at col F. Budget_Available
+  // shifted from col F → col G to make room. Saving tab + dashboard
+  // formulas reference these by name, so the column shift is transparent
+  // to them.
+  ss.setNamedRange('Budget_Period',    budget.getRange('A8:A500'));
+  ss.setNamedRange('Budget_Category',  budget.getRange('C8:C500'));
+  ss.setNamedRange('Budget_Budgeted',  budget.getRange('D8:D500'));
+  ss.setNamedRange('Budget_RolledOver',budget.getRange('F8:F500'));
+  ss.setNamedRange('Budget_Available', budget.getRange('G8:G500'));
+
+  ss.setNamedRange('Transactions_Amount',    txn.getRange('C2:C1000'));
+  ss.setNamedRange('Transactions_Category',  txn.getRange('D2:D1000'));
+  ss.setNamedRange('Transactions_Period',    txn.getRange('G2:G1000'));
+  // Added v11.0 for single-ledger PWA dedup matching
+  ss.setNamedRange('Transactions_Timestamp', txn.getRange('H2:H1000'));
+}
+
+// ================================================================
+// SAVING TAB BUILDER (v11.8) — one-time goal tracker
+// ================================================================
+//
+// Layout:
+//   Row 1: merged title bar
+//   Row 2: dashboard labels (Today | Current Period | Total Goals |
+//          Per-Period Need | Currently Saved | Target Total)
+//   Row 3: dashboard formula values
+//   Row 4: blank separator
+//   Row 5: column headers (frozen)
+//   Row 6+: user-entered goals + computed columns
+//
+// Columns:
+//   A: Goal Name (text, user)
+//   B: Linked Category (dropdown from CategoryList, user)
+//   C: Target Amount (currency, user)
+//   D: Target Period (dropdown from PayPeriods_Label, user)
+//   E: Currently Saved (formula, currency)
+//   F: Periods Remaining (formula, integer)
+//   G: Per-Period Need (formula, currency)
+//   H: On Track? (formula, text + conditional formatting)
+//   I: Notes (text, user)
+//
+// "Currently Saved" pulls Budget Available for the linked category in the
+// period containing today (TODAY()-driven via XLOOKUP against PayPeriods).
+// Empty/incomplete goals show "" in computed columns — they don't pollute
+// dashboard sums (SUM ignores text).
+//
+// "On Track?" status:
+//   DONE          — current saved >= target (green)
+//   OVERDUE       — past target period, didn't reach (red)
+//   JUST STARTING — current period is start of budget year (green)
+//   ON PACE       — saved >= target × (elapsed/total) (green)
+//   CLOSE         — saved >= target × (elapsed/total) × 0.8 (yellow)
+//   BEHIND        — below 0.8× pace (red)
+// "" if goal isn't fully defined.
+
+var SAVING_TITLE_BG = '#1a237e';
+var SAVING_HDR_BG = '#d9ead3';
+var SAVING_DASHBOARD_LABEL_BG = '#e8eaf6';
+var SAVING_MAX_GOAL_ROW = 105; // 100 goals supported (rows 6-105)
+
+function buildSavingTab_(saving, ss) {
+  saving.clear();
+  saving.setTabColor('#a4c2f4'); // light blue
+
+  // Hide unused columns past J (v11.14: added Status column).
+  if (saving.getMaxColumns() > 10) {
+    saving.hideColumns(11, saving.getMaxColumns() - 10);
+  }
+
+  // Column widths.
+  saving.setColumnWidth(1, 200); // A: Goal Name
+  saving.setColumnWidth(2, 170); // B: Linked Category
+  saving.setColumnWidth(3, 110); // C: Target Amount
+  saving.setColumnWidth(4, 130); // D: Target Period
+  saving.setColumnWidth(5, 130); // E: Currently Saved
+  saving.setColumnWidth(6, 130); // F: Allocated This Period
+  saving.setColumnWidth(7, 110); // G: Periods Remaining
+  saving.setColumnWidth(8, 140); // H: Needed Future Periods
+  saving.setColumnWidth(9, 220); // I: Notes
+  saving.setColumnWidth(10, 110); // J: Status (v11.14)
+
+  applySavingStructure_(saving, ss);
+
+  saving.setFrozenRows(5);
+}
+
+/**
+ * Refreshes the Saving tab structure WITHOUT touching user-entered data
+ * (cols A, B, C, D, I in rows 6+). Computed columns E-H are formulas, so
+ * overwriting them is safe. Title, dashboard, header, validations, CF —
+ * all rebuilt to ensure they match the latest schema.
+ */
+function refreshSavingTab_(saving, ss) {
+  // Don't clear — we'd nuke user goals. Just re-apply structure.
+  // Existing formulas in E-H get overwritten, but they're identical to
+  // what they were, so net no effect. v11.14: col J Status user-entered,
+  // preserved across refresh (we never write into J6+).
+  applySavingStructure_(saving, ss);
+
+  // Ensure column widths (in case user resized).
+  saving.setColumnWidth(1, 200);
+  saving.setColumnWidth(2, 170);
+  saving.setColumnWidth(3, 110);
+  saving.setColumnWidth(4, 130);
+  saving.setColumnWidth(5, 130);
+  saving.setColumnWidth(6, 130);
+  saving.setColumnWidth(7, 110);
+  saving.setColumnWidth(8, 140);
+  saving.setColumnWidth(9, 220);
+  saving.setColumnWidth(10, 110); // v11.14: Status
+
+  saving.setFrozenRows(5);
+
+  if (!saving.getTabColorObject() || saving.getTabColorObject().asRgbColor().asHexString() !== '#a4c2f4') {
+    saving.setTabColor('#a4c2f4');
+  }
+}
+
+/**
+ * Applies title bar + dashboard + header + formulas + validations + CF.
+ * Used by both buildSavingTab_ (after clear) and refreshSavingTab_ (preserve mode).
+ */
+function applySavingStructure_(saving, ss) {
+  // --- Row 1: title bar ---
+  // v11.14: widened to A1:J1 for the new Status column.
+  // Unmerge first in case the previous schema's A1:I1 merge is still present —
+  // re-merging across a different range without unmerging throws.
+  var titleRange = saving.getRange('A1:J1');
+  try { titleRange.breakApart(); } catch (e) { /* nothing to unmerge */ }
+  saving.getRange('A1').setValue('SAVING GOALS — ' + BUDGET_YEAR + ' BUDGET YEAR');
+  titleRange.merge()
+    .setBackground(SAVING_TITLE_BG)
+    .setFontColor('#ffffff')
+    .setFontWeight('bold')
+    .setFontSize(14)
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle');
+  saving.setRowHeight(1, 32);
+
+  // --- Row 2: dashboard labels ---
+  // v11.11: dropped the old "Per-Period Need" column + total. Replaced with
+  // "Needed Future" which adjusts based on what's allocated this period.
+  saving.getRange('A2:F2').setValues([[
+    'Today', 'Current Period', 'Total Goals',
+    'Currently Saved', 'Needed Future', 'Target Total'
+  ]])
+    .setBackground(SAVING_DASHBOARD_LABEL_BG)
+    .setFontWeight('bold')
+    .setFontColor('#1a237e')
+    .setHorizontalAlignment('center');
+  // Cols G-J in row 2 are blank — make them visually unobtrusive.
+  saving.getRange('G2:J2').setBackground('#fafafa');
+
+  // --- Row 3: dashboard values ---
+  // B3 (Current Period) is the helper cell referenced by all per-row
+  // formulas — when B3 is broken, every downstream column cascades into
+  // errors. v11.10 fix.
+  //
+  // Originally used XLOOKUP(1, (start<=today)*(end>=today), label). Relied
+  // on Sheets to auto-broadcast the multiplied boolean arrays as XLOOKUP's
+  // lookup vector. In practice that was unreliable — XLOOKUP returned
+  // "no match" even when TODAY() was clearly inside a period, cascading
+  // into #DIV/0! in the Per-Period Need column.
+  //
+  // New approach: MATCH with match_type=1 finds the largest value in
+  // PayPeriods_Start that is <= TODAY(). Since PayPeriods_Start is
+  // ascending-sorted by design (period 0 Dec 25 through period 25 Dec 23),
+  // that position identifies the current period's row; INDEX pulls the
+  // corresponding label. IFERROR catches "TODAY() earlier than all periods".
+  // The outer IF catches "TODAY() later than period 25's end".
+  var lastGoalRow = SAVING_MAX_GOAL_ROW; // 105
+  saving.getRange('A3').setFormula('=TEXT(TODAY(),"MMM D, YYYY")');
+  saving.getRange('B3').setFormula(
+    '=IFERROR(' +
+      'IF(TODAY()>INDEX(PayPeriods_End,ROWS(PayPeriods_End)),"(out of range)",' +
+        'INDEX(PayPeriods_Label,MATCH(TODAY(),PayPeriods_Start,1))),' +
+      '"(out of range)")'
+  );
+  // v11.14: dashboard sums filter out Achieved + Cancelled goals.
+  // Empty Status (existing rows pre-v11.14) counts as Active by virtue of
+  // the COUNTIFS/SUMIFS "<>Achieved" + "<>Cancelled" filter — backward-compat.
+  // Filter range: J6:J<lastGoalRow>.
+  saving.getRange('C3').setFormula(
+    '=COUNTIFS(A6:A' + lastGoalRow + ',"<>",' +
+                  'J6:J' + lastGoalRow + ',"<>Achieved",' +
+                  'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('D3').setFormula(
+    '=SUMIFS(E6:E' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('E3').setFormula(
+    '=SUMIFS(H6:H' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('F3').setFormula(
+    '=SUMIFS(C6:C' + lastGoalRow + ',' +
+            'A6:A' + lastGoalRow + ',"<>",' +
+            'J6:J' + lastGoalRow + ',"<>Achieved",' +
+            'J6:J' + lastGoalRow + ',"<>Cancelled")'
+  );
+  saving.getRange('A3:F3').setHorizontalAlignment('center').setFontSize(11);
+  saving.getRange('D3').setNumberFormat('$#,##0.00');
+  saving.getRange('E3').setNumberFormat('$#,##0.00');
+  saving.getRange('F3').setNumberFormat('$#,##0.00');
+
+  // --- Row 4: separator (light gray bar) ---
+  saving.getRange('A4:J4').setBackground('#fafafa');
+  saving.setRowHeight(4, 8);
+
+  // --- Row 5: column headers ---
+  // v11.11: replaced "Per-Period Need" + "On Track?" with
+  // "Allocated This Period" + "Needed Future Periods". On Track? status
+  // (DONE/ON PACE/CLOSE/BEHIND/OVERDUE) removed — the numeric columns now
+  // convey the same information and stay stable when the user allocates
+  // "the right amount" for the current period. Status indicator may return
+  // as a dashboard feature later.
+  // v11.14: added Status column (J).
+  saving.getRange('A5:J5').setValues([[
+    'Goal Name', 'Linked Category', 'Target', 'Target Period',
+    'Currently Saved', 'Allocated This Period', 'Periods Remaining',
+    'Needed Future Periods', 'Notes', 'Status'
+  ]])
+    .setBackground(SAVING_HDR_BG)
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center');
+
+  // --- Cols E, F, G, H rows 6-lastGoalRow: computed formulas ---
+  // Reference $B$3 (current period helper). Each row's formula references
+  // its own A, B, C, D values. Empty rows produce empty strings — SUM in
+  // dashboard ignores them.
+  //
+  // v11.11 layout: E=Currently Saved, F=Allocated This Period,
+  // G=Periods Remaining, H=Needed Future Periods (adaptive).
+  var formulaRows = [];
+  for (var r = 6; r <= lastGoalRow; r++) {
+    formulaRows.push([
+      // E: Currently Saved — cumulative Budget Available for this category
+      // at the current period row (includes this period's allocation since
+      // Budget Available = prior + Budgeted - Spent).
+      '=IF(B' + r + '="","",IFERROR(SUMIFS(Budget_Available,Budget_Category,B' + r + ',Budget_Period,$B$3),0))',
+      // F: Allocated This Period (NEW v11.11) — exactly how much the user
+      // has budgeted for this category in the current period. Distinct from
+      // Currently Saved because that includes prior-period rollover.
+      '=IF(B' + r + '="","",IFERROR(SUMIFS(Budget_Budgeted,Budget_Category,B' + r + ',Budget_Period,$B$3),0))',
+      // G: Periods Remaining — from current (inclusive) to target period
+      // (exclusive). `MATCH(D) - MATCH(B3)` gives that count directly.
+      // Negative = past target, 0 = target period is current.
+      '=IF(D' + r + '="","",IFERROR(MATCH(D' + r + ',PayPeriods_Label,0)-MATCH($B$3,PayPeriods_Label,0),""))',
+      // H: Needed Future Periods (NEW v11.11) — adaptive formula:
+      //   - If user has allocated current period (F>0): remaining target
+      //     split across FUTURE periods (G-1). Stays constant when user
+      //     budgets the previously-shown per-period need.
+      //   - If no current allocation (F=0): remaining target split across
+      //     all remaining saving periods including current (G). Same
+      //     semantics as the old "Per-Period Need" column.
+      // Edge cases: goal already met (E>=C) or no periods left (G<=0) → 0.
+      // Malformed G → "" via outer IFERROR defense.
+      '=IF(OR(B' + r + '="",C' + r + '="",D' + r + '=""),"",' +
+        'IFERROR(' +
+          'IF(G' + r + '<=0,0,' +
+            'IF(E' + r + '>=C' + r + ',0,' +
+              'IF(F' + r + '>0,MAX(0,(C' + r + '-E' + r + ')/MAX(1,G' + r + '-1)),' +
+                 'MAX(0,(C' + r + '-E' + r + ')/G' + r + '))' +
+            ')' +
+          '),""))'
+    ]);
+  }
+  saving.getRange(6, 5, formulaRows.length, 4).setFormulas(formulaRows);
+
+  // --- Number formats ---
+  // Cols C (Target), E (Currently Saved), F (Allocated), H (Needed Future): currency.
+  // G (Periods Remaining): integer.
+  saving.getRange('C6:C' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('E6:E' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('F6:F' + lastGoalRow).setNumberFormat('$#,##0.00');
+  saving.getRange('G6:G' + lastGoalRow).setNumberFormat('0');
+  saving.getRange('H6:H' + lastGoalRow).setNumberFormat('$#,##0.00');
+
+  // --- Data validations ---
+  // Col B: Linked Category (from CategoryList).
+  var setup = ss.getSheetByName('Setup');
+  if (setup) {
+    var catRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('E2:E100'), true)
+      .setAllowInvalid(false)
+      .build();
+    saving.getRange('B6:B' + lastGoalRow).setDataValidation(catRule);
+
+    // Col D: Target Period (from PayPeriods_Label).
+    var periodRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('C2:C27'), true)
+      .setAllowInvalid(false)
+      .build();
+    saving.getRange('D6:D' + lastGoalRow).setDataValidation(periodRule);
+  }
+
+  // --- v11.14: Col J Status dropdown ---
+  // Three states: Active (default; empty also = Active for backward compat),
+  // Achieved, Cancelled. Both non-Active values hide the goal from active
+  // dashboard sums + the PWA Goal cards but preserve the row for history.
+  // setAllowInvalid(true) so blank cells don't get flagged red — empty IS
+  // valid (treated as Active downstream).
+  var statusRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Active', 'Achieved', 'Cancelled'], true)
+    .setAllowInvalid(true)
+    .build();
+  saving.getRange('J6:J' + lastGoalRow).setDataValidation(statusRule);
+
+  // --- Conditional formatting (v11.14) ---
+  // 1. Strip any rule that touches col 8 (H, legacy On Track? column from
+  //    pre-v11.11) or col 10 (J, our own — re-applied each refresh).
+  // 2. Add a new rule that grays out + italicizes archived rows so they
+  //    visually fade compared to active goals. Rule formula uses $J6 with
+  //    relative row — when applied to range A6:J<last>, Sheets evaluates
+  //    per-row against that row's J cell.
+  var allRules = saving.getConditionalFormatRules();
+  var keepRules = [];
+  for (var k = 0; k < allRules.length; k++) {
+    var ranges = allRules[k].getRanges();
+    var touchesHorJ = false;
+    for (var rg = 0; rg < ranges.length; rg++) {
+      var col = ranges[rg].getColumn();
+      if (col === 8 || col === 10) { touchesHorJ = true; break; }
+    }
+    if (!touchesHorJ) keepRules.push(allRules[k]);
+  }
+
+  var archivedCfRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied('=OR($J6="Achieved",$J6="Cancelled")')
+    .setBackground('#f1f3f4')
+    .setFontColor('#9aa0a6')
+    .setItalic(true)
+    .setRanges([saving.getRange('A6:J' + lastGoalRow)])
+    .build();
+  keepRules.push(archivedCfRule);
+  saving.setConditionalFormatRules(keepRules);
+
+  // --- Center-align select columns for visual consistency ---
+  saving.getRange('C6:H' + lastGoalRow).setHorizontalAlignment('center');
+  saving.getRange('J6:J' + lastGoalRow).setHorizontalAlignment('center');
+}
+
+// ================================================================
+// INSTRUCTIONS TAB BUILDER
+// ================================================================
+
+function buildInstructionsTab_(sheet) {
+  sheet.clear();
+  sheet.setTabColor('#4285f4');
+  sheet.setColumnWidth(1, 600);
+
+  if (sheet.getMaxColumns() > 1) {
+    sheet.hideColumns(2, sheet.getMaxColumns() - 1);
+  }
+
+  var rows = [
+    ['BUDGET TOOLS — INSTRUCTIONS', 16, true, '#4285f4', '#ffffff'],
+    ['', 10, false, null, null],
+
+    ['WHAT IS THIS?', 13, true, '#e8eaf6', '#1a237e'],
+    ['A personal budget system: Google Sheet + mobile PWA categorizer.', 10, false, null, null],
+    ['Tracks 26 bi-weekly pay periods. Auto-parses Scotiabank email alerts.', 10, false, null, null],
+    ['Source: github.com/fahyad/gsheetbudget2026-categorizerApp', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['TABS', 13, true, '#e8eaf6', '#1a237e'],
+    ['Setup            — Pay periods + categories', 10, false, null, null],
+    ['Fixed Monthly    — Recurring expenses (rent, phone, etc.)', 10, false, null, null],
+    ['Budget           — Budgeted vs Spent per period (with Rolled Over column from v11.19)', 10, false, null, null],
+    ['Transactions     — All categorized + uncategorized transactions (single ledger)', 10, false, null, null],
+    ['Saving           — One-time goals (e.g. "Europe trip $5000 by Oct")', 10, false, null, null],
+    ['Logs             — API activity log (debugging)', 10, false, null, null],
+    ['ClientMetrics    — PWA call timings (perf debugging, auto-created on first flush)', 10, false, null, null],
+    ['Instructions     — This tab (with version info at top)', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['MENU FUNCTIONS', 13, true, '#e8eaf6', '#1a237e'],
+    ['Build Workbook                ⚠ DESTROYS DATA  First-time only.', 11, true, '#ffcdd2', '#b71c1c'],
+    ['Initialize Budget             ⚠ Resets Budget rows (keeps Budgeted amounts).', 11, true, '#fff9c4', '#f57f17'],
+    ['Update Script (safe)          ✓ Refresh formulas + Saving tab after deploy.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Add Category                  ✓ Adds Budget rows for a new category.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Archive Goal...               ✓ Mark a savings goal Achieved + drop it from Budget.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Unarchive Goal...             ✓ Reactivate a previously archived goal.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Parse Emails                  ✓ Manual one-shot Gmail scan (hourly trigger usually handles this).', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Setup Email Trigger           ✓ Install hourly auto-parse trigger (run once at setup).', 11, true, '#c8e6c9', '#1b5e20'],
+    ['Remove Email Trigger          ℹ Disable hourly auto-parse.', 11, false, '#f5f5f5', '#424242'],
+    ['Set API Key                   ✓ Required for PWA to authenticate.', 11, true, '#c8e6c9', '#1b5e20'],
+    ['View Activity Log             ℹ Opens Logs tab.', 11, false, '#f5f5f5', '#424242'],
+    ['Refresh Version Info          ℹ Re-checks GitHub for latest version.', 11, false, '#f5f5f5', '#424242'],
+    ['Dedupe + Normalize Transactions (rescue)', 11, true, '#fff9c4', '#f57f17'],
+    ['  ⚠ One-shot cleanup of duplicate parser rows + Date column time portions.', 10, false, '#fff9c4', '#f57f17'],
+    ['  Safe to re-run (idempotent). Confirms before any destructive change.', 10, false, '#fff9c4', '#f57f17'],
+    ['', 10, false, null, null],
+
+    ['FIRST-TIME SETUP', 13, true, '#e8eaf6', '#1a237e'],
+    ['1. Run Build Workbook', 10, false, null, null],
+    ['2. Run Initialize Budget', 10, false, null, null],
+    ['3. Run Set API Key (paste a strong random key)', 10, false, null, null],
+    ['4. Run Setup Email Trigger (one-time — installs hourly Gmail auto-parse)', 10, false, null, null],
+    ['5. Open PWA → Settings → enter same key → Save', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['DAILY USE', 13, true, '#e8eaf6', '#1a237e'],
+    ['1. Hourly Gmail trigger auto-parses new Scotiabank alerts into Transactions.', 10, false, null, null],
+    ['2. Open the PWA on your phone', 10, false, null, null],
+    ['3. Tap a transaction → tap a category   (single-tap flow)', 10, false, null, null],
+    ['   OR: arm a category chip, then tap multiple transactions, then Assign  (batch flow)', 10, false, null, null],
+    ['4. Tap Sync — writes all pending categorizations to the Transactions tab', 10, false, null, null],
+    ['5. Check Budget tab (or PWA Dashboard) for updated Spent / Available', 10, false, null, null],
+    ['Note: Refresh button (↻ Parse) forces a fresh Gmail scan — useful right after a known charge.', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['ADD / EDIT DATA', 13, true, '#e8eaf6', '#1a237e'],
+    ['New category:', 11, true, null, null],
+    ['  1. Setup tab → add row in cols D & E (Main + Sub)', 10, false, null, null],
+    ['  2. Menu: Budget Tools → Add Category', 10, false, null, null],
+    ['', 10, false, null, null],
+    ['New fixed expense:', 11, true, null, null],
+    ['  1. Fixed Monthly Expenses tab', 10, false, null, null],
+    ['  2. Add row: Name, Amount, Due Day (1-31)', 10, false, null, null],
+    ['  Budget updates automatically — no menu action needed.', 10, false, null, null],
+    ['', 10, false, null, null],
+    ['Edit budgeted amounts:', 11, true, null, null],
+    ['  Edit the Budgeted column directly in the Budget tab.', 10, false, null, null],
+    ['  Spent and Available auto-calculate.', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['SAVING GOALS (one-time purchases)', 13, true, '#e8eaf6', '#1a237e'],
+    ['Track one-time goals like "Europe trip $5,000 by Oct".', 10, false, null, null],
+    ['Step 1: Add a savings category in Setup (e.g. Main="Savings", Sub="Europe trip").', 10, false, null, null],
+    ['        Easiest: PWA → "+ Add Category". Then Budget tab gets new rows for that category.', 10, false, null, null],
+    ['Step 2: Open the Saving tab → fill row 6+: Goal Name | Linked Category (dropdown) |', 10, false, null, null],
+    ['        Target Amount | Target Period (dropdown) | Notes.', 10, false, null, null],
+    ['Step 3: Computed columns auto-fill: Currently Saved (cumulative from Budget),', 10, false, null, null],
+    ['        Allocated This Period, Periods Remaining, Needed Future Periods.', 10, false, null, null],
+    ['Step 4: Each pay period, set Budget Budgeted for that category to the Per-Period Need.', 10, false, null, null],
+    ['        Available accumulates across periods until you spend the goal money.', 10, false, null, null],
+    ['', 10, false, null, null],
+    ['When goal is achieved: run "Archive Goal..." menu item. It atomically marks the Saving', 10, false, null, null],
+    ['row Achieved + drops the linked category from Budget on next rebuild (data preserved in', 10, false, null, null],
+    ['Setup col F). Booking the trip → categorize that transaction as the savings sub-category;', 10, false, null, null],
+    ['Spent goes up, Available drops to ~$0. (v11.18: do NOT just check Setup col F by hand —', 10, false, null, null],
+    ['the menu does the right thing across all three tabs atomically.)', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['TROUBLESHOOTING', 13, true, '#e8eaf6', '#1a237e'],
+    ['PWA shows no categories               → Tap Refresh in PWA', 10, false, null, null],
+    ['"No transactions" but sheet has       → Close + reopen PWA (cache)', 10, false, null, null],
+    ['Sync fails (nothing reaches sheet)    → Check Logs tab for the error', 10, false, null, null],
+    ['"Update needed: YES" at top           → Re-deploy Apps Script (see Developers)', 10, false, null, null],
+    ['PWA says "Invalid API key"            → Run Set API Key + re-enter in PWA', 10, false, null, null],
+    ['Duplicate rows in Transactions / PWA  → Run "Dedupe + Normalize Transactions (rescue)"', 10, false, null, null],
+    ['Last-day-of-period txns missing total → v11.21 auto-fixed; run Update Script if old', 10, false, null, null],
+    ['Trigger not running (no auto-parse)   → Run "Setup Email Trigger" once', 10, false, null, null],
+    ['', 10, false, null, null],
+
+    ['DO NOT', 13, true, '#ffcdd2', '#b71c1c'],
+    ['⚠ Run Build Workbook after setup (erases all data)', 10, false, '#fff3e0', '#e65100'],
+    ['⚠ Edit Budget cols B, E, F, G (auto-generated formulas; v11.19 added Rolled Over)', 10, false, '#fff3e0', '#e65100'],
+    ['⚠ Delete Setup rows 2-27 (pay periods used by formulas)', 10, false, '#fff3e0', '#e65100'],
+    ['⚠ Rename any tab (script references by name)', 10, false, '#fff3e0', '#e65100'],
+    ['⚠ Remove "Budget/Processed" Gmail label (causes re-parsing — duplicates blocked by v11.21)', 10, false, '#fff3e0', '#e65100'],
+    ['⚠ Share your API key or web app URL publicly', 10, false, '#fff3e0', '#e65100'],
+    ['', 10, false, null, null],
+
+    ['FOR DEVELOPERS', 13, true, '#eeeeee', '#424242'],
+    ['Repo:    github.com/fahyad/gsheetbudget2026-categorizerApp', 10, false, null, null],
+    ['PWA:     fahyad.github.io/gsheetbudget2026-categorizerApp/', 10, false, null, null],
+    ['Deploy:  deploy "vXX — description"    (shell alias in ~/.zshrc; also ./apps-script/deploy.sh)', 10, false, null, null],
+    ['Docs:    docs/findings.md (architecture), docs/task_plan.md (state), CLAUDE.md (orientation)', 10, false, null, null],
+  ];
+
+  // Existing instruction content starts at row 7 — rows 1-6 reserved for
+  // the version block (written by writeVersionBlock_ below).
+  var INSTRUCTION_START_ROW = 7;
+
+  var values = [];
+  for (var i = 0; i < rows.length; i++) {
+    values.push([rows[i][0]]);
+  }
+  sheet.getRange(INSTRUCTION_START_ROW, 1, rows.length, 1).setValues(values);
+
+  for (var j = 0; j < rows.length; j++) {
+    var range = sheet.getRange(j + INSTRUCTION_START_ROW, 1);
+    range.setFontSize(rows[j][1]);
+    if (rows[j][2]) range.setFontWeight('bold');
+    if (rows[j][3]) range.setBackground(rows[j][3]);
+    if (rows[j][4]) range.setFontColor(rows[j][4]);
+    range.setWrap(true);
+  }
+
+  // Populate version block in rows 1-6
+  try { writeVersionBlock_(sheet); } catch (e) { /* fail silently if GitHub unreachable */ }
+
+  var protection = sheet.protect().setDescription('Instructions — do not edit');
+  protection.setWarningOnly(true);
+}
+
+// ================================================================
+// INITIALIZE BUDGET
+// ================================================================
+
+function initializeBudget() {
+  rebuildBudget_('initialize');
+}
+
+function addCategory() {
+  rebuildBudget_('add');
+}
+
+/**
+ * Builds the Budget tab dashboard (rows 1-6) with display-only metrics
+ * for the selected period (B1 dropdown).
+ *
+ * Layout:
+ *   Row 1: PERIOD: [dropdown]                               PROGRESS: Day X of Y (Z% elapsed)
+ *   Row 2: (spacer)
+ *   Row 3: Net Income | Fixed Expenses | Total Budgeted     | | READY TO ASSIGN
+ *   Row 4:   $...        $...             $...                  $... (color-coded)
+ *   Row 5: (spacer)
+ *   Row 6: (spacer)
+ *   Row 7: Period | Main Category | Category | Budgeted | Spent | Available  ← original header
+ */
+function buildBudgetDashboard_(budget) {
+  // --- Clear and set values for rows 1-6 ---
+  budget.getRange(1, 1, 6, 6).clearContent().clearFormat();
+
+  // Row 1: labels + dropdown + progress
+  budget.getRange('A1').setValue('PERIOD:');
+  budget.getRange('E1').setValue('PROGRESS:');
+  budget.getRange('F1').setFormula(
+    '=IFERROR(LET(' +
+      's,INDEX(PayPeriods_Start,MATCH($B$1,PayPeriods_Label,0)),' +
+      'e,INDEX(PayPeriods_End,MATCH($B$1,PayPeriods_Label,0)),' +
+      'total,e-s+1,' +
+      'elapsed,MAX(0,MIN(TODAY()-s+1,total)),' +
+      'pct,elapsed/total,' +
+      '"Day "&elapsed&" of "&total&" ("&TEXT(pct,"0%")&" elapsed)"' +
+    '),"")'
+  );
+
+  // Row 3: metric labels
+  budget.getRange('A3').setValue('Net Income');
+  budget.getRange('B3').setValue('Fixed Expenses');
+  budget.getRange('C3').setValue('Total Budgeted');
+  budget.getRange('F3').setValue('READY TO ASSIGN');
+
+  // Row 4: metric values
+  budget.getRange('A4').setFormula(buildPaycheckFormula_('$B$1'));
+  budget.getRange('B4').setFormula(buildFixedExpensesFormula_('$B$1'));
+  budget.getRange('C4').setFormula('=IFERROR(SUMIFS(Budget_Budgeted,Budget_Period,$B$1),0)');
+  budget.getRange('F4').setFormula('=A4-B4-C4');
+
+  // --- Period dropdown on B1 ---
+  var ss = budget.getParent();
+  var setup = ss.getSheetByName('Setup');
+  if (setup) {
+    var periodRule = SpreadsheetApp.newDataValidation()
+      .requireValueInRange(setup.getRange('C2:C27'), true)
+      .setAllowInvalid(false)
+      .build();
+    budget.getRange('B1').setDataValidation(periodRule);
+    // v11.15: always set B1 to the period containing today's date.
+    // Previous behavior was "set to first period only if B1 is blank",
+    // but rebuildBudgetInternal_ calls budget.clear() before this, so
+    // B1 is always blank → reset → user had to re-pick the current
+    // period after every Budget Tools menu action. The PWA Dashboard
+    // reads B1, so the wrong selection silently produced wrong data.
+    // Now the refresh auto-snaps to today. If today is outside the
+    // 26-period range, falls back to the first period.
+    var todayPeriod = currentPeriodLabel_(setup);
+    budget.getRange('B1').setValue(todayPeriod || 'Dec 25 - Jan 20');
+  }
+
+  // --- Formatting ---
+  // Row 1: header bar (dark blue, white text)
+  budget.getRange('A1:F1').setBackground('#1a237e').setFontColor('#ffffff').setFontWeight('bold');
+  budget.getRange('B1').setBackground('#ffffff').setFontColor('#000000').setHorizontalAlignment('center');
+  budget.getRange('F1').setBackground('#ffffff').setFontColor('#000000').setFontWeight('normal').setHorizontalAlignment('center');
+
+  // Row 3: metric labels (light blue bg, dark blue text, small caps style)
+  budget.getRange('A3:F3').setBackground('#e8eaf6').setFontColor('#1a237e').setFontWeight('bold').setFontSize(10);
+
+  // Row 4: metric values (currency format, larger font)
+  budget.getRange('A4:C4').setNumberFormat('$#,##0.00').setFontSize(13).setHorizontalAlignment('center');
+  budget.getRange('F4').setNumberFormat('$#,##0.00').setFontSize(14).setFontWeight('bold').setHorizontalAlignment('center');
+
+  // Rows 2, 5, 6: spacers (light gray)
+  budget.getRange('A2:F2').setBackground('#f5f5f5');
+  budget.getRange('A5:F6').setBackground('#f5f5f5');
+
+  // --- Conditional formatting on F4 (Ready to Assign) ---
+  // Clear existing CF rules on F4 first
+  var rules = budget.getConditionalFormatRules();
+  var newRules = [];
+  for (var i = 0; i < rules.length; i++) {
+    var ranges = rules[i].getRanges();
+    var keep = true;
+    for (var j = 0; j < ranges.length; j++) {
+      if (ranges[j].getA1Notation() === 'F4') { keep = false; break; }
+    }
+    if (keep) newRules.push(rules[i]);
+  }
+  // Add new rules: red if <0, green if =0, yellow if >0
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberLessThan(0)
+    .setBackground('#ffcdd2').setFontColor('#b71c1c')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberEqualTo(0)
+    .setBackground('#c8e6c9').setFontColor('#1b5e20')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  newRules.push(SpreadsheetApp.newConditionalFormatRule()
+    .whenNumberGreaterThan(0)
+    .setBackground('#fff9c4').setFontColor('#f57f17')
+    .setRanges([budget.getRange('F4')])
+    .build());
+  budget.setConditionalFormatRules(newRules);
+
+  // --- Freeze rows 1-7 (dashboard rows 1-6 + header row 7) ---
+  budget.setFrozenRows(7);
+}
+
+/**
+ * Returns the formula for "Paycheck income in selected period" (positive).
+ * @param periodCellRef e.g. '$B$1' (the dashboard period dropdown cell)
+ */
+function buildPaycheckFormula_(periodCellRef) {
+  return '=IFERROR(SUMIFS(Transactions_Amount,Transactions_Period,' + periodCellRef +
+    ',Transactions_Category,"Paycheck"),0)';
+}
+
+/**
+ * Returns the Budget tab "Rolled Over" formula for a given row.
+ *
+ * v11.19 (Phase 27): the prior-period-Available lookup was previously
+ * embedded inside buildAvailableFormula_, which made Available a
+ * compound expression that was hard to reason about ("$0 LEFT" with
+ * "$0 spent / $98 budget" was mathematically correct but the carryover
+ * was invisible). Extracted to its own column F so the user can see
+ * exactly what's being carried in from the prior period.
+ *
+ * Result is the prior period's Available for this same sub-category,
+ * or 0 if (a) this is the first period (MATCH=1) or (b) no prior row
+ * exists for this category. Sign mirrors Available — positive when the
+ * prior period underspent (leftover carries in), negative when overspent.
+ *
+ * Recursion: each row's Rolled Over depends on Budget_Available of the
+ * prior period; that prior Available depends on its own Rolled Over;
+ * etc. down to period 1 (Rolled Over = 0). Sheets evaluates in
+ * dependency order — no circular reference.
+ */
+function buildRolledOverFormula_(row) {
+  return '=IF(MATCH(A' + row + ',PayPeriods_Label,0)>1,' +
+    'IFERROR(SUMIFS(Budget_Available,Budget_Period,INDEX(PayPeriods_Label,MATCH(A' + row + ',PayPeriods_Label,0)-1),Budget_Category,C' + row + '),0),' +
+    '0)';
+}
+
+/**
+ * Returns the Budget tab "Available" formula for a given row.
+ * Format: `RolledOver + Budgeted - Spent` (= F + D - E).
+ *
+ * v11.19 (Phase 27): simplified from the old compound formula now that
+ * the prior-period-Available lookup lives in its own Rolled Over column
+ * (col F). Available is now pure arithmetic with no SUMIFS — the
+ * recursive carryover chain runs through buildRolledOverFormula_ instead.
+ *
+ * Pre-v11.19 history: this formula used to embed the SUMIFS lookup
+ * directly. The IF(MATCH>1, ..., 0) wrapper that avoided the period-1
+ * INDEX-with-row-0 circular-reference bug (fixed in v10.4) now lives in
+ * buildRolledOverFormula_.
+ *
+ * B10: was duplicated in two places (rebuildBudgetInternal_ for full
+ * rebuild, processInfoAlerts-adjacent path for incremental). Centralized
+ * here so future formula edits land in one place.
+ */
+function buildAvailableFormula_(row) {
+  return '=F' + row + '+D' + row + '-E' + row;
+}
+
+/**
+ * v11.15: Returns the PayPeriods_Label whose [Start, End] range contains
+ * today's date. Used by buildBudgetDashboard_ to auto-set Budget tab B1
+ * after every menu action (rebuildBudgetInternal_ wipes B1; without this,
+ * it always reset to the first period and the PWA Dashboard rendered the
+ * wrong period's data).
+ *
+ * Returns null if today is outside all 26 periods (caller falls back to
+ * the first period or whatever default is appropriate). Date comparison
+ * normalizes today to midnight (Setup A:B store dates without times).
+ *
+ * @param {Sheet} setup The Setup tab (caller already has it; avoid an
+ *   extra lookup).
+ * @return {string|null}
+ */
+function currentPeriodLabel_(setup) {
+  if (!setup) return null;
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+  // PayPeriods_Start = A2:A27, PayPeriods_End = B2:B27, PayPeriods_Label = C2:C27
+  var rows = setup.getRange('A2:C27').getValues();
+  for (var i = 0; i < rows.length; i++) {
+    var start = rows[i][0];
+    var end = rows[i][1];
+    var label = rows[i][2];
+    if (!(start instanceof Date) || !(end instanceof Date)) continue;
+    // Inclusive on both ends — periods are date-only and don't overlap.
+    if (today.getTime() >= start.getTime() && today.getTime() <= end.getTime()) {
+      return label;
+    }
+  }
+  return null;
+}
+
+/**
+ * Returns the formula for "Fixed expenses due in selected period" (positive).
+ * Sums across 13 months (Jan BUDGET_YEAR - Jan BUDGET_YEAR+1) any fixed
+ * expense whose DATE(BUDGET_YEAR, M, dueDay) falls within the period's
+ * start/end range.
+ * @param periodCellRef e.g. '$B$1' (the dashboard period dropdown cell)
+ *
+ * B9: year was hardcoded inline; now sourced from BUDGET_YEAR constant
+ * at the top of the file. Bump there once per year.
+ */
+function buildFixedExpensesFormula_(periodCellRef) {
+  var monthChecks = [];
+  for (var m = 1; m <= 13; m++) {
+    monthChecks.push('((DATE(' + BUDGET_YEAR + ',' + m + ',dd)>=s)*(DATE(' + BUDGET_YEAR + ',' + m + ',dd)<=e))');
+  }
+  // v11.24: ddRaw can contain blank cells (named range covers C2:C50 but
+  // user typically fills only ~14 rows). DATE(year, month, "") returns
+  // #VALUE!, which propagates through SUMPRODUCT, caught by outer IFERROR
+  // → returns 0 silently. Bug was invisible for periods that don't contain
+  // a day-1 (correct $0 by accident); surfaced when the Reports tab tried
+  // to compute Fixed for a period that DOES contain day-1. Fix: coerce
+  // ddRaw to a safe number (1 for blanks). Per-row `valid` multiplier
+  // ensures blank rows still contribute 0 to the sum.
+  return '=IFERROR(LET(' +
+    's,INDEX(PayPeriods_Start,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
+    'e,INDEX(PayPeriods_End,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
+    'amt,FixedExpenses_Amount,' +
+    'ddRaw,FixedExpenses_DueDay,' +
+    'dd,IF(ddRaw="",1,IFERROR(ddRaw*1,1)),' +
+    'valid,(amt<>"")*(ddRaw<>""),' +
+    'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
+    '),0)';
+}
+
+
+function rebuildBudget_(mode) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var ui = SpreadsheetApp.getUi();
+  var result = rebuildBudgetInternal_(mode, ss);
+
+  if (result.error) {
+    ui.alert('Error: ' + result.error);
+    return;
+  }
+
+  if (mode === 'initialize') {
+    ui.alert(
+      'Budget initialized!\n\n' +
+      result.totalRows + ' rows created\n' +
+      result.periods + ' pay periods \u00D7 ' + result.categories + ' categories\n\n' +
+      'Use the slicer (column H area) to filter by pay period.'
+    );
+  } else {
+    ui.alert(
+      'Categories updated!\n\n' +
+      (result.newCount > 0 ? result.newCount + ' new rows added across all periods.' : 'No new rows needed.')
+    );
+  }
+}
+
+/**
+ * Internal budget rebuild — no UI calls, safe for web app context.
+ * Returns { error, totalRows, periods, categories, newCount }
+ */
+function rebuildBudgetInternal_(mode, ss) {
+  var setup = ss.getSheetByName('Setup');
+  var budget = ss.getSheetByName('Budget');
+
+  if (!setup || !budget) {
+    return { error: 'Setup or Budget tab not found. Run "Build Workbook" first.' };
+  }
+
+  var labelsRaw = setup.getRange('C2:C27').getValues();
+  var labels = [];
+  for (var i = 0; i < labelsRaw.length; i++) {
+    if (labelsRaw[i][0] !== '') labels.push(labelsRaw[i][0]);
+  }
+  if (labels.length === 0) {
+    return { error: 'No period labels found in Setup. Run "Build Workbook" first.' };
+  }
+
+  // v11.18: read D:F (was D:E) and filter out rows where Setup col F
+  // (Archived?) is checked. Symmetric to handleCategories_'s existing
+  // filter — archived sub-categories are now excluded from the Budget
+  // tab as well as from the PWA dropdown. This makes "Archive Goal"
+  // produce the user-expected outcome (Banff disappears from Budget on
+  // rebuild). Trade-off: budgeted values for archived categories in
+  // past periods are lost on the next wipe-and-rebuild — disclosed in
+  // the Archive Goal confirmation prompt. Spent values stay reachable
+  // via Transactions (formula-derived).
+  var catRaw = setup.getRange('D2:F100').getValues();
+  var budgetCats = [];
+  for (var c = 0; c < catRaw.length; c++) {
+    if (catRaw[c][0] !== '' && catRaw[c][1] !== '' && catRaw[c][0] !== 'Income' && catRaw[c][2] !== true) {
+      budgetCats.push(catRaw[c][1]);
+    }
+  }
+  if (budgetCats.length === 0) {
+    return { error: 'No spending categories found in Setup.' };
+  }
+
+  // Read existing Budgeted values to preserve. Scan from row 2 to lastRow —
+  // works for both old format (data at row 2, with _income rows) and new
+  // format (data at row 8, no _income rows). _income filtered out by category check.
+  var lastRow = budget.getLastRow();
+  var budgetedMap = {};
+  var existingKeys = {};
+
+  if (lastRow > 1) {
+    var existingData = budget.getRange(2, 1, lastRow - 1, 4).getValues();
+    for (var e = 0; e < existingData.length; e++) {
+      var period = existingData[e][0];
+      var category = existingData[e][2];
+      var budgeted = existingData[e][3];
+      if (!period || !category) continue;
+      var key = period + '|' + category;
+      existingKeys[key] = true;
+      if (category !== '_income' && typeof budgeted === 'number') {
+        budgetedMap[key] = budgeted;
+      }
+    }
+  }
+
+  // Count NEW category rows (for "add" mode optimization)
+  var newCount = 0;
+  for (var li = 0; li < labels.length; li++) {
+    for (var ci = 0; ci < budgetCats.length; ci++) {
+      if (!existingKeys[labels[li] + '|' + budgetCats[ci]]) newCount++;
+    }
+  }
+
+  if (mode === 'add' && newCount === 0) {
+    // Nothing structurally new, but refresh dashboard in case it's missing
+    buildBudgetDashboard_(budget);
+    return { error: null, totalRows: 0, periods: labels.length, categories: budgetCats.length, newCount: 0 };
+  }
+
+  // Wipe entire Budget tab (dashboard, header, data — clean slate)
+  budget.clear();
+
+  // Build dashboard at rows 1-6 (sets frozen rows = 7, period dropdown, formulas)
+  buildBudgetDashboard_(budget);
+
+  // Header row at row 7
+  // v11.19 (Phase 27): added "Rolled Over" between Spent and Available
+  // so the carryover from prior periods is explicit. Available shifts
+  // from col F to col G; Rolled Over takes col F.
+  budget.getRange(7, 1, 1, 7)
+    .setValues([['Period', 'Main Category', 'Category', 'Budgeted', 'Spent', 'Rolled Over', 'Available']])
+    .setFontWeight('bold').setBackground('#d9ead3');
+
+  // Build category rows (no more _income rows)
+  // v11.19: each row gets 7 columns now (was 6). Cols E (Spent), F
+  // (Rolled Over), G (Available) are all formula-driven; allValues
+  // holds the literal cells (period, main, cat, budgeted) plus
+  // placeholders 0/0/0 that the formula write below will overwrite.
+  var DATA_START_ROW = 8;
+  var allValues = [];
+  for (var pi = 0; pi < labels.length; pi++) {
+    var label = labels[pi];
+    for (var ki = 0; ki < budgetCats.length; ki++) {
+      var cat = budgetCats[ki];
+      var mapKey = label + '|' + cat;
+      var bVal = (budgetedMap[mapKey] !== undefined) ? budgetedMap[mapKey] : 0;
+      allValues.push([label, '', cat, bVal, 0, 0, 0]);
+    }
+  }
+
+  var totalRows = allValues.length;
+  budget.getRange(DATA_START_ROW, 1, totalRows, 7).setValues(allValues);
+
+  // Column B (Main Category) — lookup formula
+  var formulasB = [];
+  for (var bi = 0; bi < totalRows; bi++) {
+    var bRow = bi + DATA_START_ROW;
+    formulasB.push([
+      '=IFERROR(INDEX(Setup!$D$2:$D$100,MATCH(C' + bRow + ',Setup!$E$2:$E$100,0)),"")'
+    ]);
+  }
+  budget.getRange(DATA_START_ROW, 2, totalRows, 1).setFormulas(formulasB);
+
+  // Columns E (Spent), F (Rolled Over), G (Available) — formulas.
+  // v11.19: Spent unchanged (SUMIFS Transactions). Rolled Over is the
+  // prior-period Available lookup (extracted from the old Available
+  // formula). Available is now pure arithmetic: F + D - E.
+  var formulasEFG = [];
+  for (var ef = 0; ef < totalRows; ef++) {
+    var efRow = ef + DATA_START_ROW;
+    formulasEFG.push([
+      '=-SUMIFS(Transactions_Amount,Transactions_Period,A' + efRow + ',Transactions_Category,C' + efRow + ')',
+      buildRolledOverFormula_(efRow),
+      buildAvailableFormula_(efRow)
+    ]);
+  }
+  budget.getRange(DATA_START_ROW, 5, totalRows, 3).setFormulas(formulasEFG);
+
+  // Currency format on Budgeted / Spent / Rolled Over / Available
+  // (cols D, E, F, G — 4 cols, was 3 pre-v11.19).
+  budget.getRange(DATA_START_ROW, 4, totalRows, 4).setNumberFormat('$#,##0.00');
+  budget.autoResizeColumns(1, 7);
+
+  // Update the slicer to cover header + the new data range.
+  //
+  // History: v10.5 created the slicer with explicit `setColumnPosition(1)` so
+  // it filters on Period. As of late April 2026, that method throws
+  // `TypeError: setColumnPosition is not a function` when called from web-app
+  // context (handleAddCategoryInner_ → here) — Google appears to have changed
+  // the Slicer API. The crash was breaking PWA addCategory entirely.
+  //
+  // Fix strategy: prefer to UPDATE an existing slicer (preserves the filter
+  // column it was originally created with — no setColumnPosition call needed).
+  // Only fall back to recreate when no slicer exists. Wrap everything in
+  // try/catch — the slicer is a convenience widget; its failure must not
+  // crash the parent operation. The user can manually fix the slicer via
+  // Build Workbook or by right-clicking → Set Column if it ever ends up
+  // without a filter column.
+  try {
+    // v11.19 (Phase 27): slicer range covers 7 cols now (was 6) to
+    // include the new Rolled Over column. Anchor (row 1, col 8) stays
+    // — slicer widget itself doesn't need to move.
+    var slicerRange = budget.getRange(7, 1, totalRows + 1, 7);
+    var existingSlicers = budget.getSlicers();
+
+    if (existingSlicers.length > 0) {
+      // Existing slicer: just resize. Filter column stays as it was.
+      existingSlicers[0].setRange(slicerRange);
+      // Remove any extras (defensive — only one expected).
+      for (var sx = 1; sx < existingSlicers.length; sx++) {
+        existingSlicers[sx].remove();
+      }
+    } else {
+      // No slicer yet — create one. Try to set its filter column; tolerate
+      // failure if the API method is unavailable in this context.
+      var newSlicer = budget.insertSlicer(slicerRange, 1, 8);
+      try {
+        if (typeof newSlicer.setColumnPosition === 'function') {
+          newSlicer.setColumnPosition(1); // Filter by Period (col A)
+        } else {
+          console.warn('Slicer.setColumnPosition unavailable; new slicer has no filter column. ' +
+            'User can right-click slicer → Set Column → Period.');
+        }
+      } catch (slicerColErr) {
+        console.warn('Slicer setColumnPosition threw:', slicerColErr.toString(),
+          '— slicer created but without filter column.');
+      }
+    }
+  } catch (slicerErr) {
+    // Slicer rebuild failed entirely. Log + continue — Budget data is
+    // unaffected; only the convenience widget is missing/stale.
+    console.warn('Slicer rebuild skipped (non-fatal):', slicerErr.toString());
+  }
+
+  return { error: null, totalRows: totalRows, periods: labels.length, categories: budgetCats.length, newCount: newCount };
+}
+
+// ================================================================
+// EMAIL TRIGGER (v11.16) — time-driven background email parsing
+// ================================================================
+//
+// Phase 1 of the time-driven parsing redesign. Runs processInfoAlerts_
+// hourly so new transactions appear in the sheet without the user opening
+// the PWA. Phase 2 (read-only parseAndFetch + force-parse button) is a
+// separate change.
+//
+// Architecture:
+//   processInfoAlertsTrigger  — thin wrapper around processInfoAlerts_,
+//                               called by the time-based trigger. Catches
+//                               errors, writes LAST_TRIGGER_RUN script
+//                               property, logs only "interesting" runs
+//                               (emails parsed or errors) so the Logs tab
+//                               doesn't fill with no-op entries (24/day).
+//   installEmailTrigger       — menu wrapper. Idempotent: deletes any
+//                               existing trigger for processInfoAlertsTrigger
+//                               before creating a new one. Hourly interval
+//                               (change to .everyMinutes(15) here if you
+//                               ever want it more responsive — valid values
+//                               for everyMinutes are 1, 5, 10, 15, 30).
+//   uninstallEmailTrigger     — menu wrapper. Removes all triggers for
+//                               processInfoAlertsTrigger.
+//
+// Trigger health: processInfoAlerts_ already wraps in LockService so the
+// trigger can't race with PWA-driven writes (see v11.3 / S4). On lock
+// timeout it logs and returns skipped=true; emails retry next interval.
+
+/**
+ * Trigger handler. Don't call directly — installed by installEmailTrigger
+ * and fired by Apps Script's scheduler. Wraps processInfoAlerts_ with
+ * crash-safe try/catch and updates LAST_TRIGGER_RUN script property for
+ * later trigger-health detection from the PWA.
+ */
+function processInfoAlertsTrigger() {
+  var start = Date.now();
+  try {
+    var r = processInfoAlerts_();
+    var dur = Date.now() - start;
+
+    PropertiesService.getScriptProperties()
+      .setProperty('LAST_TRIGGER_RUN', new Date().toISOString());
+
+    // processInfoAlerts_ already logs lock_timeout on its own.
+    if (r.skipped) return;
+
+    // Filter: only log "interesting" runs so 24 entries/day don't drown
+    // the Logs tab in noise. No-op runs (parsed: 0, errors: 0) are silent.
+    if (r.parsed > 0 || r.errors > 0) {
+      logActivity_(
+        'triggerParseEmails',
+        dur,
+        r.errors > 0 ? 'partial' : 'success',
+        'parsed:' + r.parsed + ' threads:' + r.threads + ' errors:' + r.errors,
+        r.errors > 0 ? r.errorDetails.join('; ') : ''
+      );
+    }
+  } catch (err) {
+    logActivity_(
+      'triggerParseEmails',
+      Date.now() - start,
+      'crash',
+      '',
+      err.toString() + '\n' + (err.stack || '')
+    );
+  }
+}
+
+/**
+ * Menu item: installs the hourly email-parsing trigger. Idempotent —
+ * safe to re-run. Logs install events to Logs tab so reinstalls are
+ * auditable. After install, Apps Script may prompt for additional
+ * permissions if the trigger handler touches scopes the previous grant
+ * didn't cover; if so, run "Parse Emails" once from the menu to force
+ * the prompt before relying on the trigger.
+ */
+function installEmailTrigger() {
+  var ui = SpreadsheetApp.getUi();
+
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'processInfoAlertsTrigger') {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+
+  ScriptApp.newTrigger('processInfoAlertsTrigger')
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  logActivity_('installEmailTrigger', 0, 'success',
+    'interval:1hr removed_existing:' + removed, '');
+
+  ui.alert(
+    'Email trigger installed.\n\n' +
+    'New Scotiabank transaction emails will be parsed automatically once per hour. ' +
+    'You can keep using the PWA as before — Refresh will pick up whatever the trigger has fetched.\n\n' +
+    'To force a parse right now: Budget Tools → Parse Emails.\n' +
+    'To remove: Budget Tools → Remove Email Trigger.'
+  );
+}
+
+/**
+ * Menu item: removes the time-driven email trigger. The "Parse Emails"
+ * menu item still works manually after this. PWA's parseAndFetch also
+ * still parses inline (Phase 1 doesn't change the PWA contract).
+ */
+function uninstallEmailTrigger() {
+  var ui = SpreadsheetApp.getUi();
+
+  var existing = ScriptApp.getProjectTriggers();
+  var removed = 0;
+  for (var i = 0; i < existing.length; i++) {
+    if (existing[i].getHandlerFunction() === 'processInfoAlertsTrigger') {
+      ScriptApp.deleteTrigger(existing[i]);
+      removed++;
+    }
+  }
+
+  logActivity_('uninstallEmailTrigger', 0, 'success', 'removed:' + removed, '');
+
+  if (removed === 0) {
+    ui.alert('No email trigger was installed (nothing to remove).');
+  } else {
+    ui.alert(
+      'Email trigger removed (' + removed + ' trigger' +
+      (removed === 1 ? '' : 's') + ' deleted).\n\n' +
+      'To parse emails now: Budget Tools → Parse Emails.\n' +
+      'To re-enable auto-parse: Budget Tools → Setup Email Trigger.'
+    );
+  }
+}

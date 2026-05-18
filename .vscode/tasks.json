@@ -1,0 +1,60 @@
+{
+  // VS Code tasks for this project.
+  //
+  // Run a task: Cmd+Shift+P → "Tasks: Run Task" → pick from the list.
+  //
+  // Apps Script deploys are deliberately NOT defined as tasks here — they
+  // need to fire from a real shell with the deploy alias / interactive
+  // prompts. Use the integrated terminal: `deploy "vNN — description"`.
+  //
+  // 2026-05-13: replaced the misplaced .claude/launch.json (was an
+  // incomplete VS Code launch config for python3 http.server) with this
+  // proper task. PWA local server is a long-running command, which is
+  // tasks.json territory, not launch.json.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Serve PWA locally on :8080",
+      "type": "shell",
+      "command": "python3 -m http.server 8080",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint docs",
+      "type": "shell",
+      "command": "bash .claude/skills/update-budget-docs/lint.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "State check (branch + version drift)",
+      "type": "shell",
+      "command": "bash .claude/state-check.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# OAuth credentials — should never leave $HOME but defensive belt-and-braces
+.clasprc.json
+
+# macOS
+.DS_Store
+
+# Editor — share project-level VS Code config, ignore per-user state.
+# Negation entries un-ignore the three shared files (settings, recommended
+# extensions, tasks). Anything else under .vscode/ (sessions, local state,
+# personal launch configs) stays out of git.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+.idea/
+
+# Logs
+*.log

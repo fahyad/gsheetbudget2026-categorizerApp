@@ -2,66 +2,67 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Budget Categorizer</title>
   <link rel="manifest" href="manifest.json">
+  <!-- v0.19.7: preconnect to the Apps Script origins so the TLS handshake +
+       302 redirect to script.googleusercontent.com is warmed while the rest
+       of the HTML parses. Saves ~100-500ms on the first API call after a
+       cold open. Both hosts are stable + baked into the deployment ID. -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/style.css">
-  <meta name="theme-color" content="#1a237e">
+  <link rel="stylesheet" href="css/pixel.css">
+  <meta name="theme-color" content="#FAFAF9" id="theme-color-meta">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="apple-touch-icon" href="icons/icon.svg">
+  <!--
+    PWA v0.19.1 — force pixel theme on this branch. The user-facing
+    toggle was removed because mono on this branch had drifted (the
+    multi-select rail was designed for pixel; mono variants felt
+    out of place). Mono CSS rules in style.css are still loaded as
+    the structural foundation that pixel.css overrides — keeping
+    them in place means the toggle can return without code surgery
+    if we ever want it.
+
+    The data-theme attribute is set BEFORE the stylesheets parse,
+    so there's no flash-of-mono on first paint. The iOS status-bar
+    tint meta is set to the dark theme's bg color so the standalone
+    PWA's notch area matches the period bar.
+  -->
+  <script>
+    (function () {
+      try {
+        document.documentElement.setAttribute('data-theme', 'pixel');
+        var meta = document.getElementById('theme-color-meta');
+        if (meta) meta.setAttribute('content', '#0A0A0A');
+      } catch (e) {
+        // Defensive — doesn't matter; default attribute is empty which
+        // means mono via the cascade. Worst case is a visual fallback,
+        // nothing functional breaks.
+      }
+    })();
+  </script>
 </head>
 <body>
   <header>
-    <h1>Categorizer</h1>
+    <h1>Categorizer <span class="version" id="header-version">—</span></h1>
     <div class="header-actions">
-      <button id="refresh-btn" title="Refresh">Refresh</button>
       <button id="settings-btn" title="Settings">Settings</button>
     </div>
   </header>
 
-  <main>
-    <!-- Config / Setup screen -->
-    <section id="config-section" hidden>
-      <h2>Setup</h2>
-      <p>Enter your Apps Script deployment URL and API key.</p>
-      <form id="config-form">
-        <label for="config-url">API URL</label>
-        <input type="url" id="config-url" placeholder="https://script.google.com/.../exec" required>
-        <label for="config-key">API Key</label>
-        <input type="text" id="config-key" placeholder="Your API key" required>
-        <button type="submit">Save</button>
-      </form>
-    </section>
+  <main id="view-root"></main>
 
-    <!-- Main app -->
-    <section id="app-section" hidden>
-      <div id="transaction-list"></div>
-
-      <div id="category-picker" hidden>
-        <div id="category-picker-header">
-          <span id="selected-merchant"></span>
-          <button id="cancel-pick">Cancel</button>
-        </div>
-        <div id="category-buttons"></div>
-      </div>
-    </section>
-
-    <div id="loading" hidden>
-      <div class="spinner"></div>
-      <span>Loading...</span>
-    </div>
-
-    <div id="empty-state" hidden>
-      <p>No pending transactions.</p>
-      <button id="empty-refresh-btn">Refresh</button>
-    </div>
-  </main>
-
-  <div id="undo-bar" hidden>
-    <span id="undo-text"></span>
-    <button id="undo-btn">UNDO</button>
-  </div>
+  <nav id="tab-bar">
+    <a href="#/categorize" class="tab">Categorize</a>
+    <a href="#/dashboard" class="tab">Dashboard</a>
+    <a href="#/setup" class="tab">Settings</a>
+  </nav>
 
   <div id="error-toast" hidden></div>
 

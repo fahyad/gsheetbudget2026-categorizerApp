@@ -1,304 +1,40 @@
+// PWA shell — thin entrypoint. Owns:
+//   - header version label
+//   - settings-btn -> navigate('#/setup')
+//   - initial route selection (forces #/setup if unconfigured)
+//   - beforeunload warning when syncQueue has unsent items
+// Everything else lives in a view module under js/views/.
+
 import * as config from './config.js';
-import * as api from './api.js';
+import { APP_VERSION } from './config.js';
 import { store } from './store.js';
+import { start, navigate } from './router.js';
 
-// DOM elements
-const configSection = document.getElementById('config-section');
-const appSection = document.getElementById('app-section');
-const configForm = document.getElementById('config-form');
-const configUrl = document.getElementById('config-url');
-const configKey = document.getElementById('config-key');
-const refreshBtn = document.getElementById('refresh-btn');
-const settingsBtn = document.getElementById('settings-btn');
-const transactionList = document.getElementById('transaction-list');
-const categoryPicker = document.getElementById('category-picker');
-const categoryButtons = document.getElementById('category-buttons');
-const selectedMerchantEl = document.getElementById('selected-merchant');
-const cancelPick = document.getElementById('cancel-pick');
-const loadingEl = document.getElementById('loading');
-const emptyState = document.getElementById('empty-state');
-const emptyRefreshBtn = document.getElementById('empty-refresh-btn');
-const undoBar = document.getElementById('undo-bar');
-const undoText = document.getElementById('undo-text');
-const undoBtn = document.getElementById('undo-btn');
-const errorToast = document.getElementById('error-toast');
+// Version label in header.
+const headerVersion = document.getElementById('header-version');
+if (headerVersion) headerVersion.textContent = APP_VERSION;
 
-let selectedTimestamp = null;
-let categorizeInFlight = false;
+// Load persistent state once so views see the same singleton on mount.
+store.loadCache();
 
-// ================================================================
-// INIT
-// ================================================================
-
-async function init() {
-  store.loadCache();
-  bindEvents();
-
-  if (!config.isConfigured()) {
-    showConfig();
-    return;
-  }
-
-  showApp();
-  renderCategories();
-
-  // Fetch fresh categories in background
-  api.fetchCategories()
-    .then(data => {
-      store.setCategories(data.categories);
-      renderCategories();
-    })
-    .catch(() => {}); // Silently use cached categories
-
-  await refresh();
-}
-
-// ================================================================
-// EVENTS
-// ================================================================
-
-function bindEvents() {
-  configForm.addEventListener('submit', (e) => {
+// Global: warn before unload if unsent categorizations are queued.
+// B4: both preventDefault() and returnValue assignment are required for the
+// browser prompt to actually fire in current Chrome/Firefox/Safari.
+window.addEventListener('beforeunload', (e) => {
+  if (store.syncQueue.length > 0) {
     e.preventDefault();
-    config.save(configUrl.value, configKey.value);
-    showApp();
-    renderCategories();
-    refresh();
-  });
-
-  refreshBtn.addEventListener('click', () => refresh());
-  emptyRefreshBtn.addEventListener('click', () => refresh());
-
-  settingsBtn.addEventListener('click', () => {
-    configUrl.value = config.getApiUrl() || '';
-    configKey.value = config.getApiKey() || '';
-    showConfig();
-  });
-
-  cancelPick.addEventListener('click', () => {
-    deselectTransaction();
-  });
-
-  undoBtn.addEventListener('click', () => undo());
-}
-
-// ================================================================
-// REFRESH
-// ================================================================
-
-async function refresh() {
-  showLoading(true);
-  deselectTransaction();
-
-  try {
-    const data = await api.parseAndFetch(store.knownTimestamps);
-    store.addTransactions(data.transactions);
-    renderTransactions();
-  } catch (err) {
-    showError('Failed to load transactions: ' + err.message);
-  } finally {
-    showLoading(false);
+    e.returnValue = '';
   }
+});
+
+// Settings button: always goes to setup. Return via the tab-bar.
+document.getElementById('settings-btn').addEventListener('click', () => {
+  navigate('#/setup');
+});
+
+// Initial route: force setup if not yet configured and no explicit route.
+if (!config.isConfigured() && !window.location.hash.startsWith('#/setup')) {
+  history.replaceState(null, '', '#/setup');
 }
 
-// ================================================================
-// CATEGORIZE (optimistic)
-// ================================================================
-
-async function categorize(timestamp, category) {
-  if (categorizeInFlight) return;
-
-  const removedTxn = store.removeTransaction(timestamp);
-  if (!removedTxn) return;
-
-  store.setLastCategorized({ ...removedTxn, category });
-  deselectTransaction();
-  renderTransactions();
-  renderUndo();
-
-  categorizeInFlight = true;
-  undoBtn.disabled = true;
-
-  try {
-    await api.categorize(timestamp, category);
-    store.knownTimestamps.add(timestamp);
-    store.saveCache();
-  } catch (err) {
-    // Rollback
-    store.restoreTransaction(removedTxn);
-    store.clearLastCategorized();
-    renderTransactions();
-    renderUndo();
-    showError('Failed to categorize: ' + err.message);
-  } finally {
-    categorizeInFlight = false;
-    undoBtn.disabled = false;
-  }
-}
-
-// ================================================================
-// UNDO (optimistic)
-// ================================================================
-
-async function undo() {
-  if (categorizeInFlight) return;
-
-  const last = store.lastCategorized;
-  if (!last) return;
-
-  const { timestamp, date, merchant, amount, category } = last;
-  const txn = { timestamp, date, merchant, amount };
-
-  store.restoreTransaction(txn);
-  store.clearLastCategorized();
-  renderTransactions();
-  renderUndo();
-
-  try {
-    await api.uncategorize(timestamp, merchant, amount, category);
-    store.knownTimestamps.delete(timestamp);
-    store.saveCache();
-  } catch (err) {
-    // Rollback the undo
-    store.removeTransaction(timestamp);
-    store.setLastCategorized(last);
-    renderTransactions();
-    renderUndo();
-    showError('Failed to undo: ' + err.message);
-  }
-}
-
-// ================================================================
-// RENDERING
-// ================================================================
-
-function renderTransactions() {
-  transactionList.innerHTML = '';
-
-  if (store.transactions.length === 0) {
-    appSection.hidden = true;
-    emptyState.hidden = false;
-    return;
-  }
-
-  appSection.hidden = false;
-  emptyState.hidden = true;
-
-  for (const txn of store.transactions) {
-    const div = document.createElement('div');
-    div.className = 'txn-item';
-    div.dataset.timestamp = txn.timestamp;
-
-    const left = document.createElement('div');
-    const merchantSpan = document.createElement('div');
-    merchantSpan.className = 'txn-merchant';
-    merchantSpan.textContent = txn.merchant;
-    const dateSpan = document.createElement('div');
-    dateSpan.className = 'txn-date';
-    dateSpan.textContent = txn.date;
-    left.appendChild(merchantSpan);
-    left.appendChild(dateSpan);
-
-    const amountSpan = document.createElement('span');
-    amountSpan.className = 'txn-amount';
-    amountSpan.textContent = '$' + Math.abs(txn.amount).toFixed(2);
-
-    div.appendChild(left);
-    div.appendChild(amountSpan);
-
-    div.addEventListener('click', () => selectTransaction(txn));
-    transactionList.appendChild(div);
-  }
-}
-
-function renderCategories() {
-  categoryButtons.innerHTML = '';
-
-  // Group by main category
-  const groups = {};
-  for (const cat of store.categories) {
-    if (!groups[cat.main]) groups[cat.main] = [];
-    groups[cat.main].push(cat.sub);
-  }
-
-  for (const [main, subs] of Object.entries(groups)) {
-    const label = document.createElement('div');
-    label.className = 'cat-group-label';
-    label.textContent = main;
-    // Group labels span full width
-    label.style.gridColumn = '1 / -1';
-    categoryButtons.appendChild(label);
-
-    for (const sub of subs) {
-      const btn = document.createElement('button');
-      btn.className = 'cat-btn';
-      btn.textContent = sub;
-      btn.addEventListener('click', () => {
-        if (selectedTimestamp) {
-          categorize(selectedTimestamp, sub);
-        }
-      });
-      categoryButtons.appendChild(btn);
-    }
-  }
-}
-
-function renderUndo() {
-  if (store.lastCategorized) {
-    undoText.textContent = `${store.lastCategorized.merchant} → ${store.lastCategorized.category}`;
-    undoBar.hidden = false;
-  } else {
-    undoBar.hidden = true;
-  }
-}
-
-function selectTransaction(txn) {
-  selectedTimestamp = txn.timestamp;
-  selectedMerchantEl.textContent = txn.merchant + ' · $' + Math.abs(txn.amount).toFixed(2);
-
-  // Highlight selected
-  document.querySelectorAll('.txn-item').forEach(el => {
-    el.classList.toggle('selected', el.dataset.timestamp === txn.timestamp);
-  });
-
-  categoryPicker.hidden = false;
-}
-
-function deselectTransaction() {
-  selectedTimestamp = null;
-  categoryPicker.hidden = true;
-  document.querySelectorAll('.txn-item.selected').forEach(el => el.classList.remove('selected'));
-}
-
-// ================================================================
-// UI HELPERS
-// ================================================================
-
-function showConfig() {
-  configSection.hidden = false;
-  appSection.hidden = true;
-  emptyState.hidden = true;
-}
-
-function showApp() {
-  configSection.hidden = true;
-  appSection.hidden = false;
-}
-
-function showLoading(show) {
-  loadingEl.hidden = !show;
-}
-
-let errorTimeout;
-function showError(message) {
-  errorToast.textContent = message;
-  errorToast.hidden = false;
-  clearTimeout(errorTimeout);
-  errorTimeout = setTimeout(() => { errorToast.hidden = true; }, 5000);
-}
-
-// ================================================================
-// START
-// ================================================================
-
-init();
+start(document.getElementById('view-root'));

@@ -1,0 +1,22 @@
+{
+  // Workspace extension recommendations.
+  //
+  // VS Code prompts to install these when the repo is opened for the
+  // first time. unwantedRecommendations suppresses VS Code's automatic
+  // "we see JS, want ESLint?" / "want Prettier?" prompts — codifies the
+  // "no build step" decision so future-you doesn't accept by accident.
+  //
+  // Extension IDs are the standard marketplace identifiers. Verify the
+  // ID after install via Cmd+Shift+X → installed extension menu → "Copy
+  // Extension ID" if any of these stop matching.
+
+  "recommendations": [
+    "anthropic.claude-code",
+    "eamodio.gitlens",
+    "yzhang.markdown-all-in-one"
+  ],
+  "unwantedRecommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode"
+  ]
+}
