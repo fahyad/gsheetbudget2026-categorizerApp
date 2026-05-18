@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.23 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.23 (Phase 32) adds the **Reports** tab: spending breakdown by category for any time frame (Today / This Week / Last 7 Days / This Month / Last Month / This Period / Last Period / YTD / Last Year / All Time / Custom) with drill-down to per-category transaction list. v11.22 (Phase 31) refreshed the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.24 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.24 (Phase 32 bug-fix pass) fixes two bugs found in user testing: Fixed Expenses formula handles blank `FixedExpenses_DueDay` cells (bug also existed in Budget tab — silent unless period contained a day-1); Uncategorized row added to Reports to surface txns with empty Category. v11.23 (Phase 32) adds the **Reports** tab: spending breakdown by category for any time frame (Today / This Week / Last 7 Days / This Month / Last Month / This Period / Last Period / YTD / Last Year / All Time / Custom) with drill-down to per-category transaction list. v11.22 (Phase 31) refreshed the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1896,3 +1896,47 @@ For visually-significant features, mockup-then-build worked well: built `reports
 
 ### Rollback
 Apps Script: redeploy v11.22. Reports tab will stop being rebuilt by Update Script; can be deleted manually if user wants it gone entirely. No data side effects elsewhere — the Reports tab is purely a READ view over Transactions/Setup/Fixed Monthly Expenses.
+
+---
+
+## Session: 2026-05-17 (later) — Reports bug-fix pass (Apps Script v11.24)
+
+### Setup
+User tested v11.23 Reports tab with "Last Period" dropdown. Two issues surfaced:
+1. **Fixed Expenses showed $0.00** (should be $2,333.99 for Apr 29 - May 12 since all 14 fixed monthly entries are due day 1 and May 1 falls in range).
+2. **Total Spent $630.87 didn't match the per-category breakdown** which summed to $485.48 — gap of $145.39 (3 uncategorized transactions).
+
+### Diagnosis
+1. **Fixed Expenses bug**: dumpSheet'd the Budget tab dashboard B4 (Fixed Expenses for current "May 13 - 26" period) — also shows $0.00. Confirmed bug is in the SHARED formula structure used by both `buildFixedExpensesFormula_` (Budget tab) and `buildFixedExpensesFormulaByRange_` (Reports tab). Root cause: `FixedExpenses_DueDay` named range covers C2:C50 (49 rows) but user has only ~14 entries; rows 16-50 are blank. `DATE(year, m, "")` for blank cells returns `#VALUE!`, propagates through SUMPRODUCT, caught by outer IFERROR → silent $0. **Bug had been latent in Budget tab since the formula was introduced** — invisible because most pay periods don't contain a day-1, so $0 was correct by accident.
+
+2. **Uncategorized bug**: dumpSheet'd Transactions in Apr 29 - May 12 period grouped by category. Found 3 rows with empty Category column totaling -$145.39. Total Spent formula sums all negative-amount transactions in range, including uncategorized. But the per-category breakdown uses `BYROW(CategoryList, LAMBDA(cat, SUMIFS(...)))` which only iterates configured Setup categories — uncategorized txns invisible in the breakdown table.
+
+### What shipped (v11.24)
+
+1. **Fixed Expenses formula fix** (applied to BOTH `buildFixedExpensesFormula_` and `buildFixedExpensesFormulaByRange_`):
+   ```js
+   ddRaw, FixedExpenses_DueDay,
+   dd, IF(ddRaw="", 1, IFERROR(ddRaw*1, 1)),  // safe number, blanks → 1
+   valid, (amt<>"") * (ddRaw<>""),             // blank rows still contribute 0
+   ```
+
+2. **Uncategorized row** added at Reports row 50:
+   - Amber color treatment (`#b45309`) + italic for visual differentiation
+   - Always shown (even when $0 — passive reminder)
+   - Sparkline only renders if amount > 0
+   - Fixed Expenses shifted to row 51, TOTAL to row 52
+   - CF rule for Fixed updated from C50 → C51
+   - F7 (Total Spent) formula updated: `+ $C$50` → `+ $C$51`
+
+3. **No PWA changes.** No data migration needed.
+
+### Status — awaiting deploy
+- Run `./apps-script/deploy.sh "v11.24 — reports fixed-expenses + uncategorized fixes"`.
+- Sheet → `Budget Tools → 3. Update Script (safe)` to re-render Reports tab.
+- Verify: Reports tab "Last Period" → Fixed Expenses shows ~$2,334; Uncategorized row appears at row 50 showing 3 txns / $145.39 (or whatever the current count is); breakdown sums to Total Spent visibly.
+
+### Bonus side-effect
+Budget tab's Fixed Expenses dashboard cell (B4) now also computes correctly for periods containing day-1 — was silently $0 before for those periods (user wouldn't have noticed because Budget B1 auto-snaps to current period which typically doesn't contain day-1).
+
+### Rollback
+Redeploy v11.23 (or earlier). Bug reverts but no data damage.

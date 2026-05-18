@@ -34,7 +34,7 @@
 // ================================================================
 // VERSION (auto-updated by deploy.sh — do not edit by hand except VERSION)
 // ================================================================
-var APP_SCRIPT_VERSION = 'v11.23';
+var APP_SCRIPT_VERSION = 'v11.24';
 var APP_SCRIPT_LAST_EDITED = '2026-05-17 18:28 MDT';
 
 // B9: budget year constant. Used by buildFixedExpensesFormula_ to compute
@@ -3360,9 +3360,10 @@ function applySavingStructure_(saving, ss) {
 //   Row 18    SPENDING BY CATEGORY (sorted by Spent, descending) [section header]
 //   Row 19    Main | Sub | Spent | Count | Sparkline | %
 //   Row 20-49 (variable spending data — LET spills, up to 30 rows)
-//   Row 50    Fixed | Fixed Expenses (scheduled) | $ | — | bar | %
-//   Row 51    TOTAL row
-//   Row 52-53 (blank)
+//   Row 50    Uncategorized | (needs categorization in PWA) | $ | N | bar | %    (v11.24)
+//   Row 51    Fixed | Fixed Expenses (scheduled) | $ | — | bar | %
+//   Row 52    TOTAL row
+//   Row 53    (blank)
 //   Row 54    DRILL-DOWN — Transactions for Selected Category    [section header]
 //   Row 55    Category: | <dropdown>
 //   Row 56    (blank)
@@ -3497,7 +3498,7 @@ function applyReportsStructure_(reports, ss) {
   // Total spent = (-1 * sum of negatives) + Fixed Expenses scheduled in range
   reports.getRange('F7').setFormula(
     '=IFERROR(-SUMIFS(Transactions_Amount,Transactions_Amount,"<0",' +
-    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3)+$C$50,0)'
+    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3)+$C$51,0)'
   ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
     .setHorizontalAlignment('right');
 
@@ -3602,29 +3603,55 @@ function applyReportsStructure_(reports, ss) {
     ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
   }
 
-  // Row 50: Fixed Expenses (scheduled) — single row, computed via SUMPRODUCT.
-  // Q1a: one summary line, not per-merchant.
-  reports.getRange('A50').setValue('Fixed').setFontWeight('normal');
-  reports.getRange('B50').setValue('Fixed Expenses (scheduled)').setFontStyle('italic');
-  reports.getRange('C50').setFormula(buildFixedExpensesFormulaByRange_('$E$2', '$E$3'))
-    .setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
-    .setHorizontalAlignment('right');
-  reports.getRange('D50').setValue('—').setHorizontalAlignment('right').setFontColor('#5f6368');
+  // Row 50: Uncategorized — surfaces transactions with empty Category (col D)
+  // in the selected date range. v11.24: added to make the breakdown reconcile
+  // to Total Spent in F7. Previously the per-category BYROW loop iterated
+  // CategoryList only, so uncategorized txns were counted in F7 but invisible
+  // in the breakdown (the math didn't add up by ~$N per uncategorized total).
+  // Now always visible; if 0 it shows "$0.00 / 0 txns" as a passive reminder.
+  reports.getRange('A50').setValue('Uncategorized').setFontStyle('italic').setFontColor('#b45309');
+  reports.getRange('B50').setValue('(needs categorization in PWA)').setFontStyle('italic').setFontColor('#b45309').setFontSize(9);
+  reports.getRange('C50').setFormula(
+    '=IFERROR(ABS(SUMIFS(Transactions_Amount,Transactions_Category,"",' +
+    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
+    'Transactions_Amount,"<0")),0)'
+  ).setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
+    .setHorizontalAlignment('right').setFontColor('#b45309');
+  reports.getRange('D50').setFormula(
+    '=IFERROR(COUNTIFS(Transactions_Category,"",' +
+    'Transactions!A2:A1000,">="&$E$2,Transactions!A2:A1000,"<="&$E$3,' +
+    'Transactions_Amount,"<0"),0)'
+  ).setNumberFormat('0').setHorizontalAlignment('right').setFontColor('#b45309');
   reports.getRange('E50').setFormula(
-    '=IF($C$50=0,"",SPARKLINE($C$50/$F$7,{"charttype","bar";"color1","#5c6bc0";"max",1}))'
+    '=IF($C$50=0,"",SPARKLINE($C$50/$F$7,{"charttype","bar";"color1","#b45309";"max",1}))'
   );
   reports.getRange('F50').setFormula(
-    '=IF($F$7=0,"",TEXT($C$50/$F$7,"0.0%"))'
-  ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
+    '=IF(OR($C$50=0,$F$7=0),"",TEXT($C$50/$F$7,"0.0%"))'
+  ).setHorizontalAlignment('right').setFontColor('#b45309').setFontSize(9);
 
-  // Row 51: TOTAL row
-  reports.getRange('A51:B51').merge().setValue('TOTAL').setFontWeight('bold');
-  reports.getRange('C51').setFormula('=$F$7')
+  // Row 51: Fixed Expenses (scheduled) — single row, computed via SUMPRODUCT.
+  // Q1a: one summary line, not per-merchant.
+  reports.getRange('A51').setValue('Fixed').setFontWeight('normal');
+  reports.getRange('B51').setValue('Fixed Expenses (scheduled)').setFontStyle('italic');
+  reports.getRange('C51').setFormula(buildFixedExpensesFormulaByRange_('$E$2', '$E$3'))
     .setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
     .setHorizontalAlignment('right');
-  reports.getRange('D51').setFormula('=$F$8')
+  reports.getRange('D51').setValue('—').setHorizontalAlignment('right').setFontColor('#5f6368');
+  reports.getRange('E51').setFormula(
+    '=IF($C$51=0,"",SPARKLINE($C$51/$F$7,{"charttype","bar";"color1","#5c6bc0";"max",1}))'
+  );
+  reports.getRange('F51').setFormula(
+    '=IF($F$7=0,"",TEXT($C$51/$F$7,"0.0%"))'
+  ).setHorizontalAlignment('right').setFontColor('#5f6368').setFontSize(9);
+
+  // Row 52: TOTAL row
+  reports.getRange('A52:B52').merge().setValue('TOTAL').setFontWeight('bold');
+  reports.getRange('C52').setFormula('=$F$7')
+    .setNumberFormat('$#,##0.00').setFontWeight('bold').setFontSize(11)
+    .setHorizontalAlignment('right');
+  reports.getRange('D52').setFormula('=$F$8')
     .setNumberFormat('0').setFontWeight('bold').setHorizontalAlignment('right');
-  reports.getRange('A51:F51').setBackground('#f1f3f4');
+  reports.getRange('A52:F52').setBackground('#f1f3f4');
 
   // ============================================================
   // ZONE 3: DRILL-DOWN (rows 54-88)
@@ -3705,11 +3732,12 @@ function applyReportsStructure_(reports, ss) {
     .setRanges([reports.getRange('C20:C49')])
     .build());
 
-  // Heat map on Fixed Expenses row (C50) — same gradient, anchored to F7.
+  // Heat map on Fixed Expenses row (C51 — was C50 pre-v11.24; shifted when
+  // Uncategorized row added at row 50). Same gradient, anchored to F7.
   rules.push(SpreadsheetApp.newConditionalFormatRule()
     .setGradientMinpointWithValue('#ffffff', SpreadsheetApp.InterpolationType.NUMBER, '0')
     .setGradientMaxpointWithValue('#5c6bc0', SpreadsheetApp.InterpolationType.NUMBER, '=$F$7')
-    .setRanges([reports.getRange('C50')])
+    .setRanges([reports.getRange('C51')])
     .build());
 
   reports.setConditionalFormatRules(rules);
@@ -4163,12 +4191,21 @@ function buildFixedExpensesFormula_(periodCellRef) {
   for (var m = 1; m <= 13; m++) {
     monthChecks.push('((DATE(' + BUDGET_YEAR + ',' + m + ',dd)>=s)*(DATE(' + BUDGET_YEAR + ',' + m + ',dd)<=e))');
   }
+  // v11.24: ddRaw can contain blank cells (named range covers C2:C50 but
+  // user typically fills only ~14 rows). DATE(year, month, "") returns
+  // #VALUE!, which propagates through SUMPRODUCT, caught by outer IFERROR
+  // → returns 0 silently. Bug was invisible for periods that don't contain
+  // a day-1 (correct $0 by accident); surfaced when the Reports tab tried
+  // to compute Fixed for a period that DOES contain day-1. Fix: coerce
+  // ddRaw to a safe number (1 for blanks). Per-row `valid` multiplier
+  // ensures blank rows still contribute 0 to the sum.
   return '=IFERROR(LET(' +
     's,INDEX(PayPeriods_Start,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
     'e,INDEX(PayPeriods_End,MATCH(' + periodCellRef + ',PayPeriods_Label,0)),' +
     'amt,FixedExpenses_Amount,' +
-    'dd,FixedExpenses_DueDay,' +
-    'valid,(amt<>"")*(dd<>""),' +
+    'ddRaw,FixedExpenses_DueDay,' +
+    'dd,IF(ddRaw="",1,IFERROR(ddRaw*1,1)),' +
+    'valid,(amt<>"")*(ddRaw<>""),' +
     'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
     '),0)';
 }
@@ -4180,6 +4217,10 @@ function buildFixedExpensesFormula_(periodCellRef) {
  * (could be This Month, YTD, Custom, etc.) — not necessarily a pay
  * period. Same SUMPRODUCT-over-12-months logic; just sources s and e
  * directly from the passed cells.
+ *
+ * v11.24: same blank-dd guard as buildFixedExpensesFormula_ (see comment
+ * there). Without this guard, the Reports tab "Fixed Expenses (scheduled)"
+ * row showed $0.00 even for periods that included a day-1.
  */
 function buildFixedExpensesFormulaByRange_(fromCellRef, toCellRef) {
   var monthChecks = [];
@@ -4190,8 +4231,9 @@ function buildFixedExpensesFormulaByRange_(fromCellRef, toCellRef) {
     's,' + fromCellRef + ',' +
     'e,' + toCellRef + ',' +
     'amt,FixedExpenses_Amount,' +
-    'dd,FixedExpenses_DueDay,' +
-    'valid,(amt<>"")*(dd<>""),' +
+    'ddRaw,FixedExpenses_DueDay,' +
+    'dd,IF(ddRaw="",1,IFERROR(ddRaw*1,1)),' +
+    'valid,(amt<>"")*(ddRaw<>""),' +
     'SUMPRODUCT(valid*amt*(' + monthChecks.join('+') + '))' +
     '),0)';
 }
