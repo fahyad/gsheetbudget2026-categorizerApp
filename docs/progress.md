@@ -2,7 +2,7 @@
 
 > ## 📍 Current State (read this first)
 >
-> **Apps Script:** v11.22 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.22 (Phase 31) refreshes the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
+> **Apps Script:** v11.23 — at `apps-script/Code.js`, deployed via `deploy "vNN — ..."` (one-word shortcut). NEVER use plain `clasp deploy` (creates a new URL, breaks PWA). v11.23 (Phase 32) adds the **Reports** tab: spending breakdown by category for any time frame (Today / This Week / Last 7 Days / This Month / Last Month / This Period / Last Period / YTD / Last Year / All Time / Custom) with drill-down to per-category transaction list. v11.22 (Phase 31) refreshed the in-sheet Instructions tab content — adds missing menu items (Archive Goal, Setup Email Trigger, Dedupe + Normalize), ClientMetrics tab, hourly auto-parse workflow, multi-select rail; no behavioral change. v11.21 (Phase 30) fixes two critical bugs discovered via Gmail-vs-sheet cross-reference: (1) duplicate parser-written rows from Gmail thread re-iteration (~$435 of phantom over-counted spending across 15 timestamp-duplicate groups) — fix is write-time timestamp dedup in `processInfoAlerts_` + widened `shortHash_` 4→8 hex chars; (2) last-day-of-period transactions silently lost to "Unassigned" period (~$165 stranded from Budget totals) — fix is parser normalizes Date to midnight + Period formula wraps in `INT()`. New `Dedupe + Normalize Transactions (rescue)` menu item for one-shot cleanup of existing data. v11.20 added the `bootstrap` action: returns categories + parseAndFetch in one call. v11.19 added the Rolled Over column. v11.18 added `Archive Goal...` / `Unarchive Goal...` menu items. v11.17 made `handleParseAndFetch_` read-only by default. v11.16 added Phase 1 of time-driven parsing. v11.15 made Budget B1 auto-snap. v11.14 added archive endpoints. v11.13 added `_elapsedMs` + `logClientMetrics` + `ClientMetrics` tab.
 >
 > **PWA:** v0.19.8 (cache v38) on `main` — Phase 29.2 uses the new `bootstrap` action (with transparent fallback to v0.15.4 dual fetch on any failure). v0.19.7 added preconnect hints to script.google.com + cache-first paint on Dashboard. Pixel UI is the canonical theme as of 2026-05-09 (graduated from `pwa/pixel-ui-redesign` via merge commit; that branch is preserved on remote as a snapshot but not active). Force-pixel via early `<head>` script. `.nojekyll` at repo root is required — don't delete.
 >
@@ -1853,3 +1853,46 @@ After Step 2, eyeball the Instructions tab to confirm new menu entries appear.
 
 ### Rollback
 Trivial — redeploy any prior version. No data side effects. Tab protection is warning-only, so user can also edit individual lines manually if a single entry is wrong.
+
+---
+
+## Session: 2026-05-17 (later) — Reports tab (Apps Script v11.23)
+
+### Setup
+User: "I want to start including reports in the google sheet. For now the information I want to know is how much spending is being done in each category (including savings and fixed) across a time frame (daily, weekly, per period, monthly, yearly etc). I also want the option to get a detailed look at each category (list of all transactions assigned). Thoroughly plan the best way to do this."
+
+### Process (planning-first per user direction)
+1. **Compared 4 approaches**: A (single formula-driven tab) vs B (Apps Script generation on menu) vs C (multi-tab per time-frame) vs D (formula summary + native Pivot Table). Recommended A for live updates + custom date range support + consistency with existing patterns.
+2. **User picked Option A** + answered design questions (Q1a/Q2a/Q3b + defaults for Q4-Q10).
+3. **HTML mockup built first** using real Apr 29 - May 12 data from user's sheet, rendered via Claude Preview, screenshotted, user confirmed "thats perfect" before any code changes.
+4. **Implementation**: ~450 LOC across 5 new functions in Code.js. Wired into buildWorkbook + updateWorkbook + Instructions tab. Single deploy + single Update Script run = ready.
+
+### What shipped (v11.23 — single deploy)
+- New `buildReportsTab_(reports, ss)` — tab setup (color #5c6bc0, widths, freeze rows 1-5, hide cols past F)
+- New `applyReportsStructure_(reports, ss)` — all formulas + formatting (~400 LOC)
+- New `buildReportsFromFormula_()` / `buildReportsToFormula_()` — date-range formula generators using IFS switch on Time-frame dropdown
+- New `buildFixedExpensesFormulaByRange_(fromCellRef, toCellRef)` — variant of `buildFixedExpensesFormula_` accepting raw From/To cell refs instead of a PayPeriods_Label
+- Wired `buildReportsTab_` into `buildWorkbook` (creates Reports tab on initial build) + `updateWorkbook` (rebuilds on Update Script)
+- Instructions tab TABS section updated to list Reports
+
+### Status — awaiting deploy + Update Script run on user's laptop
+Same pattern as prior phases:
+1. `./apps-script/deploy.sh "v11.23 — reports tab"` (deploys Apps Script)
+2. Sheet → `Budget Tools → 3. Update Script (safe)` (creates / refreshes Reports tab)
+3. Open the new Reports tab → defaults to "This Period" → verify formulas render correctly.
+
+### Verification post-deploy
+Open the Reports tab. Should show:
+- Indigo tab accent (#5c6bc0)
+- B2 dropdown defaults to "This Period"; From/To populate to current period dates
+- Income section with paycheck row (green)
+- Spending section sorted desc by Spent; zero-spend categories filtered out
+- Fixed Expenses row showing ~$2,334 (sum of all 14 fixed monthly entries due in range)
+- TOTAL row at row 51 = Total spent from F7
+- Drill-down: pick "Groceries" → should show 9 transactions with $200.47 total
+
+### HTML mockup workflow (new pattern for future feature work)
+For visually-significant features, mockup-then-build worked well: built `reports-mockup.html` with real data, rendered via `mcp__Claude_Preview__*` tools + Python http.server, screenshotted via `preview_screenshot`, user confirmed before any Apps Script changes. Temp files (`reports-mockup.html` at project root, `.claude/launch.json` preview-server config) cleaned up at commit time.
+
+### Rollback
+Apps Script: redeploy v11.22. Reports tab will stop being rebuilt by Update Script; can be deleted manually if user wants it gone entirely. No data side effects elsewhere — the Reports tab is purely a READ view over Transactions/Setup/Fixed Monthly Expenses.
